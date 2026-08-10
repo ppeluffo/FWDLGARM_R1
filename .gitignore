@@ -1,0 +1,10 @@
+# Build de CubeIDE
+/Debug/
+/Release/
+
+# Workspace de Eclipse (si el workspace apunta acá)
+/.metadata/
+*.launch
+
+# Backups de CubeMX
+*.ioc.bak
