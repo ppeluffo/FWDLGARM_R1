@@ -88,10 +88,17 @@ aparecieron al crecer el binario. El riel estaba en **~3,45-3,59 V**, contra un 
 > alimentación. Se investigaron y descartaron antes: frecuencia SWD, option bytes, firmware del
 > ST-LINK y cableado. Ninguno era.
 
-**2. El micro no arranca solo después de programar: hay que hacer ciclo de alimentación.** Con este
-dongle no lo logran ni `-rst`, ni `-g`, ni `-hardRst` (se verificó que el reset por pin ocurre de
-verdad: deja `PINRSTF` en `RCC_CSR`). **Es el comportamiento normal y esperado, no un síntoma.** En
-las placas NUCLEO no pasa porque el ST-LINK V2-1 embebido maneja la secuencia por su cuenta.
+**2. Programando desde la GUI, el firmware arranca solo — no hace falta ciclo de alimentación.**
+Verificado el 2026-08-10 tras el download desde las herramientas de ST.
+
+> Hubo un tramo en que **sí** hacía falta cortar y reponer la alimentación, y costó entender por qué.
+> No era una característica del dongle: era **el estado en que lo dejaban las herramientas de línea
+> de comandos**, sobre todo OpenOCD (punto 3). Una vez destrabada la línea de NRST con un `-hardRst`
+> de CubeProgrammer, el arranque automático volvió a funcionar.
+>
+> Si el síntoma reaparece —se programa OK pero el micro no arranca, o el LED queda fijo— **la causa
+> es NRST trabado, no el firmware.** Se destraba con
+> `STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -hardRst`, o desenchufando el ST-LINK del **USB**.
 
 **3. 🚫 NO usar OpenOCD con este dongle.** Al hacer `shutdown` deja **NRST asertado**, y como el
 ST-LINK sigue alimentado por USB mantiene el micro en reset: la placa no arranca **ni cortándole la
@@ -234,8 +241,8 @@ build — pero:
 
 **Flashea Pablo, no Claude**, desde la GUI de **STM32CubeIDE** o de **STM32CubeProgrammer**. No
 lanzar comandos de programación por cuenta propia; si hace falta un binario nuevo, compilarlo y
-avisar. Después del download Pablo hace el **ciclo de alimentación** para que arranque (ver arriba
-por qué es necesario y esperado).
+avisar. Con ese flujo **el firmware arranca solo al terminar el download**, sin ciclo de
+alimentación.
 
 El archivo a cargar en CubeProgrammer es el **`.elf`** (`Debug/FWDLGARM_R1.elf`): lleva las
 direcciones adentro, así que no hay que tipear `0x08000000` como sí haría falta con un `.bin`. El
