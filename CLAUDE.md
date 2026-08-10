@@ -43,30 +43,43 @@ Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED y 
 mapa de pines de `interfases_pines.csv` es el diseño completo de R001, no hardware presente — no
 tiene sentido escribir drivers contra periféricos que todavía no están montados.
 
-**El proyecto se borró y se rehízo de cero el 2026-08-10.** Hubo un primer intento que llegó a tener
-FreeRTOS andando con un task de LED, pero se descartó entero para arrancar limpio, sin respaldo ni
-repo (ver control de versiones). Lo que hay hoy es un **esqueleto CubeMX mínimo, sin RTOS**, y es un
-punto conocido-bueno validado en banco: el LED parpadea.
+El proyecto **se borró y se rehízo de cero el 2026-08-10** (ver control de versiones), y desde
+entonces avanzó en tres etapas, todas validadas en banco y etiquetadas en git:
+
+| Tag | Estado |
+|---|---|
+| `v0.0.1` | Clock MSI a 60 MHz, LED parpadeando |
+| `v0.0.2` | FreeRTOS con API nativa, tarea `tkCtl` |
+| `v0.0.3` | **Cristal externo: LSE + RTC**, `Error_Handler()` con destellos |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
-  `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. **Sin ninguna dependencia del
-  cristal.** Confirmado desde el silicio: `RCC_CSR` leído por SWD da `MSISRANGE = 0b0110`.
-- **Sin FreeRTOS, sin periféricos, sin BSP.** El `.ioc` declara sólo **NVIC, RCC y SYS**, y dos
-  pines: `PB9 = LED` y `PA2 = LED2`, ambos `GPIO_Output`.
-- El lazo de `main()` togglea **sólo PB9** con `HAL_Delay(1000)` → 0,5 Hz. **La línea de PA2 está
-  comentada**, así que LED2 se configura pero no se usa.
-- `LED_PORT`/`LED_PIN`/`LED2_PORT`/`LED2_PIN` están definidos a mano en `USER CODE BEGIN PD`,
-  en paralelo a los `LED_GPIO_Port`/`LED_Pin` que genera CubeMX en `main.h`. Conviven sin
-  conflicto: el `MX_GPIO_Init()` generado usa los de CubeMX y el lazo usa los propios.
-- `Error_Handler()` es **el genérico de CubeMX** (`__disable_irq()` + `while(1)` mudo). El patrón de
-  destellos de diagnóstico que existía en el proyecto anterior **se perdió al borrarlo** y no está
-  reimplementado.
-- **El LSE está deshabilitado** (PC14/PC15 libres): `SystemClock_Config()` enciende únicamente MSI.
-  **Es deliberado** — se avanza con el clock interno y el cristal se aborda más adelante. Ojo con la
-  trampa: el `.ioc` trae `RCC.RTCClockSelection=RCC_RTCCLKSOURCE_LSE`, `RCC.RTCFreq_Value=32768` y
-  hasta `RCC.LSE_VALUE=32768`, pero el RTC **no** está en `Mcu.IPx`, así que son valores residuales
-  del árbol de clocks y **no** se genera código de LSE (ver más abajo).
-- **Binario actual:** `text 6308 · data 12 · bss 1572` (`arm-none-eabi-size Debug/FWDLGARM_R1.elf`).
+  `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
+  el cristal alimenta al RTC, no al reloj de sistema.
+- **LSE andando** (`v0.0.3`): `RCC_OSCILLATORTYPE_LSE|RCC_OSCILLATORTYPE_MSI` con
+  `LSEState = RCC_LSE_ON`, y el RTC activado como consumidor (`Mcu.IP3=RTC`,
+  `RTCClockSelection = RCC_RTCCLKSOURCE_LSE` en `HAL_RTC_MspInit()`). Ver más abajo por qué activar
+  el RTC era la pieza que faltaba.
+- **`__HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW)`** — el drive más bajo, o sea el de menor consumo,
+  acorde al criterio del equipo. **Pero es también el de menor margen de arranque**: anda en banco a
+  temperatura ambiente con este cristal. **Falta verificarlo en frío** antes de darlo por bueno en
+  campo; si falla, subir un escalón cuesta algunos µA.
+- **FreeRTOS** con port `GCC/ARM_CM4F`, heap_4, timebase de la HAL en TIM6, interface CMSIS-RTOS v2.
+  **La aplicación se escribe con la API nativa** (`xTaskCreateStatic`, `vTaskDelay`), no con el
+  wrapper: ver la sección del roadmap.
+- **Tareas:** `tkCtl` (`Core/Src/FWDLGARM_R1_tkCtl.c`), prioridad `tskIDLE_PRIORITY+1`, stack de 384
+  palabras, memoria **estática** (no toca el heap). Destella el LED cada 5 s. `defaultTask` existe
+  sólo porque CubeMX no deja vaciar la lista de tareas, y se elimina con `vTaskDelete(NULL)` apenas
+  arranca el scheduler.
+- `Error_Handler()` tiene **patrón de destellos de diagnóstico** en el LED: **2 = no arrancó un
+  oscilador de baja velocidad** (con el cristal: cristal, condensadores o drive muy bajo),
+  **5 = cualquier otra falla**. Es el único canal de diagnóstico hasta que exista la consola TERM.
+  Detalles de implementación más abajo.
+- `LED_PORT`/`LED_PIN`/`LED2_*` están en `main.h` (bloque *Private defines*) como **alias** de los
+  símbolos que genera CubeMX, para que los vean todos los `.c` sin duplicar la definición del pin.
+- **Pendiente de hardware:** los condensadores de carga son de **10 pF**, que corresponden a un
+  cristal de `CL` ≈ 7-9 pF. Si el montado es de los comunes de **12,5 pF**, el RTC va a correr
+  rápido —del orden de +50 a +100 ppm, unos **9 s/día**— lo cual importa en un datalogger que estampa
+  la hora. Verificar el `CL` contra el BOM; si corresponde, cambiarlos por 18-22 pF.
 
 ### ⚠ El programador: lo que hay que saber antes de tocar nada
 
@@ -106,60 +119,72 @@ alimentación**, y el LED queda fijo. Es un pozo que cuesta mucho reconocer, por
 roto o placa quemada. Para destrabarlo: un `-hardRst` de CubeProgrammer, o **desenchufar el ST-LINK
 del USB** (desconectar sólo el cable a la placa no alcanza).
 
-### El LSE y CubeMX: asignar los pines NO alcanza
+### ✅ El LSE y CubeMX: asignar los pines NO alcanza (resuelto en `v0.0.3`)
 
-Trampa ya verificada en este proyecto. Asignar PC14/PC15 a `LSE-External-Oscillator` en la pestaña
-Pinout es **necesario pero no suficiente**: CubeMX genera el encendido del LSE sólo si **algún
-periférico lo consume** en la pestaña *Clock Configuration*. Un oscilador sin destino se considera
-no usado y no se emite código para él.
+**La trampa costó una vuelta entera en este proyecto, así que conviene leerla antes de configurar
+cualquier otro periférico que cuelgue del LSE** (LPTIM1 para el tick, por ejemplo).
 
-Evidencia en el prototipo `FWDLGZ`, que tenía LPTIM1 activado y PC14/PC15 asignados:
+Asignar PC14/PC15 como `OSC32_IN`/`OSC32_OUT` y poner el *RTC/LCD Source Mux* en LSE es **necesario
+pero no suficiente**. CubeMX genera el encendido del LSE sólo si **algún periférico lo consume de
+verdad**, y "de verdad" significa que el periférico esté **activado**, o sea que figure en `Mcu.IPx`.
+Un oscilador sin destino se considera no usado y no se emite una sola línea para él.
 
-- `RCC.LPTIM1Freq_Value=80000000` y `Lptim1ClockSelection = RCC_LPTIM1CLKSOURCE_PCLK` — el mux de
-  LPTIM1 quedó en PCLK, no en LSE.
-- `SystemClock_Config()` enciende `LSI|MSI` (el LSI por el IWDG), pero **no** el LSE.
+Lo que se vio acá, exactamente: con los pines asignados, `RCC.RTCClockSelection=RCC_RTCCLKSOURCE_LSE`
+y `RCC.RTCFreq_Value=32768` en el `.ioc`, pero el RTC **sin activar**, `SystemClock_Config()` seguía
+trayendo únicamente `RCC_OSCILLATORTYPE_MSI`. Mismo síntoma en el prototipo `FWDLGZ`, que tenía
+LPTIM1 asignado pero con el mux en PCLK: el LSE nunca se encendía.
 
-**Cómo verificar que quedó bien** (no fiarse de `LSE_VALUE` en `RCC.IPParameters`: sólo aparece si
-se cambia el valor por defecto, así que su ausencia no prueba nada):
+**La pieza que faltaba:** *Pinout & Configuration → Timers → **RTC** → "Activate Clock Source"*.
+Con eso el RTC entra en `Mcu.IPx` y la cadena se completa sola.
 
-- En el `.ioc`: el consumidor tiene que estar **realmente habilitado**, o sea figurar en la lista
-  `Mcu.IPx` / `Mcu.IPNb`. **No alcanza con que su `<Perif>Freq_Value` valga 32768**: el `.ioc` de
-  `FWDLGARM_R1` es la prueba — tiene `RCC.RTCFreq_Value=32768` y
-  `RCC.RTCClockSelection=RCC_RTCCLKSOURCE_LSE`, pero el RTC no está entre los IP (`Mcu.IP0..2` =
-  NVIC/RCC/SYS) y **no se genera una sola línea de LSE**. Esos campos son el estado del árbol de
-  clocks, no evidencia de que haya un consumidor.
-- En `SystemClock_Config()`: tiene que aparecer `RCC_OSCILLATORTYPE_LSE` y `LSEState = RCC_LSE_ON`.
-  **Éste es el chequeo que vale** — los dos anteriores pueden mentir, éste no.
+**Cómo verificar que quedó bien** (no fiarse de `LSE_VALUE` en `RCC.IPParameters`: sólo aparece si se
+cambia el valor por defecto, así que su ausencia no prueba nada):
+
+- **El chequeo que vale**: que en `SystemClock_Config()` aparezcan `RCC_OSCILLATORTYPE_LSE` y
+  `LSEState = RCC_LSE_ON`. Los campos del `.ioc` pueden mentir; el `.c` generado no.
+- En el `.ioc`: el consumidor tiene que figurar en `Mcu.IPx` / `Mcu.IPNb`. **No alcanza con que su
+  `<Perif>Freq_Value` valga 32768** — eso es el estado del árbol de clocks, no evidencia de que haya
+  un consumidor activado.
 - En el MspInit del periférico: el mux en LSE (`RCC_RTCCLKSOURCE_LSE`, `RCC_LPTIM1CLKSOURCE_LSE`).
-- Por eso `port_lptim_tick.c` termina haciendo a mano `HAL_PWR_EnableBkUpAccess()` +
-  `__HAL_RCC_LSE_CONFIG(RCC_LSE_ON)` + `__HAL_RCC_LPTIM1_CONFIG(...LSE)`. **Es un parche sobre una
-  configuración incompleta, no el camino recomendado.**
 
-Configuración correcta en CubeMX:
+Estado que quedó tras hacerlo bien, como referencia:
 
-1. **RCC → Mode → Low Speed Clock (LSE): `Crystal/Ceramic Resonator`** (esto asigna PC14/PC15).
-2. **Clock Configuration → rutear el LSE a un consumidor**: activar LPTIM1 y poner su mux en **LSE**,
-   o activar el RTC con *Clock Source = LSE*. Ambos son internos al micro → validables con la placa
-   actual.
-3. **RCC → Parameter Settings → LSE Drive Capability**: elegirlo a propósito (consumo vs. margen de
-   arranque), no dejar el default.
+```
+.ioc                  Mcu.IP3=RTC
+SystemClock_Config()  RCC_OSCILLATORTYPE_LSE|RCC_OSCILLATORTYPE_MSI, LSEState = RCC_LSE_ON
+                      __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW)
+HAL_RTC_MspInit()     RTCClockSelection = RCC_RTCCLKSOURCE_LSE
+```
 
-Regenerando, `SystemClock_Config()` incorpora `RCC_OSCILLATORTYPE_LSE` con `LSEState = RCC_LSE_ON`.
+Por esta misma trampa `port_lptim_tick.c` del prototipo `FWDLGZ` termina haciendo a mano
+`HAL_PWR_EnableBkUpAccess()` + `__HAL_RCC_LSE_CONFIG(RCC_LSE_ON)` + `__HAL_RCC_LPTIM1_CONFIG(...LSE)`.
+**Es un parche sobre una configuración incompleta, no el camino recomendado**: activando el
+periférico en CubeMX no hace falta nada de eso.
+
+Y no olvidar **RCC → Parameter Settings → LSE Drive Capability**: elegirlo a propósito (consumo vs.
+margen de arranque), no dejar el default. Acá quedó en `LOW` — ver la advertencia del estado actual.
 
 ### Notas de bring-up del LSE
 
-El cristal de 32.768 kHz es la base de todo el bajo consumo (tick por LPTIM1 en modo Stop, RTC, RTC
-de calendario), así que conviene validarlo temprano:
+El cristal de 32.768 kHz es la base de todo el bajo consumo (tick por LPTIM1 en modo Stop, RTC,
+calendario). **Ya está validado** (`v0.0.3`), pero estas notas siguen valiendo para diagnosticar si
+alguna vez deja de arrancar:
 
+- **Hardware montado:** cristal de 32.768 kHz entre los pines 3 y 4 del LQFP64 —`PC14-OSC32_IN` y
+  `PC15-OSC32_OUT`— con un condensador de **10 pF a GND en cada pin**.
+- **Si el LSE no arranca, el síntoma son 2 destellos** en el LED (`Error_Handler()`), no un cuelgue
+  mudo. Sospechar, en orden: el cristal, los condensadores de carga, y el `LSE Drive Capability`
+  —que está en `LOW`, el de menor margen.
 - **Dominio de backup:** el LSE vive detrás del bit `DBP` de `PWR->CR1`. Si se usa
   `HAL_RCC_OscConfig()` (la vía que genera CubeMX), la HAL lo destraba sola. Sólo hace falta
   `HAL_PWR_EnableBkUpAccess()` explícito si se toca el LSE **por registros**, como hace
   `port_lptim_tick.c`.
-- El arranque de un cristal de 32 kHz es lento (cientos de ms). La espera de `LSERDY` necesita
-  timeout: si el firmware queda colgado en ese `while`, sospechar del cristal o de los condensadores
-  antes que del código.
-- Los condensadores de carga tienen que corresponder al `CL` del cristal montado — verificar contra
-  el esquemático de `Hardware/R001/`.
+- El arranque de un cristal de 32 kHz es lento (cientos de ms). La HAL espera `LSERDY` con timeout,
+  así que una falla cae en `Error_Handler()` en lugar de colgarse.
+- **La carga tiene que corresponder al `CL` del cristal:** `CL_efectiva = (C1·C2)/(C1+C2) + C_parásita`.
+  Con 10 pF y 10 pF da ≈ **8 pF**, correcto para un cristal de `CL` 7-9 pF pero **demasiado poco para
+  uno de 12,5 pF**, que es el valor más común. Cargar de menos hace oscilar **rápido**. Ver el
+  pendiente de hardware en el estado actual.
 - Para medirlo sin cargar el cristal con una punta: sacarlo por **MCO** o por **LSCO**, no pinchando
   PC14/PC15.
 
@@ -182,18 +207,22 @@ Consecuencias para el trabajo diario:
   temprano: una vez que hay `printf` y comandos, todo lo que venga después se depura interactivamente
   en lugar de a ciegas con el LED y el debugger.
 
-Orden a seguir, con el LSE postergado a propósito para no frenar el avance:
+Orden seguido, con cada etapa validada en banco y etiquetada en git:
 
-1. ✅ **Clock + LED, bare-metal** — MSI → PLL → 60 MHz, LED en PB9. **Es el estado actual.**
-2. ⏳ **FreeRTOS desde CubeMX**. Ya se hizo una vez y funcionó, así que las trampas están conocidas
-   (ver abajo); se perdió al rehacer el proyecto y hay que volver a hacerlo.
-3. **TERM / USART1** — consola y `printf`; a partir de acá el resto se depura con herramientas.
-4. I2C (RTC, monitor de corriente) → RS485/Modbus → microSD/SPI → entradas analógicas → modem LTE.
-5. **LSE + tick por LPTIM1** — recién acá se cambia el tick del kernel al LPTIM1 alimentado por el
-   cristal (`port_lptim_tick.c` de `FWDLGZ` como referencia). Es lo que habilita el modo Stop.
-6. **Bajo consumo** al final: modos Stop y tickless, ya con todo funcionando y medible.
-
-Los pasos 5 y 6 son los que justifican el cristal; hasta entonces el clock interno alcanza.
+1. ✅ **Clock + LED, bare-metal** (`v0.0.1`) — MSI → PLL → 60 MHz, LED en PB9.
+2. ✅ **FreeRTOS desde CubeMX** (`v0.0.2`) — API nativa en la aplicación, tick del kernel en el
+   SysTick y timebase de la HAL en TIM6. Trampas resueltas más abajo.
+3. ✅ **LSE + RTC** (`v0.0.3`) — el cristal arranca y alimenta al RTC. Se adelantó respecto del plan
+   original, que lo tenía para el final: el `Error_Handler()` con destellos se repuso antes, para no
+   quedar a ciegas si el cristal no arrancaba.
+4. ⏳ **TERM / USART1** — consola y `printf`. **Es el próximo paso**, y el que más cambia el modo de
+   trabajo: a partir de acá se depura interactivamente en vez de contar destellos.
+5. I2C (RTC externo, monitor de corriente) → RS485/Modbus → microSD/SPI → entradas analógicas →
+   modem LTE.
+6. **Tick por LPTIM1** — cambiar el tick del kernel del SysTick al LPTIM1 alimentado por el LSE, que
+   sigue vivo en modo Stop (`port_lptim_tick.c` de `FWDLGZ` como referencia). El LSE, que era el
+   requisito, ya está resuelto.
+7. **Bajo consumo** al final: modos Stop y tickless, ya con todo funcionando y medible.
 
 #### FreeRTOS desde CubeMX: lo que ya se aprendió (paso 2)
 
