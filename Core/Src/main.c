@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -31,11 +32,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define LED_PORT              GPIOB
-#define LED_PIN               GPIO_PIN_9
-
-#define LED2_PORT              GPIOA
-#define LED2_PIN               GPIO_PIN_2
+/* LED_PORT / LED_PIN / LED2_* están en main.h, para que los vean los demás .c. */
 
 /* USER CODE END PD */
 
@@ -45,14 +42,28 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
+/* Definiciones reales de lo declarado como extern en main.h.
+   Memoria estática de tkCtl: el stack y el TCB los provee la aplicación, así que
+   xTaskCreateStatic() no toca el heap. */
+TaskHandle_t xHandle_tkCtl;
+StaticTask_t tkCtl_Buffer_Ptr;
+StackType_t  tkCtl_Buffer[ tkCtl_STACK_SIZE ];
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+void StartDefaultTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -95,14 +106,60 @@ int main(void)
 
   /* USER CODE END 2 */
 
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* Tareas propias, con la API nativa de FreeRTOS (no el wrapper CMSIS). */
+  xHandle_tkCtl = xTaskCreateStatic( tkCtl,                /* función de la tarea      */
+                                     "CTL",                /* nombre para depurar      */
+                                     tkCtl_STACK_SIZE,     /* stack en PALABRAS, no bytes */
+                                     NULL,                 /* pvParameters             */
+                                     tkCtl_TASK_PRIORITY,
+                                     tkCtl_Buffer,         /* stack provisto por la app */
+                                     &tkCtl_Buffer_Ptr );  /* TCB provisto por la app   */
+
+  if ( xHandle_tkCtl == NULL )
+  {
+    Error_Handler();
+  }
+
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
     /* USER CODE END WHILE */
-	  HAL_GPIO_TogglePin( LED_PORT, LED_PIN );
-	  //HAL_GPIO_TogglePin( LED2_PORT, LED2_PIN );
-	  HAL_Delay( 1000 );
 
     /* USER CODE BEGIN 3 */
   }
@@ -203,6 +260,57 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  ( void ) argument;
+
+  /*
+   * CubeMX no permite dejar la lista de tareas vacía, así que defaultTask existe
+   * por obligación de la herramienta, no porque haga falta. En vez de dejarla
+   * girando —se despertaba cada 1 ms en prioridad 24, muy por encima de tkCtl—
+   * se elimina a sí misma apenas arranca el scheduler.
+   *
+   * Se creó con asignación dinámica, así que la idle task devuelve su stack y su
+   * TCB al heap. vTaskDelete(NULL) no retorna.
+   */
+  vTaskDelete( NULL );
+
+  for( ;; )
+  {
+  }
+  /* USER CODE END 5 */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

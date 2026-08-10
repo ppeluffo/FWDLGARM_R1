@@ -31,6 +31,10 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+/* API nativa de FreeRTOS. Tienen que ir ANTES de cualquier uso de TickType_t,
+   StaticTask_t, TaskHandle_t o tskIDLE_PRIORITY. */
+#include "FreeRTOS.h"
+#include "task.h"
 
 /* USER CODE END Includes */
 
@@ -41,6 +45,16 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
+#define tkCtl_TASK_PRIORITY     ( tskIDLE_PRIORITY + 1 )
+#define tkCtl_STACK_SIZE        384
+
+/* OJO: acá van DECLARACIONES (extern), no definiciones. Este header lo incluyen
+   varios .c; si se define la variable acá, cada unidad de compilación crea la
+   suya y el linker corta por "multiple definition" (gcc >= 10 usa -fno-common).
+   Las definiciones reales están en main.c, en el bloque USER CODE PV. */
+extern TaskHandle_t xHandle_tkCtl;
+extern StaticTask_t tkCtl_Buffer_Ptr;
+extern StackType_t  tkCtl_Buffer[ tkCtl_STACK_SIZE ];
 
 /* USER CODE END EC */
 
@@ -53,6 +67,7 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
+void tkCtl(void *pvParameters);
 
 /* USER CODE END EFP */
 
@@ -63,6 +78,13 @@ void Error_Handler(void);
 #define LED_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
+/* Alias propios del LED. Viven acá y no en main.c para que los vean también los
+   otros .c de la aplicación (p. ej. FWDLGARM_R1_tkCtl.c). */
+#define LED_PORT               LED_GPIO_Port
+#define LED_PIN                LED_Pin
+
+#define LED2_PORT              LED2_GPIO_Port
+#define LED2_PIN               LED2_Pin
 
 /* USER CODE END Private defines */
 
