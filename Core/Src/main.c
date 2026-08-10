@@ -34,6 +34,14 @@
 /* USER CODE BEGIN PD */
 /* LED_PORT / LED_PIN / LED2_* están en main.h, para que los vean los demás .c. */
 
+/* Patrones de Error_Handler: cantidad de destellos cortos antes de la pausa larga. */
+#define ERR_BLINKS_RELOJ      2U   /* un oscilador de baja velocidad no arrancó */
+#define ERR_BLINKS_GENERIC    5U   /* cualquier otra falla                      */
+
+#define ERR_BLINK_ON_MS       120U
+#define ERR_BLINK_OFF_MS      200U
+#define ERR_PAUSE_MS         1200U
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -42,6 +50,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+RTC_HandleTypeDef hrtc;
+
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
@@ -62,6 +72,7 @@ StackType_t  tkCtl_Buffer[ tkCtl_STACK_SIZE ];
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_RTC_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
@@ -70,6 +81,58 @@ void StartDefaultTask(void *argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/*
+ * Configura el pin del LED como salida.
+ *
+ * Error_Handler() puede dispararse desde SystemClock_Config(), es decir ANTES de
+ * MX_GPIO_Init(): si no configuramos el pin acá, el patrón no se ve. Es idempotente,
+ * no molesta volver a llamarlo.
+ */
+static void led_config( void )
+{
+    GPIO_InitTypeDef gpio = { 0 };
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    gpio.Pin   = LED_PIN;
+    gpio.Mode  = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull  = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init( LED_PORT, &gpio );
+}
+
+/*
+ * Demora por sondeo, para usar con las interrupciones cortadas.
+ *
+ * Acá NO sirve HAL_Delay(): desde que el timebase de la HAL está en TIM6, uwTick lo
+ * incrementa la ISR de TIM6, y con __disable_irq() esa ISR no corre. HAL_Delay() se
+ * colgaría para siempre.
+ *
+ * Se usa el COUNTFLAG del SysTick, que sigue contando aunque su IRQ esté enmascarada.
+ * Ojo con el matiz introducido por FreeRTOS: el SysTick ya no lo configura la HAL sino
+ * el kernel, al arrancar el scheduler, a configTICK_RATE_HZ (1 kHz) -> cada COUNTFLAG
+ * es 1 ms. Si Error_Handler() se dispara ANTES de vTaskStartScheduler(), el SysTick
+ * está apagado y se cae al lazo tosco: impreciso, pero nunca se cuelga.
+ */
+static void error_delay_ms( uint32_t ms )
+{
+    if( ( SysTick->CTRL & SysTick_CTRL_ENABLE_Msk ) != 0U )
+    {
+        while( ms-- )
+        {
+            while( ( SysTick->CTRL & SysTick_CTRL_COUNTFLAG_Msk ) == 0U )
+            {
+            }
+        }
+    }
+    else
+    {
+        volatile uint32_t vueltas = ms * ( SystemCoreClock / 8000U );
+        while( vueltas-- )
+        {
+        }
+    }
+}
 
 /* USER CODE END 0 */
 
@@ -102,6 +165,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_RTC_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -182,10 +246,16 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
+  /** Configure LSE Drive Capability
+  */
+  HAL_PWR_EnableBkUpAccess();
+  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW);
+
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSE|RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = 0;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
@@ -217,6 +287,70 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  RTC_TimeTypeDef sTime = {0};
+  RTC_DateTypeDef sDate = {0};
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutRemap = RTC_OUTPUT_REMAP_NONE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* USER CODE BEGIN Check_RTC_BKUP */
+
+  /* USER CODE END Check_RTC_BKUP */
+
+  /** Initialize RTC and set the Time and Date
+  */
+  sTime.Hours = 0x0;
+  sTime.Minutes = 0x0;
+  sTime.Seconds = 0x0;
+  sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+  sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sDate.WeekDay = RTC_WEEKDAY_MONDAY;
+  sDate.Month = RTC_MONTH_JANUARY;
+  sDate.Date = 0x1;
+  sDate.Year = 0x0;
+
+  if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -229,6 +363,7 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
@@ -319,10 +454,52 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+  /*
+   * Con la placa pelada y sin consola, el LED es el único canal de diagnóstico: en vez
+   * de colgarse mudo, parpadea un patrón que dice QUÉ falló.
+   *
+   *   2 destellos + pausa -> un oscilador de baja velocidad no arrancó. Con el cristal
+   *                          de 32.768 kHz: sospechar del cristal, de los condensadores
+   *                          de carga o de un LSE Drive Capability demasiado bajo.
+   *   5 destellos + pausa -> cualquier otra falla (regulador, PLL, init de un periférico).
+   *
+   * Se detecta el caso "pedido pero no arrancó": LSEON en 1 con LSERDY en 0. Esto es más
+   * confiable que mirar qué fuente tiene seleccionada el RTC, porque cuando el LSE no
+   * arranca, HAL_RCC_OscConfig() cae acá por timeout ANTES de que nadie haya seleccionado
+   * el mux del RTC — mirando RTCSEL, una falla de cristal se reportaría como genérica.
+   *
+   * Los flags se leen ANTES de cortar las interrupciones, y el pin se reconfigura acá
+   * porque Error_Handler() puede dispararse desde SystemClock_Config(), antes de
+   * MX_GPIO_Init().
+   */
+  uint32_t reloj_caido = 0U;
+
+  if( ( ( RCC->BDCR & RCC_BDCR_LSEON ) != 0U ) &&
+      ( ( RCC->BDCR & RCC_BDCR_LSERDY ) == 0U ) )
+  {
+    reloj_caido = 1U;                                  /* se pidió el LSE y no arrancó */
+  }
+  else if( ( ( RCC->CSR & RCC_CSR_LSION ) != 0U ) &&
+           ( ( RCC->CSR & RCC_CSR_LSIRDY ) == 0U ) )
+  {
+    reloj_caido = 1U;                                  /* idem con el LSI */
+  }
+
+  uint32_t destellos = reloj_caido ? ERR_BLINKS_RELOJ : ERR_BLINKS_GENERIC;
+
   __disable_irq();
+  led_config();
+
   while (1)
   {
+    for( uint32_t i = 0U; i < destellos; i++ )
+    {
+      HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_SET );
+      error_delay_ms( ERR_BLINK_ON_MS );
+      HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_RESET );
+      error_delay_ms( ERR_BLINK_OFF_MS );
+    }
+    error_delay_ms( ERR_PAUSE_MS );
   }
   /* USER CODE END Error_Handler_Debug */
 }

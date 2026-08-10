@@ -10,7 +10,7 @@
 
 #include "main.h"
 
-#define TKCTL_PERIOD_MS      1000U   /* período del lazo                */
+#define TKCTL_PERIOD_MS      5000U   /* período del lazo                */
 #define TKCTL_ARRANQUE_MS     500U   /* espera inicial antes del lazo   */
 #define TKCTL_LED_ON_MS       100U   /* duración del destello           */
 
