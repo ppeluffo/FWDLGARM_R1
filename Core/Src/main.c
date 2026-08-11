@@ -22,6 +22,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <string.h>
+
 #include "tkCtl.h"
 #include "tkCmd.h"
 /* USER CODE END Includes */
@@ -104,6 +106,30 @@ static void led_config( void )
 }
 
 /*
+ * ⚠ TEMPORAL - migas de pan del arranque (2026-08-11).
+ *
+ * Se cuelga al segundo "reset" por consola, con el LED fijo y sin llegar a la
+ * tarea. Como el cuelgue puede estar en MX_RTC_Init() o MX_LPTIM1_Init() —lo que
+ * toca el dominio de backup, que es justamente lo que SOBREVIVE a un reset por
+ * software— hay que poder emitir antes de que corran.
+ *
+ * Por eso la USART se adelanta a USER CODE BEGIN SysInit y las migas van dentro
+ * de los bloques USER CODE de cada MX_*_Init(), que son los únicos puntos entre
+ * inicializaciones que sobreviven una regeneración de CubeMX.
+ *
+ * Nada de esto usa FreeRTOS ni FRTOS-IO: es HAL por poleo, que es lo único que
+ * anda antes del scheduler.
+ *
+ * PARA SACARLO: borrar bc(), la llamada adelantada a MX_USART1_UART_Init() y las
+ * seis llamadas a bc() repartidas por el archivo.
+ */
+static void bc( const char *pcTexto )
+{
+    ( void ) HAL_UART_Transmit( &huart1, ( uint8_t * ) pcTexto,
+                                ( uint16_t ) strlen( pcTexto ), 500U );
+}
+
+/*
  * Demora por sondeo, para usar con las interrupciones cortadas.
  *
  * Acá NO sirve HAL_Delay(): desde que el timebase de la HAL está en TIM6, uwTick lo
@@ -162,7 +188,10 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* TEMPORAL: ver el comentario de bc(). La USART se adelanta para poder emitir
+     antes de los MX_ inits; volver a inicializarla más abajo no molesta. */
+  MX_USART1_UART_Init();
+  bc( "\r\n\r\n[1] clock OK\r\n" );
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -171,6 +200,7 @@ int main(void)
   MX_LPTIM1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  bc( "[6] perifericos OK\r\n" );
 
   /* USER CODE END 2 */
 
@@ -228,6 +258,7 @@ int main(void)
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
+  bc( "[7] arranca el scheduler\r\n" );
   /* add events, ... */
   /* USER CODE END RTOS_EVENTS */
 
@@ -316,6 +347,7 @@ static void MX_LPTIM1_Init(void)
   /* USER CODE END LPTIM1_Init 0 */
 
   /* USER CODE BEGIN LPTIM1_Init 1 */
+  bc( "[4] entrando a LPTIM1\r\n" );
 
   /* USER CODE END LPTIM1_Init 1 */
   hlptim1.Instance = LPTIM1;
@@ -332,6 +364,7 @@ static void MX_LPTIM1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN LPTIM1_Init 2 */
+  bc( "[5] LPTIM1 OK\r\n" );
 
   /* USER CODE END LPTIM1_Init 2 */
 
@@ -353,6 +386,7 @@ static void MX_RTC_Init(void)
   RTC_DateTypeDef sDate = {0};
 
   /* USER CODE BEGIN RTC_Init 1 */
+  bc( "[2] entrando a RTC\r\n" );
 
   /* USER CODE END RTC_Init 1 */
 
@@ -396,6 +430,7 @@ static void MX_RTC_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN RTC_Init 2 */
+  bc( "[3] RTC OK\r\n" );
 
   /* USER CODE END RTC_Init 2 */
 
