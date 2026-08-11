@@ -99,13 +99,13 @@ StackType_t  tkCmd_Stack[ tkCmd_STACK_SIZE ];
 
 extern UART_HandleTypeDef huart1;
 
-/* Manda una línea ya armada por el camino más crudo que hay: HAL por poleo.
-   Se usa para TODO lo de abajo, incluso para reportar el RX, así que si algo
-   falla no puede ser el lado de la transmisión — eso ya quedó validado. */
-static void prvTx( const char *pcTexto, int iLen )
+/* Manda una cadena por el camino más crudo que hay: HAL por poleo. Se usa para
+   TODO lo de abajo, incluso para reportar el RX, así que si algo falla no puede
+   ser el lado de la transmisión — eso ya quedó validado en la etapa 1. */
+static void prvTx( const char *pcTexto )
 {
     ( void ) HAL_UART_Transmit( &huart1, ( uint8_t * ) pcTexto,
-                                ( uint16_t ) iLen, 500U );
+                                ( uint16_t ) strlen( pcTexto ), 500U );
 }
 
 void tkCmd( void *pvParameters )
@@ -113,12 +113,26 @@ void tkCmd( void *pvParameters )
     ( void ) pvParameters;
 
     char cLinea[ 96 ];
-    int  iLen;
+
+    /*
+     * MIGAS DE PAN. Cada letra sale apenas se supera esa etapa, por HAL cruda.
+     * Si el arranque se cuelga, la ÚLTIMA letra que aparezca dice exactamente
+     * dónde — sin debugger y sin adivinar.
+     *
+     *   nada -> ni siquiera llegó a correr tkCmd, o el USART no está vivo.
+     *           Ahí el sospechoso es el NRST trabado (ver CLAUDE.md), no esto.
+     *   [A]  -> la tarea arrancó y la TX anda.
+     *   [B]  -> pasó el HAL_NVIC_DisableIRQ.
+     *   [C]  -> frtos_open_all() volvió bien: semáforos y stream buffer creados.
+     *   [D]  -> el Receive_IT quedó abortado.
+     */
+    prvTx( "\r\n\r\n[A] tkCmd arranco\r\n" );
 
     /* TERM_SENSE afuera. CubeMX habilita EXTI9_5 en MX_GPIO_Init() pase lo que
        pase, así que no alcanza con no llamar a drv_term_sense_init(): hay que
        apagar la línea en el NVIC. */
     HAL_NVIC_DisableIRQ( TERM_SENSE_EXTI_IRQn );
+    prvTx( "[B] EXTI de TERM_SENSE apagado\r\n" );
 
 #if ( TKCMD_BANCO_ONDA_U == 1 )
     /*
@@ -143,21 +157,24 @@ void tkCmd( void *pvParameters )
        y el configASSERT congelaría todo, incluido el LED. */
     if( frtos_open_all() == false )
     {
+        prvTx( "[!] frtos_open_all() FALLO\r\n" );
         Error_Handler();
     }
+    prvTx( "[C] drivers abiertos\r\n" );
 
 #if ( TKCMD_BANCO_RX_CRUDO == 1 )
     /* frtos_open_all() dejó armado un Receive_IT que se comería los bytes antes
        de que el poleo los vea. Se aborta. */
     drv_uart_rx_disable( drvUART_TERM );
+    prvTx( "[D] Receive_IT abortado\r\n" );
 #endif
 
     /* ---- único mensaje: el de arranque -------------------------------------- */
-    iLen = snprintf( cLinea, sizeof( cLinea ),
-                     "\r\n\r\n== ECO %s == tipea algo\r\n",
-                     ( TKCMD_BANCO_RX_CRUDO == 1 ) ? "por poleo del RDR"
-                                                   : "por ISR + stream buffer" );
-    prvTx( cLinea, iLen );
+    ( void ) snprintf( cLinea, sizeof( cLinea ),
+                       "== ECO %s == tipea algo\r\n",
+                       ( TKCMD_BANCO_RX_CRUDO == 1 ) ? "por poleo del RDR"
+                                                     : "por ISR + stream buffer" );
+    prvTx( cLinea );
 
     /*
      * De acá en más NO se manda nada por cuenta propia: todo lo que aparezca en
@@ -183,38 +200,43 @@ void tkCmd( void *pvParameters )
         /* Los errores primero: si el baudrate está mal, acá aparecen FE y NE. */
         if( ( ulIsr & ( USART_ISR_ORE | USART_ISR_FE | USART_ISR_NE | USART_ISR_PE ) ) != 0U )
         {
-            iLen = snprintf( cLinea, sizeof( cLinea ), "ERR%s%s%s%s\r\n",
-                             ( ulIsr & USART_ISR_ORE ) ? " ORE" : "",
-                             ( ulIsr & USART_ISR_FE  ) ? " FE"  : "",
-                             ( ulIsr & USART_ISR_NE  ) ? " NE"  : "",
-                             ( ulIsr & USART_ISR_PE  ) ? " PE"  : "" );
+            ( void ) snprintf( cLinea, sizeof( cLinea ), "ERR%s%s%s%s\r\n",
+                               ( ulIsr & USART_ISR_ORE ) ? " ORE" : "",
+                               ( ulIsr & USART_ISR_FE  ) ? " FE"  : "",
+                               ( ulIsr & USART_ISR_NE  ) ? " NE"  : "",
+                               ( ulIsr & USART_ISR_PE  ) ? " PE"  : "" );
 
             huart1.Instance->ICR = USART_ICR_ORECF | USART_ICR_FECF
                                  | USART_ICR_NECF  | USART_ICR_PECF;
-            prvTx( cLinea, iLen );
+            prvTx( cLinea );
         }
 
         if( ( ulIsr & USART_ISR_RXNE ) != 0U )
         {
             uint8_t ucRx = ( uint8_t ) ( huart1.Instance->RDR & 0xFFU );
 
-            iLen = snprintf( cLinea, sizeof( cLinea ), "RX 0x%02X '%c'\r\n",
-                             ucRx,
-                             ( ( ucRx >= 32U ) && ( ucRx < 127U ) ) ? ( char ) ucRx : '.' );
-            prvTx( cLinea, iLen );
+            ( void ) snprintf( cLinea, sizeof( cLinea ), "RX 0x%02X '%c'\r\n",
+                               ucRx,
+                               ( ( ucRx >= 32U ) && ( ucRx < 127U ) ) ? ( char ) ucRx : '.' );
+            prvTx( cLinea );
         }
 
-        /* Poleo apretado, sin vTaskDelay(): a 9600 un carácter dura 1,04 ms y
-           este USART no tiene FIFO, así que dormir 2 ticks perdería bytes. El
-           yield le da lugar a tkCtl, que tiene la misma prioridad — si el LED
-           sigue destellando, este lazo no se comió el micro.
-
-           Efecto conocido y aceptado mientras dure la prueba: la Idle task
-           (prioridad 0) no corre nunca, así que no llega a liberar la memoria de
-           defaultTask, que se autoelimina al arrancar. Son ~600 bytes del heap
-           que quedan tomados. No molesta acá porque no se pide más memoria, pero
-           explica un xPortGetFreeHeapSize() más bajo de lo esperado. */
-        taskYIELD();
+        /*
+         * Un tick (1,95 ms) entre vueltas, y NO taskYIELD().
+         *
+         * Con taskYIELD() en lazo apretado esta tarea queda siempre Ready y la
+         * Idle (prioridad 0) no corre NUNCA. Eso deja sin liberar la memoria de
+         * defaultTask —que se autoelimina al arrancar— y, más importante, hace
+         * que el LED sea un testigo poco confiable de si el sistema está vivo.
+         * Con el delay, si el LED destella el kernel está sano y el problema es
+         * de otro lado.
+         *
+         * El precio: a 9600 un carácter dura 1,04 ms y este USART no tiene FIFO,
+         * así que tipeando rápido o pegando texto se pierden bytes. No importa:
+         * el overrun ahora se REPORTA como "ERR ORE", así que es visible y no
+         * silencioso, que era el único riesgo real.
+         */
+        vTaskDelay( 1 );
 #else
         /* El camino real: la tarea se BLOQUEA hasta que la ISR le mete un byte
            en el stream buffer. Timeout por defecto = portMAX_DELAY. */
@@ -222,10 +244,10 @@ void tkCmd( void *pvParameters )
 
         if( frtos_read( fdTERM, &cRx, 1U ) == 1 )
         {
-            iLen = snprintf( cLinea, sizeof( cLinea ), "RX 0x%02X '%c'\r\n",
-                             ( uint8_t ) cRx,
-                             ( ( cRx >= 32 ) && ( cRx < 127 ) ) ? cRx : '.' );
-            prvTx( cLinea, iLen );
+            ( void ) snprintf( cLinea, sizeof( cLinea ), "RX 0x%02X '%c'\r\n",
+                               ( uint8_t ) cRx,
+                               ( ( cRx >= 32 ) && ( cRx < 127 ) ) ? cRx : '.' );
+            prvTx( cLinea );
         }
 #endif
     }
