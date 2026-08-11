@@ -1,5 +1,5 @@
 /*
- * FWDLGARM_R1_lptim_tick.c
+ * port_lptim_tick.c
  *
  * Tick de FreeRTOS sobre LPTIM1, clockeado desde el LSE (32.768 kHz).
  *
@@ -34,6 +34,7 @@
  */
 
 #include "main.h"
+#include "pwr_lock.h"
 
 /* El handle lo declara y lo inicializa CubeMX en main.c (MX_LPTIM1_Init), que corre
    antes de arrancar el scheduler. */
@@ -198,13 +199,30 @@ void vPortSuppressTicksAndSleep( TickType_t xExpectedIdleTime )
         Error_Handler();
     }
 
-    /* ---- Duerme acá. El LPTIM1 sigue contando del LSE y despierta por su línea EXTI,
-       que HAL_LPTIM_Counter_Start_IT() ya dejó habilitada. ---- */
-    HAL_PWREx_EnterSTOP2Mode( PWR_STOPENTRY_WFI );
+    /* ---- Duerme acá. El LPTIM1 sigue contando del LSE en los dos modos. ----
+     *
+     * Stop 2 apaga el PLL y deja sin reloj a casi todos los periféricos, así que
+     * no se puede entrar si alguien los necesita: una USART transmitiendo se
+     * cortaría a la mitad, y con una terminal conectada no podría recibir. Los
+     * drivers lo señalizan con los candados de pwr_lock.h.
+     *
+     * Cuando hay un candado tomado se duerme igual, pero en Sleep: la CPU se
+     * apaga hasta la próxima interrupción y los relojes siguen vivos. Se pierde
+     * el grueso del ahorro, pero sólo mientras alguien esté trabajando de verdad.
+     */
+    if( pwr_deep_sleep_permitido() )
+    {
+        HAL_PWREx_EnterSTOP2Mode( PWR_STOPENTRY_WFI );
 
-    /* Stop apaga el PLL y devuelve el SYSCLK al MSI. Hay que rearmar el árbol ANTES de
-       tocar cualquier cosa del HAL, porque sus timeouts se calculan con SystemCoreClock. */
-    SystemClock_Config();
+        /* Stop apaga el PLL y devuelve el SYSCLK al MSI. Hay que rearmar el árbol ANTES
+           de tocar cualquier cosa del HAL, porque sus timeouts se calculan con
+           SystemCoreClock. En Sleep no hace falta: los clocks nunca se perdieron. */
+        SystemClock_Config();
+    }
+    else
+    {
+        __WFI();
+    }
 
     /* ¿Durmió todo o lo despertó otra cosa? Si el flag de autoreload está puesto, el
        período se completó; si no, CNT dice hasta dónde llegó. */

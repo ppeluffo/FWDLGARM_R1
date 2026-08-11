@@ -68,7 +68,7 @@ entonces avanzó en cuatro etapas, todas validadas en banco y etiquetadas en git
 - **FreeRTOS** con port `GCC/ARM_CM4F`, heap_4, timebase de la HAL en TIM6, interface CMSIS-RTOS v2.
   **La aplicación se escribe con la API nativa** (`xTaskCreateStatic`, `vTaskDelay`), no con el
   wrapper: ver la sección del roadmap.
-- **Tick del kernel por LPTIM1** (`v0.0.4`), en `Core/Src/FWDLGARM_R1_lptim_tick.c`: LSE 32768 Hz →
+- **Tick del kernel por LPTIM1** (`v0.0.4`), en `Application/FRTOS/port_lptim_tick.c`: LSE 32768 Hz →
   prescaler /32 → contador de 1024 Hz → `ARR = 1` → **512 Hz exactos, sin deriva**. **El SysTick ya no
   se arranca nunca** (el `SysTick_Handler()` de `cmsis_os2.c` queda muerto); el timebase de la HAL
   sigue en TIM6. Ver la sección de `configTICK_RATE_HZ` para por qué 512 y no 1024 ni 1000.
@@ -81,7 +81,7 @@ entonces avanzó en cuatro etapas, todas validadas en banco y etiquetadas en git
   `vTaskStepTick()`. **`HAL_GetTick()` queda atrasado lo que haya durado el sueño**, porque TIM6 se
   suspende antes de dormir: sirve para los timeouts relativos del HAL, **no como hora**.
   Ver la sección de bajo consumo y la advertencia sobre el SWD.
-- **Tareas:** `tkCtl` (`Core/Src/FWDLGARM_R1_tkCtl.c`), prioridad `tskIDLE_PRIORITY+1`, stack de 384
+- **Tareas:** `tkCtl` (`Application/tasks/tkCtl.c`), prioridad `tskIDLE_PRIORITY+1`, stack de 384
   palabras, memoria **estática** (no toca el heap). Destella el LED cada 5 s. `defaultTask` existe
   sólo porque CubeMX no deja vaciar la lista de tareas, y se elimina con `vTaskDelete(NULL)` apenas
   arranca el scheduler.
@@ -234,7 +234,7 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    LSE ya estaba resuelto y era el único requisito. Partido en dos para no mover dos variables juntas:
    - **4a** ✅ **validado en banco** (`v0.0.4`) — el tick del kernel deja el SysTick y pasa al LPTIM1
      alimentado por el LSE, **sin** tickless (`configUSE_TICKLESS_IDLE = 0`). Código en
-     `Core/Src/FWDLGARM_R1_lptim_tick.c`. El LED de `tkCtl` sigue destellando cada 5 s, que era el
+     `Application/FRTOS/port_lptim_tick.c`. El LED de `tkCtl` sigue destellando cada 5 s, que era el
      criterio de aceptación: el tick sale del cristal y los tiempos no cambiaron.
    - **4b** ✅ **validado en banco** (`v0.0.5`) — tickless de verdad: `configUSE_TICKLESS_IDLE = 2` y
      `vPortSuppressTicksAndSleep()` con Stop 2. Ver la sección de bajo consumo más abajo.
@@ -243,6 +243,45 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
 6. I2C (RTC externo, monitor de corriente) → RS485/Modbus → microSD/SPI → entradas analógicas →
    modem LTE.
 7. **Bajo consumo** — el firmware ya está (`v0.0.5`). Lo que queda es **hardware**: ver abajo.
+8. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+
+### Compilar en Release: por qué todavía no, y cuándo sí
+
+Todo el bring-up se hace en **Debug** (`-O0 -g3 -DDEBUG`), a propósito: con `-O0` el debugger dice la
+verdad —el paso a paso sigue las líneas y las variables se pueden mirar—, mientras que con `-Os` GCC
+inlinea, reordena y elimina variables, y la mitad aparece como *optimized out*. En una etapa cuyo
+método es validar de a un periférico, eso cuesta más de lo que ahorra. Y el espacio no aprieta:
+**47 KB de 1024 KB de flash**.
+
+**Pero es una decisión con fecha de vencimiento**, por tres razones:
+
+1. **Energía.** Con `-O0` cada variable pasa por memoria, sin asignación a registros: el código corre
+   2 a 3 veces más lento. La corriente mientras está despierto es la misma, pero **la duración de cada
+   ventana despierta se triplica**. Hoy es poco en absoluto porque el micro duerme el 98 % del tiempo,
+   pero crece con cada bloque que haga trabajo real (poleo Modbus, escrituras a la SD, sesiones del
+   modem).
+2. **Stack.** `-O0` usa bastante más stack, así que el cambio va en la dirección segura — pero **los
+   *high water mark* medidos en Debug no son los que van a valer en Release.** No ajustar los tamaños
+   de stack al límite con los números equivocados.
+3. **Los bugs que sólo existen optimizados.** Un `volatile` faltante, una barrera ausente, una carrera
+   entre ISR y tarea: con `-O0` andan, con `-Os` se rompen, porque recién ahí el compilador se toma
+   las libertades que el estándar le permite. **Hay que encontrarlos en el banco, no en el campo.**
+   Lo escrito hasta ahora lo contempla (`bTerminalPresente` y `ulCandados` son `volatile`, el camino
+   del tickless tiene `__DSB()`/`__ISB()`, el contador de `error_delay_ms()` es `volatile`), pero
+   **el código que se porte de FWDLGX hay que revisarlo con este criterio**: viene de un compilador
+   AVR más conservador.
+
+**Práctica recomendada:** compilar en Release **cada tanto durante el desarrollo**, aunque no se
+flashee. Que compile y linkee ya descarta bastante, y cuando aparezca un bug que sólo existe con
+`-Os` va a estar cerca del cambio que lo causó, en vez de aparecer seis módulos después.
+
+**Antes de campo:** un Release validado en banco, con las mediciones de **consumo** y de **stack
+high water mark** rehechas sobre ese binario.
+
+Dato útil: **`configASSERT` NO depende de `-DDEBUG`** (`FreeRTOSConfig.h:158`), así que en Release se
+conservan las verificaciones de FreeRTOS, incluidas las de prioridad de interrupciones. Y
+`USE_FULL_ASSERT` está apagado en ambas configuraciones, con lo cual el `assert_param()` de la HAL no
+hace nada en ninguna de las dos: ahí no hay diferencia entre Debug y Release.
 
 ### Bajo consumo: estado y dónde está el problema ahora
 
@@ -493,6 +532,75 @@ acceso a registros o a pines en una capa superior, se empuja hacia abajo, al dri
 Bloques funcionales que el firmware debe terminar teniendo (heredados de la línea AVR/SAM4L):
 consola de comandos por TERM, modem LTE, RS485/Modbus, contadores de pulsos, entradas analógicas
 (4-20 mA), RTC, microSD/FatFs, configuración persistente en flash y gestión de energía.
+
+### El árbol `Application/`
+
+El código propio vive **fuera de `Core/`**, para que una regeneración de CubeMX no lo toque nunca:
+
+```
+Application/
+├── pwr/        pwr_lock.{h,c}          candados de energía (ver abajo)
+├── drivers/    drv_uart.{h,c}          UART sobre la HAL, tabla de instancias
+│               drv_term_sense.{h,c}    TERM_SENSE por EXTI
+├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
+├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
+│               frtos_cmd.{h,c}         ciclo de comandos
+└── tasks/      tkCtl.{h,c}             control, destello del LED
+                tkCmd.{h,c}             consola
+```
+
+**Convención de tareas:** cada una vive en `Application/tasks/` con su propio header, que declara su
+prioridad, el tamaño de stack y su memoria estática (`extern`); las definiciones van en el `.c`.
+`main.h` y `main.c` no llevan nada de eso. Los archivos NO se prefijan con el nombre del proyecto:
+`tkCtl.c`, no `FWDLGARM_R1_tkCtl.c`.
+
+**`Application/` no se compila sola**: el `.cproject` lista `Core`, `Middlewares` y `Drivers` como
+*source path*. Al clonar o rehacer el proyecto hay que agregarla en *Project → Properties → C/C++
+General → Paths and Symbols → **Source Location** → Add Folder*, y sus cinco subdirectorios en la
+pestaña **Includes** (con el combo **Configuration** en `[ All configurations ]`, o anda en Debug y
+falla en Release meses después).
+
+Son **dos pasos independientes** y fallan distinto: sin los *Includes* no compila
+(`No such file or directory`); sin el *Source Location* **compila pero no linkea**, con
+`undefined reference` a funciones que sí están en el árbol. Ese segundo síntoma es el confuso.
+
+> ⚠ **Si los archivos se crearon desde afuera del IDE —por consola, git checkout, o Claude— hay que
+> hacer *Refresh* (F5) sobre el proyecto ANTES de agregar el source folder.** Eclipse mantiene su
+> propio índice de recursos y no ve lo que aparece en el disco por detrás: en el diálogo *Add Folder…*
+> la carpeta directamente no figura, y el paso parece haberse hecho cuando en realidad no quedó nada.
+> Ya pasó una vez y costó un rato entenderlo.
+
+**FRTOS-IO** es la misma API de FWDLGX —`frtos_open/read/write/ioctl` despachando por
+`file_descriptor_t`, mismos códigos de `ioctl_*`, mismo `int16_t` con `-1` en error— pero el despacho
+es por **tabla con vtable** en vez de un `switch` con una función por instancia
+(`frtos_write_uart0..4`). En el AVR las cinco copias eran inevitables porque los registros de cada
+USART eran constantes de compilación; acá cada UART es un `UART_HandleTypeDef`, así que alcanza una
+fila por instancia. Los fd cuyo hardware no está poblado (`fdWAN`, `fdRS485A`, `fdI2C`, `fdNVM`)
+figuran en la tabla con `NULL`: compilan y devuelven `-1`.
+
+**Candados de energía (`pwr_lock.h`).** Los drivers avisan "mientras trabajo, no entres en Stop".
+Es un bitmask, no un contador, así que tomar dos veces el mismo candado es idempotente. Mientras haya
+uno tomado, `vPortSuppressTicksAndSleep()` baja de **Stop 2 a Sleep**: el micro se sigue durmiendo
+entre interrupciones pero los relojes quedan vivos. Sin esto, entrar en Stop a mitad de una
+transmisión la corta. Lo usan hoy TERM_SENSE y el TX de la consola; van a necesitarlo el modem, la
+microSD y el ADC.
+
+### Portar FWDLGX a ARM: el checklist
+
+**El criterio es adaptar, no envolver**: el código que entra tiene que quedar diciendo la verdad
+sobre el micro en el que corre. Nada de macros de compatibilidad que simulen mecanismos del AVR.
+Estas son las trampas que ya aparecieron, todas encontradas al portar TERM:
+
+| Idioma AVR | Qué hacer en ARM | Por qué |
+|---|---|---|
+| `PSTR("…")`, `xprintf_P`, `pgm_read_byte` | **borrarlos** — `sed -i 's/xprintf_P/xprintf/g; s/PSTR(\("[^"]*"\))/\1/g'` | El AVR es Harvard y un literal iba a RAM salvo que se lo marcara. El Cortex-M4 tiene espacio unificado: los literales quedan en `.rodata`, en flash, y se leen con un `ldr` común. No hay nada que marcar ni dos variantes de `printf` posibles. |
+| Buffers y structs **definidos en un `.h`** | declarar `extern` en el header, definir una vez en el `.c` | Patrón de una sola unidad de compilación. GCC 14 usa `-fno-common`: da *multiple definition* apenas el header entre en dos `.c`. |
+| `strlcpy` / `strlcat` | implementar local | Son de BSD; newlib no las trae. |
+| Poleo con `vTaskDelay(1)` en el lazo de lectura | bloquear en una primitiva del kernel (stream buffer, cola, semáforo) | Despertaría al micro **512 veces por segundo** y anula el tickless. Es el cambio más importante de todos. |
+| TX por poleo esperando el registro | interrupción + semáforo, y **tomar un candado de energía** | Pollear una línea a 115200 son ~5,5 ms de CPU girando; y sin el candado, el Stop 2 corta la trama. |
+| `vTaskDelay( ms / portTICK_PERIOD_MS )` | `pdMS_TO_TICKS( ms )` | `portTICK_PERIOD_MS` está **envenenado a propósito** en `main.h`; ver la sección del tick. |
+| `cli()` / `sei()`, `<avr/io.h>`, `<avr/interrupt.h>` | `taskENTER_CRITICAL()` / HAL, y el acceso a registros **baja al driver** | Principio HAL: sólo la capa de drivers toca el hardware. |
+| Acceso a registros desde un header de capa alta | empujarlo al driver | El `frtos-io.h` viejo tenía macros que escribían el USART del AVR. |
 
 ### Qué vale la pena rescatar del prototipo `FWDLGZ` (sólo si Pablo lo pide)
 

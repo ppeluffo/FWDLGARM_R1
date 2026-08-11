@@ -45,16 +45,8 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
-#define tkCtl_TASK_PRIORITY     ( tskIDLE_PRIORITY + 1 )
-#define tkCtl_STACK_SIZE        384
-
-/* OJO: acá van DECLARACIONES (extern), no definiciones. Este header lo incluyen
-   varios .c; si se define la variable acá, cada unidad de compilación crea la
-   suya y el linker corta por "multiple definition" (gcc >= 10 usa -fno-common).
-   Las definiciones reales están en main.c, en el bloque USER CODE PV. */
-extern TaskHandle_t xHandle_tkCtl;
-extern StaticTask_t tkCtl_Buffer_Ptr;
-extern StackType_t  tkCtl_Buffer[ tkCtl_STACK_SIZE ];
+/* Cada tarea declara su prioridad, su stack y su memoria estática en su propio
+   header, bajo Application/tasks/. Acá no va nada de eso. */
 
 /* USER CODE END EC */
 
@@ -85,19 +77,25 @@ extern StackType_t  tkCtl_Buffer[ tkCtl_STACK_SIZE ];
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-void tkCtl(void *pvParameters);
-
+/* Los prototipos de las tareas viven en su header, bajo Application/tasks/. */
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
 #define LED2_Pin GPIO_PIN_2
 #define LED2_GPIO_Port GPIOA
+#define TERM_SENSE_Pin GPIO_PIN_5
+#define TERM_SENSE_GPIO_Port GPIOB
+#define TERM_SENSE_EXTI_IRQn EXTI9_5_IRQn
+#define TERM_TX_Pin GPIO_PIN_6
+#define TERM_TX_GPIO_Port GPIOB
+#define TERM_RX_Pin GPIO_PIN_7
+#define TERM_RX_GPIO_Port GPIOB
 #define LED_Pin GPIO_PIN_9
 #define LED_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 /* Alias propios del LED. Viven acá y no en main.c para que los vean también los
-   otros .c de la aplicación (p. ej. FWDLGARM_R1_tkCtl.c). */
+   otros .c de la aplicación (p. ej. Application/tasks/tkCtl.c). */
 #define LED_PORT               LED_GPIO_Port
 #define LED_PIN                LED_Pin
 

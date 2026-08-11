@@ -1,14 +1,17 @@
 /*
- * FWDLGARM_R1_tkCtl.c
- *
- * Tarea de control. Es la primera que arranca y, por ahora, lo único que hace es
- * dar señales de vida por el LED.
+ * tkCtl.c  -  ver tkCtl.h
  *
  * Se programa con la API NATIVA de FreeRTOS (vTaskDelay, xTaskCreateStatic...),
- * no con el wrapper CMSIS-RTOS. main.h ya trae FreeRTOS.h y task.h.
+ * no con el wrapper CMSIS-RTOS.
  */
 
+#include "tkCtl.h"
 #include "main.h"
+
+/* Memoria estática de la tarea: definida acá una sola vez. */
+TaskHandle_t xHandle_tkCtl;
+StaticTask_t tkCtl_TCB;
+StackType_t  tkCtl_Stack[ tkCtl_STACK_SIZE ];
 
 #define TKCTL_PERIOD_MS      5000U   /* período del lazo                */
 #define TKCTL_ARRANQUE_MS     500U   /* espera inicial antes del lazo   */
