@@ -134,6 +134,41 @@ alimentación**, y el LED queda fijo. Es un pozo que cuesta mucho reconocer, por
 roto o placa quemada. Para destrabarlo: un `-hardRst` de CubeProgrammer, o **desenchufar el ST-LINK
 del USB** (desconectar sólo el cable a la placa no alcanza).
 
+**4. ⚠ La frecuencia SWD tiene que estar en 950 kHz. En `Auto` (4000 kHz) falla el borrado.**
+Encontrado el **2026-08-11**, con el riel ya bueno en 3,27 V — así que **no es el problema del punto 1**,
+es otro distinto con síntomas parecidos.
+
+Se veía como `Error: failed to erase memory` al bajar desde CubeIDE. Con la misma placa y el mismo
+cable, `STM32_Programmer_CLI ... freq=950` leía option bytes, `FLASH_SR` y memoria sin un error. La
+diferencia era sólo la frecuencia: el GDB server usa 4000 kHz cuando la launch config dice
+`frequency = "0"`, que es el default y significa *Auto*.
+
+> **Se arregla en:** *Run → Debug Configurations… → pestaña **Debugger** → Frequency (kHz)* → `950`.
+> En la GUI de CubeProgrammer, el mismo campo en el panel del ST-LINK.
+>
+> Misma firma que el problema de tensión y por eso confunde: **las transacciones cortas nunca fallan,
+> las largas sí**. Leer un registro es una transacción; borrar la flash son miles seguidas.
+
+**5. "El LED queda fijo" tiene DOS causas, y se distinguen con un comando.** Una es el NRST trabado
+(punto 2). La otra es que **el micro esté en blanco**: si el borrado anduvo pero la escritura no, no
+hay firmware que haga nada y el LED queda en el estado en que quedó el pin. Parece un cuelgue de
+firmware y **no lo es** — el 2026-08-11 se depuró durante un rato un "cuelgue" que era esto.
+
+```bash
+$P/STM32_Programmer_CLI -c port=SWD freq=950 mode=UR -r32 0x08000000 4
+```
+
+En `0x08000000` vive el **stack pointer inicial**. Si dice `20040000` o parecido, hay firmware. Si
+dice **`FFFFFFFF`, el chip está vacío** y no hay ningún cuelgue que depurar. Vale la pena hacerlo
+antes de instrumentar nada.
+
+Otros dos registros útiles en el mismo viaje, y cómo leerlos:
+
+| Registro | Dirección | Qué decir de él |
+|---|---|---|
+| `FLASH_SR` | `0x40022010` | `0` = sin flags pegados (`WRPERR`, `PGSERR`, `PROGERR`) ni ocupado. Si no es 0, el controlador de flash quedó en falla. |
+| `RCC_CSR`  | `0x40021094` | Bits 31-25, las banderas de reset (son **acumulativas** hasta que se limpian con `RMVF`, así que ver varias juntas es normal). Los bits `[11:8]` son el `MSISRANGE`: acá tienen que dar `6` (4 MHz), que es lo que espera `SystemClock_Config()`. |
+
 ### ✅ El LSE y CubeMX: asignar los pines NO alcanza (resuelto en `v0.0.3`)
 
 **La trampa costó una vuelta entera en este proyecto, así que conviene leerla antes de configurar

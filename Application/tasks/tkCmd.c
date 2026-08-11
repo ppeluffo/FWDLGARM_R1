@@ -64,8 +64,12 @@ StackType_t  tkCmd_Stack[ tkCmd_STACK_SIZE ];
 
 /* 1 = eco leyendo el RDR por poleo (HAL cruda, sin ISR).
    0 = eco por el camino real: frtos_read() bloqueando en el stream buffer.
-   Empezar en 1: prueba menos cosas a la vez. */
-#define TKCMD_BANCO_RX_CRUDO    1
+
+   El 1 ✅ pasó el 2026-08-11: 'qwertpablo' devolvió 0x71 0x77 0x65 0x72 0x74
+   0x70 0x61 0x62 0x6C 0x6F, sin un solo ERR FE/NE. O sea que el pin, el AF, el
+   cable y el muestreo del USART están bien, y lo único que queda por validar es
+   la cadena ISR -> RxCpltCallback -> xStreamBufferSendFromISR -> frtos_read. */
+#define TKCMD_BANCO_RX_CRUDO    0
 
 /*
  * TEST DE LA "U" — mide los baudios REALES con el osciloscopio.
