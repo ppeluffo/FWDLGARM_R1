@@ -181,7 +181,17 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  /*
+   * TEMPORAL: la USART se levanta ANTES de SystemClock_Config() — o sea corriendo
+   * con el MSI a 4 MHz, todavía sin PLL. Es a propósito: el cuelgue del "reset"
+   * ocurre ANTES de la primera miga, así que el sospechoso es SystemClock_Config()
+   * mismo, y sin esto no hay forma de emitir desde ahí ni desde Error_Handler().
+   *
+   * A 4 MHz el divisor de 9600 baudios da 417 con 0,08% de error, así que se
+   * entiende igual. Se vuelve a inicializar después del cambio de reloj.
+   */
+  MX_USART1_UART_Init();
+  bc( "\r\n\r\n[0] HAL_Init OK, entrando a SystemClock_Config\r\n" );
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -618,7 +628,29 @@ void Error_Handler(void)
 
   uint32_t destellos = reloj_caido ? ERR_BLINKS_RELOJ : ERR_BLINKS_GENERIC;
 
+  /*
+   * Decirlo por la consola, no sólo por el LED. Desde que la USART se levanta
+   * antes de SystemClock_Config(), esto funciona incluso si el que falla es el
+   * reloj. Va ANTES de cortar las interrupciones, porque HAL_UART_Transmit()
+   * usa HAL_GetTick() para su timeout.
+   */
+  bc( reloj_caido
+      ? "\r\n[!] Error_Handler: NO ARRANCO UN OSCILADOR DE BAJA VELOCIDAD (LSE/LSI)\r\n"
+      : "\r\n[!] Error_Handler: falla generica\r\n" );
+
   __disable_irq();
+
+  /*
+   * Sin esto los destellos salen MAL. Si Error_Handler() se dispara desde adentro
+   * de SystemClock_Config(), SystemCoreClock todavía vale 4 MHz en vez de 60, y
+   * error_delay_ms() —que con el tick por LPTIM1 usa SIEMPRE el lazo tosco,
+   * porque el SysTick nunca se arranca— sale quince veces más rápido: el patrón
+   * de 2 destellos se convierte en un parpadeo tan veloz que a ojo parece un LED
+   * PRENDIDO FIJO. Costó confundir eso con un cuelgue mudo. SystemCoreClockUpdate()
+   * recalcula el valor real leyendo los registros del RCC.
+   */
+  SystemCoreClockUpdate();
+
   led_config();
 
   while (1)
