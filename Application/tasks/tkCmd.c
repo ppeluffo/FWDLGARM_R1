@@ -41,7 +41,15 @@ StackType_t  tkCmd_Stack[ tkCmd_STACK_SIZE ];
  * las tres hipótesis de firmware (MSI descalibrado, desborde de stack, semáforo
  * de TX perdido) eran razonables y ninguna era.
  * ---------------------------------------------------------------------------
- * ETAPA 2 - RX. ES LO QUE ESTÁ CORRIENDO AHORA.
+ * ETAPA 2 - RX. ✅ CERRADA.
+ *
+ * Primero por poleo del RDR y después por el camino real (ISR ->
+ * RxCpltCallback -> xStreamBufferSendFromISR -> frtos_read). Las dos pasaron.
+ * La prueba que valió fue pegar un párrafo de 46 caracteres de un saque: todos
+ * llegaron en orden y sin un solo ERR ORE, o sea que el rearme del Receive_IT
+ * dentro del callback aguanta el ritmo y el stream buffer no se desborda.
+ *
+ * Cómo funcionaba:
  *
  * Un solo mensaje al arrancar y después silencio total: todo lo que aparezca en
  * la terminal es consecuencia de un byte recibido. Silencio == no llega nada,
@@ -57,10 +65,12 @@ StackType_t  tkCmd_Stack[ tkCmd_STACK_SIZE ];
  *   HEX correcto         -> RX crudo cerrado. Se pasa TKCMD_BANCO_RX_CRUDO a 0
  *                           para probar el camino real (ISR + stream buffer).
  *
- * PARA VOLVER A LA CONSOLA: poner TKCMD_MODO_BANCO en 0. Nada de lo de abajo se
- * borró, sólo queda compilado fuera.
+ * ✅ CERRADO EL 2026-08-11. Las dos etapas pasaron, así que esto queda en 0 y la
+ * consola vuelve a ser la de verdad. NO se borra: es el andamio que sirve para
+ * el próximo puerto serie (modem LTE, RS485), donde las preguntas van a ser las
+ * mismas. Se reactiva poniendo TKCMD_MODO_BANCO en 1.
  *============================================================================*/
-#define TKCMD_MODO_BANCO        1
+#define TKCMD_MODO_BANCO        0
 
 /* 1 = eco leyendo el RDR por poleo (HAL cruda, sin ISR).
    0 = eco por el camino real: frtos_read() bloqueando en el stream buffer.
