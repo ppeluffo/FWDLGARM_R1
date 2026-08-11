@@ -29,24 +29,33 @@ StackType_t  tkCmd_Stack[ tkCmd_STACK_SIZE ];
  * Además de esto, el tickless está anulado en FreeRTOSConfig.h (bloque USER CODE
  * Defines) y el EXTI de TERM_SENSE se apaga más abajo. El micro NO duerme.
  *
- * QUÉ MANDA, una vez por segundo, TRES líneas, cada una agregando UNA capa:
+ * ---------------------------------------------------------------------------
+ * ETAPA 1 (2026-08-11) - TX. ✅ CERRADA.
  *
- *   --- 1   literal const + HAL_UART_Transmit por poleo. Ni newlib, ni ISR, ni
- *           semáforos. Prueba pines, AF7, baudios, reloj del USART, transceiver.
- *   --- 2   lo mismo, pero armando la línea con snprintf. Agrega newlib y su
- *           apetito de stack.
- *   --- 3   xprintf -> frtos_write -> drv_uart_write -> Transmit_IT + semáforo.
- *           Agrega el camino por interrupción y el TxCpltCallback.
+ * Mandaba una línea por segundo por tres caminos (literal por HAL, snprintf por
+ * HAL, y xprintf por FRTOS-IO/interrupción). Salieron las tres, o sea que quedó
+ * validado todo: pines, AF7, baudios, transceiver, el stack de newlib y el
+ * camino por ISR con su TxCpltCallback y su semáforo.
  *
- * CÓMO SE LEE EL RESULTADO — esto es todo el punto del ejercicio:
+ * La causa del silencio inicial era EL CABLE del puerto serial. Vale anotarlo:
+ * las tres hipótesis de firmware (MSI descalibrado, desborde de stack, semáforo
+ * de TX perdido) eran razonables y ninguna era.
+ * ---------------------------------------------------------------------------
+ * ETAPA 2 - RX. ES LO QUE ESTÁ CORRIENDO AHORA.
  *
- *   ninguna       -> el problema está DEBAJO del firmware: pines, AF, baudios,
- *                    transceiver, cable, o la config de la terminal en la PC.
- *   sólo 1        -> el hardware anda y newlib se lleva puesto el stack de tkCmd
- *                    (2 KB). Subir tkCmd_STACK_SIZE y volver a probar.
- *   1 y 2, no 3   -> el camino por interrupción: NVIC, TxCpltCallback que no da
- *                    el semáforo, o Transmit_IT devolviendo distinto de HAL_OK.
- *   las tres      -> TX cerrado. Se pasa a probar RX.
+ * Un solo mensaje al arrancar y después silencio total: todo lo que aparezca en
+ * la terminal es consecuencia de un byte recibido. Silencio == no llega nada,
+ * sin ambigüedad.
+ *
+ * Por cada byte imprime  RX 0x41 'A'  — el HEX es el punto. Un eco pelado no
+ * distingue "no llega nada" de "llega corrupto"; el HEX sí:
+ *
+ *   nada                 -> no llega el byte. PB7, AF7, el cable en ese sentido,
+ *                           o la terminal que no está mandando (¿eco local?).
+ *   HEX equivocado       -> el byte llega pero mal muestreado: baudios/reloj.
+ *   líneas ERR FE / NE   -> confirmación de lo anterior por la vía del hardware.
+ *   HEX correcto         -> RX crudo cerrado. Se pasa TKCMD_BANCO_RX_CRUDO a 0
+ *                           para probar el camino real (ISR + stream buffer).
  *
  * PARA VOLVER A LA CONSOLA: poner TKCMD_MODO_BANCO en 0. Nada de lo de abajo se
  * borró, sólo queda compilado fuera.
@@ -58,24 +67,76 @@ StackType_t  tkCmd_Stack[ tkCmd_STACK_SIZE ];
    Empezar en 1: prueba menos cosas a la vez. */
 #define TKCMD_BANCO_RX_CRUDO    1
 
+/*
+ * TEST DE LA "U" — mide los baudios REALES con el osciloscopio.
+ *
+ * 'U' es 0x55 = 0b01010101. Con 8N1 la trama sale
+ *
+ *     start  b0 b1 b2 b3 b4 b5 b6 b7  stop      start...
+ *       0    1  0  1  0  1  0  1  0    1          0
+ *
+ * o sea 0,1,0,1,... y como el stop es 1 y el start siguiente es 0, mandando 'U'
+ * sin parar la alternancia NO se interrumpe en el borde de trama: sale una onda
+ * cuadrada perfecta de frecuencia = baudios / 2.
+ *
+ * Se mide con el contador de frecuencia del osciloscopio, sin cursores:
+ *
+ *     9600 baudios  ->  4800 Hz  (período 208,3 us)
+ *   115200 baudios  -> 57600 Hz  (período  17,4 us)
+ *
+ * Lo que leas x2 son los baudios reales, con cuatro dígitos. Si no coincide, el
+ * cociente contra el nominal ES el error del reloj — no hay nada que interpretar.
+ *
+ * Mientras está en 1 no se manda otra cosa: el punto es que la onda sea continua.
+ *
+ * NO hizo falta el 2026-08-11 (el problema era el cable), pero queda acá: es la
+ * forma más rápida que hay de medir baudios reales, y va a servir con el modem y
+ * con el RS485.
+ */
+#define TKCMD_BANCO_ONDA_U      0
+
 #if ( TKCMD_MODO_BANCO == 1 )
 
 extern UART_HandleTypeDef huart1;
 
-#define BANCO_PERIODO_MS        1000U
-#define BANCO_PASO_MS             10U   /* cada cuánto se mira el RX */
+/* Manda una línea ya armada por el camino más crudo que hay: HAL por poleo.
+   Se usa para TODO lo de abajo, incluso para reportar el RX, así que si algo
+   falla no puede ser el lado de la transmisión — eso ya quedó validado. */
+static void prvTx( const char *pcTexto, int iLen )
+{
+    ( void ) HAL_UART_Transmit( &huart1, ( uint8_t * ) pcTexto,
+                                ( uint16_t ) iLen, 500U );
+}
 
 void tkCmd( void *pvParameters )
 {
     ( void ) pvParameters;
 
-    char     cLinea[ 96 ];
-    uint32_t ulCiclo = 0U;
+    char cLinea[ 96 ];
+    int  iLen;
 
     /* TERM_SENSE afuera. CubeMX habilita EXTI9_5 en MX_GPIO_Init() pase lo que
        pase, así que no alcanza con no llamar a drv_term_sense_init(): hay que
        apagar la línea en el NVIC. */
     HAL_NVIC_DisableIRQ( TERM_SENSE_EXTI_IRQn );
+
+#if ( TKCMD_BANCO_ONDA_U == 1 )
+    /*
+     * Onda cuadrada continua para medir los baudios reales. Ver el comentario de
+     * TKCMD_BANCO_ONDA_U. Nada de FRTOS-IO ni de newlib acá: sólo la HAL por
+     * poleo, para que lo único que se esté midiendo sea el reloj.
+     */
+    static const char cOndaU[] =
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU"
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU";   /* 64 */
+
+    for( ;; )
+    {
+        ( void ) HAL_UART_Transmit( &huart1, ( uint8_t * ) cOndaU,
+                                    ( uint16_t ) ( sizeof( cOndaU ) - 1U ),
+                                    HAL_MAX_DELAY );
+    }
+#endif
 
     /* Hace falta igual para la capa 2 (xprintf): crea los semáforos y el mutex
        del driver. Si esto fallara, drv_uart_write() haría xSemaphoreTake(NULL)
@@ -89,64 +150,84 @@ void tkCmd( void *pvParameters )
     /* frtos_open_all() dejó armado un Receive_IT que se comería los bytes antes
        de que el poleo los vea. Se aborta. */
     drv_uart_rx_disable( drvUART_TERM );
-#else
-    /* frtos_read() no lleva timeout por argumento: se fija por ioctl. Sin esto
-       el default es portMAX_DELAY y la línea de TX del segundo no saldría más. */
-    TickType_t xTimeout = pdMS_TO_TICKS( BANCO_PASO_MS );
-    ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xTimeout );
 #endif
 
+    /* ---- único mensaje: el de arranque -------------------------------------- */
+    iLen = snprintf( cLinea, sizeof( cLinea ),
+                     "\r\n\r\n== ECO %s == tipea algo\r\n",
+                     ( TKCMD_BANCO_RX_CRUDO == 1 ) ? "por poleo del RDR"
+                                                   : "por ISR + stream buffer" );
+    prvTx( cLinea, iLen );
+
+    /*
+     * De acá en más NO se manda nada por cuenta propia: todo lo que aparezca en
+     * la terminal es consecuencia de un byte recibido. Así, silencio == no llega
+     * nada, sin ambigüedad.
+     *
+     * Y no se hace un eco pelado a propósito: devolver el carácter tal cual no
+     * distingue "no llega nada" de "llega corrupto". Mostrando el HEX se ve al
+     * toque cuál de las dos es. Si tipeás 'A' y aparece 0x41, perfecto. Si
+     * aparece 0x00, 0xFF o cualquier otra cosa, el byte llega pero mal muestreado
+     * -> baudios/reloj. Y si además saltan FE/NE, es directamente eso.
+     */
     for( ;; )
     {
-        ulCiclo++;
-
-        /* ---- capa 1: lo más crudo que hay ---------------------------------- */
-        /* Literal constante + HAL_UART_Transmit por poleo. Ni newlib, ni ISR, ni
-           semáforos, ni stack de stdio. Si esto no sale, no sale nada. */
-        static const char cFijo[] = "\r\n--- 1 literal por HAL_UART_Transmit\r\n";
-        ( void ) HAL_UART_Transmit( &huart1, ( uint8_t * ) cFijo,
-                                    ( uint16_t ) ( sizeof( cFijo ) - 1U ), 500U );
-
-        /* ---- capa 2: igual, pero pasando por newlib ------------------------ */
-        /* Agrega una sola variable: snprintf. Es el sospechoso de stack, porque
-           configCHECK_FOR_STACK_OVERFLOW está en 0 y un desborde de tkCmd sería
-           mudo (el LED de tkCtl seguiría destellando igual). */
-        int iLen = snprintf( cLinea, sizeof( cLinea ),
-                             "--- 2 [%lu] por snprintf + HAL_UART_Transmit\r\n",
-                             ( unsigned long ) ulCiclo );
-
-        ( void ) HAL_UART_Transmit( &huart1, ( uint8_t * ) cLinea,
-                                    ( uint16_t ) iLen, 500U );
-
-        /* ---- capa 3: la pila entera ---------------------------------------- */
-        /* xprintf -> frtos_write -> drv_uart_write -> Transmit_IT + semáforo. */
-        ( void ) xprintf( "--- 3 [%lu] por xprintf/FRTOS-IO (interrupcion)\r\n",
-                          ( unsigned long ) ulCiclo );
-
-        /* ---- espera de 1 s, mirando el RX de a poco ------------------------ */
-        for( uint32_t i = 0U; i < ( BANCO_PERIODO_MS / BANCO_PASO_MS ); i++ )
-        {
 #if ( TKCMD_BANCO_RX_CRUDO == 1 )
-            /*
-             * Leer el RDR desde una tarea viola el principio HAL del proyecto
-             * (sólo el driver toca registros). Es a propósito y es temporal:
-             * la gracia de esta prueba es justamente saltear el driver.
-             */
-            if( __HAL_UART_GET_FLAG( &huart1, UART_FLAG_RXNE ) != RESET )
-            {
-                uint8_t ucRx = ( uint8_t ) ( huart1.Instance->RDR & 0xFFU );
-                ( void ) HAL_UART_Transmit( &huart1, &ucRx, 1U, 100U );
-            }
-#else
-            char cRx;
-            if( frtos_read( fdTERM, &cRx, 1U ) == 1 )
-            {
-                ( void ) xprintf( "%c", cRx );
-            }
-            continue;   /* frtos_read ya bloqueó los BANCO_PASO_MS del paso */
-#endif
-            vTaskDelay( pdMS_TO_TICKS( BANCO_PASO_MS ) );
+        /*
+         * Leer el ISR/RDR desde una tarea viola el principio HAL del proyecto
+         * (sólo el driver toca registros). Es a propósito y es temporal: la
+         * gracia de esta prueba es justamente saltear el driver.
+         */
+        uint32_t ulIsr = huart1.Instance->ISR;
+
+        /* Los errores primero: si el baudrate está mal, acá aparecen FE y NE. */
+        if( ( ulIsr & ( USART_ISR_ORE | USART_ISR_FE | USART_ISR_NE | USART_ISR_PE ) ) != 0U )
+        {
+            iLen = snprintf( cLinea, sizeof( cLinea ), "ERR%s%s%s%s\r\n",
+                             ( ulIsr & USART_ISR_ORE ) ? " ORE" : "",
+                             ( ulIsr & USART_ISR_FE  ) ? " FE"  : "",
+                             ( ulIsr & USART_ISR_NE  ) ? " NE"  : "",
+                             ( ulIsr & USART_ISR_PE  ) ? " PE"  : "" );
+
+            huart1.Instance->ICR = USART_ICR_ORECF | USART_ICR_FECF
+                                 | USART_ICR_NECF  | USART_ICR_PECF;
+            prvTx( cLinea, iLen );
         }
+
+        if( ( ulIsr & USART_ISR_RXNE ) != 0U )
+        {
+            uint8_t ucRx = ( uint8_t ) ( huart1.Instance->RDR & 0xFFU );
+
+            iLen = snprintf( cLinea, sizeof( cLinea ), "RX 0x%02X '%c'\r\n",
+                             ucRx,
+                             ( ( ucRx >= 32U ) && ( ucRx < 127U ) ) ? ( char ) ucRx : '.' );
+            prvTx( cLinea, iLen );
+        }
+
+        /* Poleo apretado, sin vTaskDelay(): a 9600 un carácter dura 1,04 ms y
+           este USART no tiene FIFO, así que dormir 2 ticks perdería bytes. El
+           yield le da lugar a tkCtl, que tiene la misma prioridad — si el LED
+           sigue destellando, este lazo no se comió el micro.
+
+           Efecto conocido y aceptado mientras dure la prueba: la Idle task
+           (prioridad 0) no corre nunca, así que no llega a liberar la memoria de
+           defaultTask, que se autoelimina al arrancar. Son ~600 bytes del heap
+           que quedan tomados. No molesta acá porque no se pide más memoria, pero
+           explica un xPortGetFreeHeapSize() más bajo de lo esperado. */
+        taskYIELD();
+#else
+        /* El camino real: la tarea se BLOQUEA hasta que la ISR le mete un byte
+           en el stream buffer. Timeout por defecto = portMAX_DELAY. */
+        char cRx;
+
+        if( frtos_read( fdTERM, &cRx, 1U ) == 1 )
+        {
+            iLen = snprintf( cLinea, sizeof( cLinea ), "RX 0x%02X '%c'\r\n",
+                             ( uint8_t ) cRx,
+                             ( ( cRx >= 32 ) && ( cRx < 127 ) ) ? cRx : '.' );
+            prvTx( cLinea, iLen );
+        }
+#endif
     }
 }
 

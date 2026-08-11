@@ -13,7 +13,7 @@ TaskHandle_t xHandle_tkCtl;
 StaticTask_t tkCtl_TCB;
 StackType_t  tkCtl_Stack[ tkCtl_STACK_SIZE ];
 
-#define TKCTL_PERIOD_MS      5000U   /* período del lazo                */
+#define TKCTL_PERIOD_MS     1000U   /* período del lazo                */
 #define TKCTL_ARRANQUE_MS     500U   /* espera inicial antes del lazo   */
 #define TKCTL_LED_ON_MS       100U   /* duración del destello           */
 
