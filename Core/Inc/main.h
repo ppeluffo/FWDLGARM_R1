@@ -61,6 +61,24 @@ extern StackType_t  tkCtl_Buffer[ tkCtl_STACK_SIZE ];
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
 
+/*
+ * portTICK_PERIOD_MS ESTÁ ENVENENADO A PROPÓSITO. No es un error: no se puede usar.
+ *
+ * El tick de este proyecto es de 512 Hz (1,95 ms), pero el port lo calcula como
+ * 1000 / configTICK_RATE_HZ en aritmética entera, o sea 1000/512 = 1. El patrón clásico
+ * del código heredado de FWDLGX/AVR
+ *
+ *     vTaskDelay( 500 / portTICK_PERIOD_MS );     // <- espera 976 ms, no 500
+ *
+ * compilaría perfecto y esperaría el DOBLE, sin avisar. Redefiniéndolo a un identificador
+ * inexistente, cualquier uso falla en compilación diciendo qué hay que hacer en su lugar.
+ *
+ * Siempre pdMS_TO_TICKS(), que es exacto para múltiplos de 125 ms (512/1000 = 64/125) y
+ * en el resto trunca hacia abajo menos de un tick, sin acumular. Ver CLAUDE.md.
+ */
+#undef  portTICK_PERIOD_MS
+#define portTICK_PERIOD_MS  USAR_pdMS_TO_TICKS_NO_portTICK_PERIOD_MS
+
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/

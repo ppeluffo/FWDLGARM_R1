@@ -44,13 +44,14 @@ mapa de pines de `interfases_pines.csv` es el diseño completo de R001, no hardw
 tiene sentido escribir drivers contra periféricos que todavía no están montados.
 
 El proyecto **se borró y se rehízo de cero el 2026-08-10** (ver control de versiones), y desde
-entonces avanzó en tres etapas, todas validadas en banco y etiquetadas en git:
+entonces avanzó en cuatro etapas, todas validadas en banco y etiquetadas en git:
 
 | Tag | Estado |
 |---|---|
 | `v0.0.1` | Clock MSI a 60 MHz, LED parpadeando |
 | `v0.0.2` | FreeRTOS con API nativa, tarea `tkCtl` |
 | `v0.0.3` | **Cristal externo: LSE + RTC**, `Error_Handler()` con destellos |
+| `v0.0.4` | **Tick del kernel por LPTIM1 desde el LSE**, 512 Hz exactos |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
   `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
@@ -66,6 +67,13 @@ entonces avanzó en tres etapas, todas validadas en banco y etiquetadas en git:
 - **FreeRTOS** con port `GCC/ARM_CM4F`, heap_4, timebase de la HAL en TIM6, interface CMSIS-RTOS v2.
   **La aplicación se escribe con la API nativa** (`xTaskCreateStatic`, `vTaskDelay`), no con el
   wrapper: ver la sección del roadmap.
+- **Tick del kernel por LPTIM1** (`v0.0.4`), en `Core/Src/FWDLGARM_R1_lptim_tick.c`: LSE 32768 Hz →
+  prescaler /32 → contador de 1024 Hz → `ARR = 1` → **512 Hz exactos, sin deriva**. **El SysTick ya no
+  se arranca nunca** (el `SysTick_Handler()` de `cmsis_os2.c` queda muerto); el timebase de la HAL
+  sigue en TIM6. Ver la sección de `configTICK_RATE_HZ` para por qué 512 y no 1024 ni 1000.
+  Efecto secundario a tener presente: como el SysTick queda apagado, `error_delay_ms()` usa siempre
+  su lazo tosco calibrado por `SystemCoreClock`, así que los destellos de diagnóstico funcionan pero
+  con temporización aproximada.
 - **Tareas:** `tkCtl` (`Core/Src/FWDLGARM_R1_tkCtl.c`), prioridad `tskIDLE_PRIORITY+1`, stack de 384
   palabras, memoria **estática** (no toca el heap). Destella el LED cada 5 s. `defaultTask` existe
   sólo porque CubeMX no deja vaciar la lista de tareas, y se elimina con `vTaskDelete(NULL)` apenas
@@ -215,14 +223,19 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
 3. ✅ **LSE + RTC** (`v0.0.3`) — el cristal arranca y alimenta al RTC. Se adelantó respecto del plan
    original, que lo tenía para el final: el `Error_Handler()` con destellos se repuso antes, para no
    quedar a ciegas si el cristal no arrancaba.
-4. ⏳ **TERM / USART1** — consola y `printf`. **Es el próximo paso**, y el que más cambia el modo de
-   trabajo: a partir de acá se depura interactivamente en vez de contar destellos.
-5. I2C (RTC externo, monitor de corriente) → RS485/Modbus → microSD/SPI → entradas analógicas →
+4. **Tick por LPTIM1** — se adelantó respecto del plan original (venía después de TERM), porque el
+   LSE ya estaba resuelto y era el único requisito. Partido en dos para no mover dos variables juntas:
+   - **4a** ✅ **validado en banco** (`v0.0.4`) — el tick del kernel deja el SysTick y pasa al LPTIM1
+     alimentado por el LSE, **sin** tickless (`configUSE_TICKLESS_IDLE = 0`). Código en
+     `Core/Src/FWDLGARM_R1_lptim_tick.c`. El LED de `tkCtl` sigue destellando cada 5 s, que era el
+     criterio de aceptación: el tick sale del cristal y los tiempos no cambiaron.
+   - **4b** ⏳ **es el próximo paso** — tickless de verdad: `configUSE_TICKLESS_IDLE = 2` y
+     `vPortSuppressTicksAndSleep()` con modo Stop. Un solo sospechoso nuevo, con 4a ya probado.
+5. **TERM / USART1** — consola y `printf`. Es el que más cambia el modo de trabajo: a partir de acá
+   se depura interactivamente en vez de contar destellos.
+6. I2C (RTC externo, monitor de corriente) → RS485/Modbus → microSD/SPI → entradas analógicas →
    modem LTE.
-6. **Tick por LPTIM1** — cambiar el tick del kernel del SysTick al LPTIM1 alimentado por el LSE, que
-   sigue vivo en modo Stop (`port_lptim_tick.c` de `FWDLGZ` como referencia). El LSE, que era el
-   requisito, ya está resuelto.
-7. **Bajo consumo** al final: modos Stop y tickless, ya con todo funcionando y medible.
+7. **Bajo consumo** al final: medición y ajuste de los modos Stop, ya con todo funcionando y medible.
 
 #### FreeRTOS desde CubeMX: lo que ya se aprendió (paso 2)
 
@@ -240,16 +253,74 @@ Se hizo funcionar el 2026-08-10 antes de rehacer el proyecto. Al repetirlo, esto
 - Nota: la línea AVR/SAM4L y el prototipo `FWDLGZ` usan la **API nativa** de FreeRTOS
   (`xTaskCreate`, `xQueueSend`). Elegir CMSIS-RTOS v2 agrega una capa de traducción para leer ese
   código heredado.
+- **La capa CMSIS no es puramente decorativa: `cmsis_os2.c` aporta dos cosas que el proyecto
+  necesita**, y si algún día se saca hay que reponerlas a mano:
+  `vApplicationGetIdleTaskMemory()` / `vApplicationGetTimerTaskMemory()` —obligatorias porque
+  `configSUPPORT_STATIC_ALLOCATION=1`— y el propio **`SysTick_Handler()`** (el `FreeRTOSConfig.h`
+  mapea `SVC_Handler` y `PendSV_Handler`, pero **no** `SysTick_Handler`). El prototipo `FWDLGZ` tiene
+  resueltos los callbacks de memoria en `Application/bsp/bsp.c`.
 
-### Control de versiones — pendiente, y ya costó caro
+#### ⚠ `configTICK_RATE_HZ = 512`: `portTICK_PERIOD_MS` está ENVENENADO
 
-`FWDLGARM_R1` **no es un repo git**. El 2026-08-10 el proyecto se borró entero para rehacerlo desde
-cero, **sin respaldo**: se perdieron el `Error_Handler()` con patrón de destellos de diagnóstico y
-las funciones auxiliares `led_config()` / `error_delay_ms()`, además de la etapa con FreeRTOS ya
-validada en banco. Nada de eso era recuperable.
+Decidido el 2026-08-10 al encarar el tickless. **El tick pasa de 1000 a 512 Hz** para que salga
+exacto del cristal de 32.768 kHz.
 
-Conviene inicializarlo y etiquetar cada etapa validada, reusando el `.gitignore` del prototipo
-`FWDLGZ` (ignora `Debug/`, `Release/`, `.metadata/`, `*.launch`, `*.ioc.bak`).
+**Por qué 512 y no 1000.** 1000 no divide a 32768, así que ningún número entero de cuentas da 1 ms:
+con 33 cuentas el tick real es 992,97 Hz y con 32 es 1024 Hz. Ese error no es jitter, es **sesgo
+permanente que se acumula**: con 33 cuentas, +0,71 %, o sea **~10 minutos de deriva por día** (es el
+caso del prototipo `FWDLGZ`, cuyo tick real quedó en ~993 Hz). Con 512 el tick sale **exacto**: LSE
+32768 / prescaler 32 = 1024 Hz de contador, y 2 cuentas por tick.
+
+**Por qué 512 y no 1024**, que era la primera elección: **CubeMX no admite `TICK_RATE_HZ` mayor a
+1000** — si se tipea 1024, al guardar lo revierte a 1000 sin avisar. Se podía forzar con un
+`#undef`/`#define` en el bloque `USER CODE BEGIN Defines` de `FreeRTOSConfig.h` (que está después de
+la definición generada y sobrevive la regeneración), pero eso deja el `.ioc` diciendo 1000 y el
+binario corriendo a 1024 — exactamente el tipo de desincronización entre fuente de verdad y realidad
+que ya costó un día con el LSE. Se descartó.
+
+**El costo de 512 es la resolución del tick: 1,95 ms.** No afecta a nada de este firmware: los
+períodos son de segundos a minutos. Lo que necesita más precisión —el t3.5 de Modbus RTU, 1,75 ms—
+**no se puede temporizar con el tick a ninguna frecuencia** (tampoco a 1000 Hz) y va por el registro
+`RTOR` del USART o por un timer dedicado.
+
+**La trampa, y por qué hay veneno.** El port calcula:
+
+```c
+/* portmacro.h:74 */
+#define portTICK_PERIOD_MS  ( ( TickType_t ) 1000 / configTICK_RATE_HZ )
+```
+
+Con 512, `1000 / 512` en aritmética entera es **1**, no 1,95. El patrón clásico del código heredado
+de la línea AVR/FWDLGX —`vTaskDelay( 500 / portTICK_PERIOD_MS )`— **compila perfecto y espera el
+doble**: 500 ticks = 976 ms. Silencioso. (Con 1024 hubiera dado 0 y el compilador lo cazaba por
+división por cero; con 512 esa red de seguridad no existe.)
+
+Por eso `main.h`, en `USER CODE BEGIN EM`, lo redefine a un identificador inexistente:
+
+```c
+#undef  portTICK_PERIOD_MS
+#define portTICK_PERIOD_MS  USAR_pdMS_TO_TICKS_NO_portTICK_PERIOD_MS
+```
+
+Cualquier uso falla en compilación diciendo qué hacer. **No es un error del archivo: es a propósito.**
+
+**Regla: siempre `pdMS_TO_TICKS()`.** Es exacto para milisegundos **múltiplo de 125** (porque
+`512/1000 = 64/125`): 125, 250, 500, 1000, 2000, 5000 dan resultado exacto. Los que no lo son se
+truncan hacia abajo — la espera sale **un poco más corta, nunca más larga**, con error acotado a
+menos de un tick (~1,95 ms) y **sin acumularse**. Para lo que sea crítico, conviene **pensar los
+períodos en ticks** y dejar `pdMS_TO_TICKS()` para lo que tolera el redondeo.
+
+### Control de versiones — resuelto, y por qué se hizo
+
+`FWDLGARM_R1` **ya es un repo git**, con un tag por cada etapa validada en banco (`v0.0.1` … `v0.0.4`).
+**Etiquetar cada etapa validada no es opcional acá**: es lo que le da sentido al bring-up incremental,
+poder decir "hasta acá andaba" y volver.
+
+El motivo es concreto. El 2026-08-10 el proyecto se borró entero para rehacerlo desde cero **sin
+respaldo**: se perdieron el `Error_Handler()` con patrón de destellos, las funciones auxiliares
+`led_config()` / `error_delay_ms()` y la etapa con FreeRTOS ya validada. Nada era recuperable y hubo
+que rehacerlo. De ahí el `.gitignore` heredado de `FWDLGZ` (ignora `Debug/`, `Release/`,
+`.metadata/`, `*.launch`, `*.ioc.bak`).
 
 ## Build & flash
 
@@ -260,8 +331,22 @@ El build normal es desde el IDE. `Debug/` contiene los makefiles **generados** p
 (toolchain *GNU Tools for STM32 14.3.rel1*), así que `make` dentro de `Debug/` reproduce el mismo
 build — pero:
 
+- **Hay que invocar `make all`, no `make` a secas.** Los `subdir.mk` que el makefile incluye definen
+  el target `clean` **antes** de que aparezca `all:` (línea 61), así que el default goal de make
+  termina siendo `clean`: un `make` pelado **borra el build en vez de compilarlo**. CubeIDE siempre
+  invoca `make all`; a mano hay que acordarse.
+- **Hay que usar el `arm-none-eabi-gcc` de CubeIDE, no el de `/usr/bin`.** Los `subdir.mk` pasan
+  `-fcyclomatic-complexity`, que es una extensión del GCC de ST y el del sistema rechaza con
+  `unrecognized command-line option`. La toolchain está en
+  `/opt/st/stm32cubeide_2.2.0/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.linux64_*/tools/bin`
+  — ponerla al frente del `PATH`.
 - **`Debug/` es generado, no se edita a mano**: CubeIDE lo regenera y pisa los cambios. Para agregar
   fuentes o includes hay que hacerlo en las propiedades del proyecto (`.cproject`), no en los `.mk`.
+- **Una fuente nueva no entra al build sola.** Las listas de archivos viven en los `subdir.mk` **y**
+  en `Debug/objects.list` (que es lo que consume el link, vía `@objects.list`). Un `.c` nuevo en
+  `Core/Src/` —o un driver de la HAL que CubeMX acaba de copiar a `Drivers/`— no se compila hasta que
+  el IDE regenere esos archivos: **Project → Refresh (F5) y después Build**. El síntoma de olvidarlo
+  es un `undefined reference` en el link a funciones que sí existen en el árbol.
 - **`Debug/makefile` no es relocalizable**: referencia el linker script por **ruta absoluta**
   (`/home/pablo/Spymovil/.../FWDLGARM_R1/STM32L496RGTX_FLASH.ld`). Mover el árbol rompe el build
   hasta regenerarlo desde el IDE.
