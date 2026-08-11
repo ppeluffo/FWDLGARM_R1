@@ -42,6 +42,10 @@ extern LPTIM_HandleTypeDef hlptim1;
 /* La provee el port (port.c): incrementa el tick del kernel y pende PendSV si hace falta. */
 extern void xPortSysTickHandler( void );
 
+/* La genera CubeMX en main.c. No está en main.h, así que se declara acá: al salir de
+   Stop hay que rearmar el árbol de clocks con ella. */
+extern void SystemClock_Config( void );
+
 #define LSE_HZ                  32768UL
 #define LPTIM_PRESCALER         32UL                              /* espejo de LPTIM_PRESCALER_DIV32 */
 #define LPTIM_CLOCK_HZ          ( LSE_HZ / LPTIM_PRESCALER )      /* 1024 Hz                         */
@@ -107,5 +111,140 @@ void HAL_LPTIM_AutoReloadMatchCallback( LPTIM_HandleTypeDef *hlptim )
     {
         xPortSysTickHandler();
     }
+}
+
+/*==============================================================================
+ * TICKLESS
+ *
+ * Con configUSE_TICKLESS_IDLE = 2, la tarea idle llama a vPortSuppressTicksAndSleep()
+ * en lugar de quemar CPU. Acá se reprograma el LPTIM1 para que la próxima interrupción
+ * caiga al final del sueño, se entra en Stop 2, y al despertar se le informa al kernel
+ * cuántos ticks pasaron con vTaskStepTick().
+ *
+ * NO se usa la implementación nativa del port porque ésa se apoya en el SysTick, que
+ * se alimenta del HCLK y muere en Stop. Ese es el motivo de todo este archivo.
+ *============================================================================*/
+
+/* El contador es de 16 bits: 65536 cuentas a 1024 Hz = 64 s de techo por sueño. Si la
+   tarea idle pide más, se duerme de a 64 s y vuelve a llamar. */
+#define TICKLESS_MAX_TICKS      ( 0x10000UL / LPTIM_COUNTS_POR_TICK )
+
+/* Piso: cada ciclo de sueño cuesta fijo unos ~400 us de CPU despierta —dos esperas del
+   flag ARROK (3 ciclos de LSE cada una) más el relock del PLL en SystemClock_Config()—.
+   Por debajo de esto no compensa ni en energía ni en jitter. */
+#define TICKLESS_MIN_TICKS      3UL
+
+/*------------------------------------------------------------------------------
+ * CNT vive en el dominio del LSE, asíncrono respecto del bus: el RM exige leerlo dos
+ * veces seguidas y aceptar el valor sólo cuando ambas lecturas coinciden.
+ */
+static uint32_t prvLeerCNT( void )
+{
+    uint32_t ulPrimera, ulSegunda;
+
+    do
+    {
+        ulPrimera = LPTIM1->CNT;
+        ulSegunda = LPTIM1->CNT;
+    } while( ulPrimera != ulSegunda );
+
+    return ulSegunda;
+}
+
+/*------------------------------------------------------------------------------
+ * Pisa la weak que genera CubeMX en freertos.c.
+ */
+void vPortSuppressTicksAndSleep( TickType_t xExpectedIdleTime )
+{
+    uint32_t   ulCuentasDormidas;
+    TickType_t xTicksDormidos;
+
+    if( xExpectedIdleTime > TICKLESS_MAX_TICKS )
+    {
+        xExpectedIdleTime = TICKLESS_MAX_TICKS;
+    }
+
+    if( xExpectedIdleTime < TICKLESS_MIN_TICKS )
+    {
+        return;
+    }
+
+    /* A partir de acá no puede correr ninguna ISR: el WFI igual despierta con PRIMASK
+       en 1, pero el handler queda pendiente hasta el __enable_irq() del final. Eso es
+       lo que permite hacer la cuenta de ticks sin que nadie la pise. */
+    __disable_irq();
+    __DSB();
+    __ISB();
+
+    /* El kernel puede haber quedado listo para correr entre que decidió dormir y que
+       cortamos las interrupciones. */
+    if( eTaskConfirmSleepModeStatus() == eAbortSleep )
+    {
+        __enable_irq();
+        return;
+    }
+
+    /* TIM6 mantiene el timebase de la HAL interrumpiendo a 1 kHz: si queda vivo nos
+       despierta a los 2 ms y el tickless no sirve de nada. */
+    HAL_SuspendTick();
+
+    /* Reprogramar el LPTIM1 para que la IRQ caiga al final del sueño. Se para y se
+       vuelve a arrancar en vez de escribir ARR al vuelo: parar resetea CNT, con lo
+       cual el sueño empieza siempre desde cero y la cuenta de abajo es directa. */
+    ( void ) HAL_LPTIM_Counter_Stop_IT( &hlptim1 );
+    if( HAL_LPTIM_Counter_Start_IT( &hlptim1,
+                                    ( xExpectedIdleTime * LPTIM_COUNTS_POR_TICK ) - 1UL ) != HAL_OK )
+    {
+        Error_Handler();
+    }
+
+    /* ---- Duerme acá. El LPTIM1 sigue contando del LSE y despierta por su línea EXTI,
+       que HAL_LPTIM_Counter_Start_IT() ya dejó habilitada. ---- */
+    HAL_PWREx_EnterSTOP2Mode( PWR_STOPENTRY_WFI );
+
+    /* Stop apaga el PLL y devuelve el SYSCLK al MSI. Hay que rearmar el árbol ANTES de
+       tocar cualquier cosa del HAL, porque sus timeouts se calculan con SystemCoreClock. */
+    SystemClock_Config();
+
+    /* ¿Durmió todo o lo despertó otra cosa? Si el flag de autoreload está puesto, el
+       período se completó; si no, CNT dice hasta dónde llegó. */
+    if( __HAL_LPTIM_GET_FLAG( &hlptim1, LPTIM_FLAG_ARRM ) )
+    {
+        ulCuentasDormidas = xExpectedIdleTime * LPTIM_COUNTS_POR_TICK;
+    }
+    else
+    {
+        ulCuentasDormidas = prvLeerCNT();
+    }
+
+    /* Volver al tick normal. El flag y el pendiente del NVIC se limpian a mano para que
+       no entre un tick de más: la cuenta de todo el sueño la hace vTaskStepTick().
+
+       Se pierde el resto de la división (menos de un tick, < 1,95 ms) cada vez que algo
+       despierta al micro antes de tiempo. No afecta a los timestamps, que los estampa el
+       RTC; si alguna medición mostrara que importa, habría que arrastrar el resto. */
+    ( void ) HAL_LPTIM_Counter_Stop_IT( &hlptim1 );
+    __HAL_LPTIM_CLEAR_FLAG( &hlptim1, LPTIM_FLAG_ARRM );
+    NVIC_ClearPendingIRQ( LPTIM1_IRQn );
+    if( HAL_LPTIM_Counter_Start_IT( &hlptim1, LPTIM_TICK_ARR ) != HAL_OK )
+    {
+        Error_Handler();
+    }
+
+    xTicksDormidos = ( TickType_t ) ( ulCuentasDormidas / LPTIM_COUNTS_POR_TICK );
+    if( xTicksDormidos > xExpectedIdleTime )
+    {
+        xTicksDormidos = xExpectedIdleTime;   /* vTaskStepTick() no admite pasarse */
+    }
+    if( xTicksDormidos > 0U )
+    {
+        vTaskStepTick( xTicksDormidos );
+    }
+
+    /* OJO: HAL_GetTick() se queda atrás lo que haya durado el sueño, porque TIM6 estuvo
+       parado. Sirve para los timeouts del HAL, que son relativos, pero NO como hora. */
+    HAL_ResumeTick();
+
+    __enable_irq();
 }
 /*----------------------------------------------------------------------------*/

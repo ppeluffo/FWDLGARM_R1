@@ -52,6 +52,7 @@ entonces avanzó en cuatro etapas, todas validadas en banco y etiquetadas en git
 | `v0.0.2` | FreeRTOS con API nativa, tarea `tkCtl` |
 | `v0.0.3` | **Cristal externo: LSE + RTC**, `Error_Handler()` con destellos |
 | `v0.0.4` | **Tick del kernel por LPTIM1 desde el LSE**, 512 Hz exactos |
+| `v0.0.5` | **Tickless con Stop 2** — de 3,2 mA a 0,215 mA de placa |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
   `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
@@ -74,6 +75,12 @@ entonces avanzó en cuatro etapas, todas validadas en banco y etiquetadas en git
   Efecto secundario a tener presente: como el SysTick queda apagado, `error_delay_ms()` usa siempre
   su lazo tosco calibrado por `SystemCoreClock`, así que los destellos de diagnóstico funcionan pero
   con temporización aproximada.
+- **Tickless con Stop 2** (`v0.0.5`), `vPortSuppressTicksAndSleep()` en el mismo archivo:
+  `configUSE_TICKLESS_IDLE = 2`, techo de 64 s por sueño, piso de 3 ticks. Al despertar rellama a
+  `SystemClock_Config()` (Stop apaga el PLL) y le informa al kernel el tiempo dormido con
+  `vTaskStepTick()`. **`HAL_GetTick()` queda atrasado lo que haya durado el sueño**, porque TIM6 se
+  suspende antes de dormir: sirve para los timeouts relativos del HAL, **no como hora**.
+  Ver la sección de bajo consumo y la advertencia sobre el SWD.
 - **Tareas:** `tkCtl` (`Core/Src/FWDLGARM_R1_tkCtl.c`), prioridad `tskIDLE_PRIORITY+1`, stack de 384
   palabras, memoria **estática** (no toca el heap). Destella el LED cada 5 s. `defaultTask` existe
   sólo porque CubeMX no deja vaciar la lista de tareas, y se elimina con `vTaskDelete(NULL)` apenas
@@ -229,13 +236,44 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
      alimentado por el LSE, **sin** tickless (`configUSE_TICKLESS_IDLE = 0`). Código en
      `Core/Src/FWDLGARM_R1_lptim_tick.c`. El LED de `tkCtl` sigue destellando cada 5 s, que era el
      criterio de aceptación: el tick sale del cristal y los tiempos no cambiaron.
-   - **4b** ⏳ **es el próximo paso** — tickless de verdad: `configUSE_TICKLESS_IDLE = 2` y
-     `vPortSuppressTicksAndSleep()` con modo Stop. Un solo sospechoso nuevo, con 4a ya probado.
+   - **4b** ✅ **validado en banco** (`v0.0.5`) — tickless de verdad: `configUSE_TICKLESS_IDLE = 2` y
+     `vPortSuppressTicksAndSleep()` con Stop 2. Ver la sección de bajo consumo más abajo.
 5. **TERM / USART1** — consola y `printf`. Es el que más cambia el modo de trabajo: a partir de acá
    se depura interactivamente en vez de contar destellos.
 6. I2C (RTC externo, monitor de corriente) → RS485/Modbus → microSD/SPI → entradas analógicas →
    modem LTE.
-7. **Bajo consumo** al final: medición y ajuste de los modos Stop, ya con todo funcionando y medible.
+7. **Bajo consumo** — el firmware ya está (`v0.0.5`). Lo que queda es **hardware**: ver abajo.
+
+### Bajo consumo: estado y dónde está el problema ahora
+
+El tickless anda (`v0.0.5`) y **el firmware dejó de ser el que manda el consumo**:
+
+| Medición (placa entera, riel de 3,28 V) | Corriente |
+|---|---|
+| Antes del tickless | 3,2 mA |
+| Con tickless, **ST-LINK conectado al USB** | 0,36 mA |
+| Con tickless, ST-LINK desenchufado | **0,215 mA** |
+| **La fuente sola, en vacío** | **0,210 mA** |
+
+- **El ST-LINK aporta ~145 µA.** Las mediciones de bajo consumo se hacen con el dongle
+  **desenchufado del USB** — no alcanza con desconectar el cable a la placa.
+- Lo que el micro suma por encima de la fuente en vacío son **~5 µA**, consistente con el piso de
+  Stop 2 (LSE + RTC + LPTIM1 vivos) más el LED al 2 % de duty. **Es la resta de dos lecturas casi
+  iguales: sirve para decir "por debajo del piso del instrumento", no como medición.**
+- ⏳ **PENDIENTE DE HARDWARE, y es el que importa: los 210 µA de quiescent de la fuente.** Son ~40
+  veces el micro dormido, así que hoy el regulador define la autonomía de la batería, no el firmware.
+- Para volver a medir el micro hace falta **medir después del regulador** o un instrumento con
+  resolución de µA. Con este setup el firmware ya no es medible.
+
+#### ⚠ Con el tickless andando, el SWD se pone difícil
+
+El micro pasa **más del 98 % del tiempo en Stop 2, donde el SWD está muerto.** Un intento de conectar
+en `Hot plug` va a fallar con "no target found" **aunque el firmware esté perfecto**. No es la placa.
+
+Hay que tomar el micro en el reset: en CubeProgrammer, *Reset mode* → **`Hardware reset`** o
+**`Core reset`** (no `Hot plug`); por CLI, `mode=UR`. La launch config de CubeIDE ya usa
+`connect_under_reset`, así que desde el IDE anda sola. Ver también la sección del programador: si
+además queda NRST trabado, el síntoma se parece pero la causa es otra.
 
 #### FreeRTOS desde CubeMX: lo que ya se aprendió (paso 2)
 
