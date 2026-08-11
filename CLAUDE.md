@@ -72,9 +72,16 @@ entonces avanzó en cuatro etapas, todas validadas en banco y etiquetadas en git
   prescaler /32 → contador de 1024 Hz → `ARR = 1` → **512 Hz exactos, sin deriva**. **El SysTick ya no
   se arranca nunca** (el `SysTick_Handler()` de `cmsis_os2.c` queda muerto); el timebase de la HAL
   sigue en TIM6. Ver la sección de `configTICK_RATE_HZ` para por qué 512 y no 1024 ni 1000.
-  Efecto secundario a tener presente: como el SysTick queda apagado, `error_delay_ms()` usa siempre
-  su lazo tosco calibrado por `SystemCoreClock`, así que los destellos de diagnóstico funcionan pero
-  con temporización aproximada.
+  ⚠ **Efecto secundario que costó medio día el 2026-08-11:** como el SysTick queda apagado,
+  `error_delay_ms()` usa **siempre** su lazo tosco calibrado por `SystemCoreClock`. Y si
+  `Error_Handler()` se dispara desde adentro de `SystemClock_Config()`, esa variable todavía vale
+  **4 MHz en vez de 60**: los destellos salen **quince veces más rápidos** y el patrón de 2
+  parpadeos se convierte en un parpadeo tan veloz que a ojo **parece un LED prendido fijo**. Se
+  confundió con un cuelgue mudo más de una vez. Resuelto llamando a `SystemCoreClockUpdate()` al
+  entrar a `Error_Handler()`, y —mejor todavía— haciendo que además **lo diga por la consola**: la
+  USART se levanta ahora en `USER CODE BEGIN Init`, antes de `SystemClock_Config()`, corriendo con
+  el MSI a 4 MHz (a 9600 el divisor da 417, 0,08 % de error). Así hay diagnóstico por texto incluso
+  cuando el que falla es el reloj.
 - **Tickless con Stop 2** (`v0.0.5`), `vPortSuppressTicksAndSleep()` en el mismo archivo:
   `configUSE_TICKLESS_IDLE = 2`, techo de 64 s por sueño, piso de 3 ticks. Al despertar rellama a
   `SystemClock_Config()` (Stop apaga el PLL) y le informa al kernel el tiempo dormido con
