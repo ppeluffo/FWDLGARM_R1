@@ -240,8 +240,9 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
      `vPortSuppressTicksAndSleep()` con Stop 2. Ver la sección de bajo consumo más abajo.
 5. **TERM / USART1** — consola y `printf`. Es el que más cambia el modo de trabajo: a partir de acá
    se depura interactivamente en vez de contar destellos.
-6. I2C (RTC externo, monitor de corriente) → RS485/Modbus → microSD/SPI → entradas analógicas →
-   modem LTE.
+6. I2C (RTC externo, monitor de corriente) → RS485/Modbus → **microSD/SPI** → entradas analógicas →
+   modem LTE. La microSD ya tiene relevamiento y decisiones pendientes anotadas: ver
+   *microSD + FatFs: diseño pendiente*.
 7. **Bajo consumo** — el firmware ya está (`v0.0.5`). Lo que queda es **hardware**: ver abajo.
 8. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
@@ -601,6 +602,97 @@ Estas son las trampas que ya aparecieron, todas encontradas al portar TERM:
 | `vTaskDelay( ms / portTICK_PERIOD_MS )` | `pdMS_TO_TICKS( ms )` | `portTICK_PERIOD_MS` está **envenenado a propósito** en `main.h`; ver la sección del tick. |
 | `cli()` / `sei()`, `<avr/io.h>`, `<avr/interrupt.h>` | `taskENTER_CRITICAL()` / HAL, y el acceso a registros **baja al driver** | Principio HAL: sólo la capa de drivers toca el hardware. |
 | Acceso a registros desde un header de capa alta | empujarlo al driver | El `frtos-io.h` viejo tenía macros que escribían el USART del AVR. |
+
+### microSD + FatFs: diseño pendiente (paso 6 del roadmap)
+
+Relevado el **2026-08-11**, antes de escribir una línea. **No es código a escribir todavía**: la
+microSD no está poblada, y la regla del bring-up incremental es no escribir contra hardware ausente.
+Lo que sigue es lo que ya está averiguado y lo que **queda por decidir**, para que cuando toque el
+paso 6 se llegue con las decisiones tomadas y no discutiéndolas con el soldador en la mano.
+
+#### Lo que CubeMX da y lo que no
+
+CubeMX ofrece FatFs en *Middleware and Software Packs*. Lo que trae `STM32Cube_FW_L4 V1.18.2` es
+**FatFs de ChaN R0.12c** (`Middlewares/Third_Party/FatFs/src/ff.h:22` → rev `68300`) — casi con
+seguridad el mismo proyecto que hay detrás de la librería externa que se usó en la rama de FWDLGX.
+
+**Pero CubeMX da sólo la mitad de arriba.** Los `diskio` que ST provee en
+`FatFs/src/drivers/` son para SDMMC (BSP v1/v2), SDRAM, SRAM, USB host y PPP; **no hay ninguno de SD
+por SPI**, y los cuatro ejemplos de FatFs del paquete L4 son todos `FatFs_uSD` por SDMMC. Como en
+R001 la microSD va por **SPI3**, en CubeMX hay que elegir el modo **"User-defined"**: genera
+`FATFS/Target/user_diskio.c` con `USER_initialize/status/read/write/ioctl` **vacías**.
+
+| Capa | Quién la pone |
+|---|---|
+| `f_open/f_read/f_write/f_lseek`, FAT, directorios | CubeMX, gratis |
+| `diskio` — esqueleto y registro del driver | CubeMX genera el molde |
+| **Driver de tarjeta SD sobre SPI**: CMD0, CMD8, ACMD41, CMD58, CMD17/24, tokens, CRC7/CRC16, espera de `busy` | **nuestro, entero** |
+
+O sea: **no hay que rehacer el filesystem, hay que rehacer el driver de tarjeta** — justo lo que
+aportaba la librería externa del AVR. Su lógica se porta casi tal cual, porque el protocolo SD-SPI
+es idéntico byte a byte; lo que cambia es el transporte (registros del AVR → `HAL_SPI_*`, **no por
+poleo** — ver el checklist de portación).
+
+#### FreeRTOS: compatible, con tres asteriscos
+
+- **`option/syscall.c` está escrito contra CMSIS-RTOS** (`osMutexNew`, `osMutexAcquire`). Compila
+  —`cmsis_os2.c` está en el proyecto por los callbacks de memoria estática— pero quedaría siendo la
+  única parte de la aplicación hablando CMSIS. Reescribir sus cinco funciones con
+  `xSemaphoreCreateMutexStatic()` son ~40 líneas. **Recomendación: `_FS_REENTRANT = 0`** y que una
+  sola tarea sea dueña de la SD: la serialización sale del diseño, no de un mutex.
+- **`_FS_TIMEOUT = 1000` está en TICKS, no en ms.** Con el tick a 512 Hz son 1,95 s. Misma trampa
+  que `portTICK_PERIOD_MS`.
+- **`_USE_LFN = 3` (el default del template) llama a `pvPortMalloc`**, y un buffer LFN son ~600 bytes
+  por operación contra un heap de **3000 bytes** (`FreeRTOSConfig.h:71`). Va a **`_USE_LFN = 0`**:
+  nombres 8.3, que es lo que quiere un datalogger (`20260811.DAT` entra perfecto). De yapa, con LFN
+  apagado no se compilan `ccsbcs.c` ni la tabla de code page.
+- **RAM:** con `_FS_TINY = 0` un `FATFS` son ~560 bytes y un `FIL` ~550 (lleva el buffer de sector de
+  512 adentro). **Eso no entra en el stack de una tarea** (tkCmd tiene 512 palabras = 2 KB): o van
+  estáticos, o **`_FS_TINY = 1`**, que baja el `FIL` a ~40 bytes compartiendo el buffer del volumen.
+  Para quien escribe un archivo por vez, `_FS_TINY = 1` es la elección correcta.
+
+#### ⏳ Lo que hay que decidir — y por qué importa más que todo lo anterior
+
+**1. ¿R001 corta la alimentación de la microSD?** Un load switch o un P-MOS por GPIO. Una microSD
+consume **0,2 a 1 mA en idle** y **50 a 100 mA en pico de escritura**: contra los ~5 µA del micro
+dormido son tres órdenes de magnitud, así que **la tarjeta domina el balance energético y anula el
+tickless si queda alimentada**. Peor: una tarjeta "quieta" puede seguir haciendo garbage collection
+interno cientos de ms después de un write. **Verificar contra el esquemático `Hardware/R001/`.**
+
+Si el corte existe, arrastra tres consecuencias:
+
+- Hay que **desmontar y remontar** en cada ciclo (`f_mount(NULL, …)` + re-init), porque al cortar la
+  tarjeta pierde estado. El re-init —74 clocks, CMD0, ACMD41 hasta salir de idle— cuesta de decenas
+  a cientos de ms.
+- Por eso la política **no puede ser "escribir cada muestra"**: hay que acumular en RAM y volcar de a
+  bloques. Cuántas muestras se toleran perder define el tamaño del buffer.
+- Al cortar, los pines de SPI3 tienen que quedar **bajos o en Hi-Z**. Si quedan altos **alimentan la
+  tarjeta por los diodos de protección** y el corte no corta nada. Clásico, y cuesta verlo con el
+  tester.
+
+**2. ¿La microSD es el almacenamiento primario o es exportación/respaldo?** FAT es frágil ante corte
+de alimentación a mitad de un write: no se pierde el último registro, se puede perder **la FAT
+entera**. Un equipo a batería con un modem LTE que hunde el riel en el pico de TX es exactamente el
+caso malo.
+
+- *Primaria* → conviene **log crudo circular por sectores**, con FAT sólo para exportar. Robusto ante
+  corte, pero la tarjeta deja de ser legible directamente en una PC.
+- *Exportación*, con el dato primario en la NVM → **FatFs directo**, `f_sync()` por bloque, y si se
+  corrompe se reformatea sin drama.
+
+Mirar cómo estaba resuelto en FWDLGX antes de elegir.
+
+**3. Menores, pero conviene fijarlos:** `_VOLUMES = 1`; `_USE_MKFS` sólo si se quiere un comando
+`format` en la consola (cuesta ~2 KB de flash); `_FS_NORTC = 0` y **enganchar `get_fattime()` al
+RTC** para que los archivos tengan fecha de verdad.
+
+#### Encaje con FRTOS-IO
+
+**La SD NO entra en la tabla de `file_descriptor_t`.** FatFs ya *es* una API de archivos; meterla
+detrás de `frtos_read/write/ioctl` sería envolver una abstracción en otra sin ganar nada. La
+aplicación llama `f_open/f_write` directo, y el driver SD es dueño exclusivo del SPI3. `fdNVM` sí
+encaja en la tabla, porque ahí sí hay un stream de bytes. El candado `pwrLOCK_SD` ya existe en
+`pwr_lock.h` esperando a este driver.
 
 ### Qué vale la pena rescatar del prototipo `FWDLGZ` (sólo si Pablo lo pide)
 
