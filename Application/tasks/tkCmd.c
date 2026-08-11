@@ -273,12 +273,39 @@ static void cmdHelp( void );
 static void cmdStatus( void );
 static void cmdReset( void );
 
+/*
+ * Causa del último reset, leída de RCC_CSR antes de limpiarla.
+ *
+ * Las banderas son ACUMULATIVAS: quedan puestas hasta que alguien escribe RMVF.
+ * Por eso se leen y se limpian una sola vez, al arrancar — así el próximo
+ * arranque informa su causa y no la de todos los anteriores juntos.
+ *
+ * No es sólo para depurar: en un datalogger a batería, saber si rebotó por
+ * watchdog, por BOR (batería floja) o por software es información de campo.
+ */
+static uint32_t ulCausaReset;
+
+static void prvImprimirCausaReset( void )
+{
+    xprintf( "reset por    :%s%s%s%s%s%s\r\n",
+             ( ulCausaReset & RCC_CSR_LPWRRSTF ) ? " LPWR"    : "",
+             ( ulCausaReset & RCC_CSR_WWDGRSTF ) ? " WWDG"    : "",
+             ( ulCausaReset & RCC_CSR_IWDGRSTF ) ? " IWDG"    : "",
+             ( ulCausaReset & RCC_CSR_SFTRSTF  ) ? " SOFT"    : "",
+             ( ulCausaReset & RCC_CSR_BORRSTF  ) ? " BOR/POR" : "",
+             ( ulCausaReset & RCC_CSR_PINRSTF  ) ? " PIN"     : "" );
+}
+
 //------------------------------------------------------------------------------
 void tkCmd( void *pvParameters )
 {
     ( void ) pvParameters;
 
     char cChar;
+
+    /* Antes que nada, porque cualquier cosa que resetee de nuevo las pisa. */
+    ulCausaReset = RCC->CSR;
+    __HAL_RCC_CLEAR_RESET_FLAGS();
 
     /* Los drivers se abren desde acá y no desde main(): crear semáforos y stream
        buffers necesita el scheduler corriendo. */
@@ -295,6 +322,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     xprintf( "\r\n\r\nFWDLGARM_R1 - consola TERM\r\n" );
+    prvImprimirCausaReset();
     xprintf( "cmd>" );
 
     for( ;; )
@@ -330,6 +358,7 @@ static void cmdStatus( void )
              ( unsigned long ) xTaskGetTickCount(),
              ( unsigned long ) configTICK_RATE_HZ );
     xprintf( "clock        : %lu Hz\r\n", ( unsigned long ) SystemCoreClock );
+    prvImprimirCausaReset();
     xprintf( "terminal     : %s\r\n", drv_term_sense_presente() ? "conectada" : "ausente" );
     xprintf( "pwr locks    : 0x%08lX %s\r\n",
              ( unsigned long ) pwr_lock_estado(),
