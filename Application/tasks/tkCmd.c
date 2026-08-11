@@ -286,8 +286,19 @@ static void cmdReboot( void );
  */
 static uint32_t ulCausaReset;
 
+#define CAUSA_RESET_MASK   ( RCC_CSR_LPWRRSTF | RCC_CSR_WWDGRSTF | RCC_CSR_IWDGRSTF \
+                           | RCC_CSR_SFTRSTF  | RCC_CSR_BORRSTF  | RCC_CSR_PINRSTF )
+
 static void prvImprimirCausaReset( void )
 {
+    if( ( ulCausaReset & CAUSA_RESET_MASK ) == 0U )
+    {
+        /* Ninguna bandera puesta = no hubo reset de hardware. Es lo que pasa
+           después de un 'reboot', que salta al vector sin resetear nada. */
+        xprintf( "reset por    : ninguno (reinicio tibio, sin reset de hardware)\r\n" );
+        return;
+    }
+
     xprintf( "reset por    :%s%s%s%s%s%s\r\n",
              ( ulCausaReset & RCC_CSR_LPWRRSTF ) ? " LPWR"    : "",
              ( ulCausaReset & RCC_CSR_WWDGRSTF ) ? " WWDG"    : "",
@@ -304,9 +315,19 @@ void tkCmd( void *pvParameters )
 
     char cChar;
 
-    /* Antes que nada, porque cualquier cosa que resetee de nuevo las pisa. */
+    /*
+     * Antes que nada, porque cualquier cosa que resetee de nuevo las pisa.
+     *
+     * Y hay que BAJAR RMVF después de subirlo: en el L4 no es autolimpiante
+     * (__HAL_RCC_CLEAR_RESET_FLAGS() sólo hace SET_BIT). Mientras quede en 1 las
+     * banderas se mantienen borradas y el próximo arranque informaría "ninguno"
+     * aunque haya habido un reset de verdad. Se salvó de pasar desapercibido
+     * porque un reset de hardware resetea RCC_CSR y de paso bajaba RMVF — pero
+     * después de un 'reboot', que no resetea nada, el bit quedaba puesto.
+     */
     ulCausaReset = RCC->CSR;
     __HAL_RCC_CLEAR_RESET_FLAGS();
+    CLEAR_BIT( RCC->CSR, RCC_CSR_RMVF );
 
     /* Los drivers se abren desde acá y no desde main(): crear semáforos y stream
        buffers necesita el scheduler corriendo. */
