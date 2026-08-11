@@ -272,6 +272,7 @@ void tkCmd( void *pvParameters )
 static void cmdHelp( void );
 static void cmdStatus( void );
 static void cmdReset( void );
+static void cmdReboot( void );
 
 /*
  * Causa del último reset, leída de RCC_CSR antes de limpiarla.
@@ -320,6 +321,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
     FRTOS_CMD_register( "reset",  cmdReset  );
+    FRTOS_CMD_register( "reboot", cmdReboot );
 
     xprintf( "\r\n\r\nFWDLGARM_R1 - consola TERM\r\n" );
     prvImprimirCausaReset();
@@ -349,7 +351,11 @@ static void cmdHelp( void )
     xprintf( "Comandos:\r\n" );
     xprintf( "  help    - esta ayuda\r\n" );
     xprintf( "  status  - estado del sistema\r\n" );
-    xprintf( "  reset   - reinicia el micro\r\n" );
+    xprintf( "  reset   - reset por NVIC_SystemReset (pulsa NRST)\r\n" );
+    xprintf( "  reboot  - reinicio tibio, sin tocar NRST (diagnostico)\r\n" );
+    /* OJO: el parser matchea por PREFIJO, así que 'r' y 're' caen en 'reset',
+       que es el primero registrado. Para reboot hay que tipear al menos 'reb'. */
+    xprintf( "  (el parser matchea por prefijo: 'reb' para reboot, 'res' para reset)\r\n" );
 }
 //------------------------------------------------------------------------------
 static void cmdStatus( void )
@@ -370,9 +376,60 @@ static void cmdStatus( void )
 //------------------------------------------------------------------------------
 static void cmdReset( void )
 {
-    xprintf( "reiniciando...\r\n" );
+    xprintf( "reiniciando por NVIC_SystemReset (pulsa NRST)...\r\n" );
     vTaskDelay( pdMS_TO_TICKS( 125 ) );   /* que salga el mensaje antes del reset */
     NVIC_SystemReset();
+}
+//------------------------------------------------------------------------------
+/*
+ * Reinicio TIBIO: vuelve al vector de reset SIN pasar por NRST.
+ *
+ * Es un instrumento de diagnóstico, no un reset de verdad. En el STM32L496 no
+ * se puede evitar que un reset interno tire NRST a masa (el option byte
+ * NRST_MODE existe en G0/G4/L5/U5, no en esta familia), así que esta es la única
+ * forma de reiniciar el firmware dejando la línea de NRST quieta.
+ *
+ * PARA QUÉ: el 2026-08-11 cada "reset" deja la placa muerta hasta que se le corta
+ * la alimentación, y al volver informa BOR/POR — o sea que el riel se cae. Este
+ * comando separa las dos causas posibles de una vez:
+ *
+ *   reboot anda y reset mata la placa -> es la LÍNEA DE NRST. Algo colgado de
+ *                                        ella (enable del regulador, supervisor)
+ *                                        apaga la fuente. Es hardware.
+ *   los dos matan la placa            -> no es NRST; el transitorio lo genera
+ *                                        otra cosa.
+ *
+ * ⚠ NO es equivalente a un reset: los periféricos NO se reinicializan, así que
+ * quedan configurados de antes y los MX_*_Init() los van a reprogramar en
+ * caliente. Sirve para esta prueba; no es un mecanismo para dejar en producción.
+ */
+static void cmdReboot( void )
+{
+    xprintf( "reiniciando tibio, sin tocar NRST...\r\n" );
+    vTaskDelay( pdMS_TO_TICKS( 125 ) );
+
+    __disable_irq();
+
+    /* Callar todo lo que pueda interrumpir en medio del salto. */
+    for( uint32_t i = 0U; i < 8U; i++ )
+    {
+        NVIC->ICER[ i ] = 0xFFFFFFFFUL;
+        NVIC->ICPR[ i ] = 0xFFFFFFFFUL;
+    }
+    SysTick->CTRL = 0UL;
+
+    uint32_t ulSP = *( volatile uint32_t * )   FLASH_BASE;
+    uint32_t ulPC = *( volatile uint32_t * ) ( FLASH_BASE + 4UL );
+
+    /* El scheduler dejó al micro corriendo sobre el PSP; hay que volver al MSP
+       ANTES de reemplazar el stack pointer. */
+    __set_CONTROL( 0UL );
+    __ISB();
+    __set_MSP( ulSP );
+    __DSB();
+    __ISB();
+
+    ( ( void ( * )( void ) ) ulPC )();
 }
 //------------------------------------------------------------------------------
 
