@@ -146,6 +146,17 @@ int16_t drv_rs485_read( char *pvBuffer, uint16_t xBytes, TickType_t xTicksToWait
     return drv_uart_read( drvUART_RS485, pvBuffer, xBytes, xTicksToWait );
 }
 //------------------------------------------------------------------------------
+int16_t drv_rs485_read_frame( char *pvBuffer, uint16_t xBytes,
+                              TickType_t xEsperaPrimero, TickType_t xSilencio )
+{
+    if( xRieles[ rs485RAIL_BUS ].bEncendido == false )
+    {
+        return -1;
+    }
+
+    return drv_uart_read_frame( drvUART_RS485, pvBuffer, xBytes, xEsperaPrimero, xSilencio );
+}
+//------------------------------------------------------------------------------
 void drv_rs485_rx_flush( void )
 {
     drv_uart_rx_flush( drvUART_RS485 );

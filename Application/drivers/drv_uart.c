@@ -178,6 +178,50 @@ void drv_uart_errores_reset( drv_uart_id_t id )
     }
 }
 //------------------------------------------------------------------------------
+int16_t drv_uart_read_frame( drv_uart_id_t id, char *pvBuffer, uint16_t xBytes,
+                             TickType_t xEsperaPrimero, TickType_t xSilencio )
+{
+    if( ( id >= drvUART_COUNT ) || ( pvBuffer == NULL ) || ( xBytes == 0U ) )
+    {
+        return -1;
+    }
+
+    StreamBufferHandle_t xRx = xUarts[ id ].xRx;
+
+    /* El primer byte puede tardar: es el tiempo de respuesta del esclavo, que no
+       tiene nada que ver con la separación entre bytes de la trama. */
+    size_t xTotal = xStreamBufferReceive( xRx, pvBuffer, xBytes, xEsperaPrimero );
+
+    if( xTotal == 0U )
+    {
+        return 0;
+    }
+
+    /*
+     * A partir de acá, el criterio de fin es el SILENCIO. Cada lectura que vence
+     * significa que la línea se quedó callada, o sea que la trama terminó.
+     *
+     * No se cuenta un largo esperado a propósito: el largo de una respuesta
+     * Modbus depende de lo que el esclavo tenga para decir, y esperar una
+     * cantidad fija de bytes cuelga la tarea cuando el esclavo contesta menos de
+     * lo previsto, que es justo lo que hace un esclavo con un error.
+     */
+    while( xTotal < xBytes )
+    {
+        size_t xLeidos = xStreamBufferReceive( xRx, &pvBuffer[ xTotal ],
+                                               xBytes - xTotal, xSilencio );
+
+        if( xLeidos == 0U )
+        {
+            break;
+        }
+
+        xTotal += xLeidos;
+    }
+
+    return ( int16_t ) xTotal;
+}
+//------------------------------------------------------------------------------
 void drv_uart_rx_flush( drv_uart_id_t id )
 {
     if( id < drvUART_COUNT )

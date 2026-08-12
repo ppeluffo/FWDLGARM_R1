@@ -92,7 +92,15 @@ bool drv_rs485_power_estado( rs485_rail_t eRail );
  * que falle de formas raras.
  */
 int16_t drv_rs485_write( const char *pvBuffer, uint16_t xBytes );
+
+/* ⚠ Vuelve con UN byte. Para leer una respuesta entera va la de abajo. */
 int16_t drv_rs485_read ( char *pvBuffer, uint16_t xBytes, TickType_t xTicksToWait );
+
+/* Una trama completa, delimitada por silencio en la línea. Es lo que se usa para
+   hablar con un esclavo: ver drv_uart_read_frame() para el detalle. */
+int16_t drv_rs485_read_frame( char *pvBuffer, uint16_t xBytes,
+                              TickType_t xEsperaPrimero, TickType_t xSilencio );
+
 void    drv_rs485_rx_flush( void );
 
 #endif /* APPLICATION_DRIVERS_DRV_RS485_H_ */

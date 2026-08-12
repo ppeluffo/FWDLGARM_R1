@@ -1142,8 +1142,18 @@ static void cmdRtc( void )
  * Sirve para medir con el tester riel por riel ANTES de que exista Modbus, y
  * para ver la trama en el osciloscopio sin depender de que un esclavo conteste.
  */
-#define RS485_BUF           64U
+/* 256 = el máximo de una trama Modbus RTU, y el mismo tamaño que el buffer de RX
+   del driver: así el comando nunca es el que trunca. Estático porque en el stack
+   de tkCmd (512 palabras) no entra. */
+#define RS485_BUF           256U
 #define RS485_ESCUCHA_MS    500U
+
+/*
+ * Silencio que da por terminada la trama. El t3.5 de Modbus a 9600 son ~4 ms;
+ * con el tick a 512 Hz la resolución es de 1,95 ms, así que 3 ticks (~6 ms) es
+ * el valor más chico que se puede pedir con margen. Para el banco sobra.
+ */
+#define RS485_SILENCIO_MS    10U
 
 static const char *pcNombreRiel( rs485_rail_t eRail )
 {
@@ -1177,11 +1187,22 @@ static void prvRs485Estado( void )
              pwr_deep_sleep_permitido() ? "(Stop 2 habilitado)" : "(solo Sleep)" );
 }
 
-/* Escucha y vuelca en hexa + ASCII. Devuelve cuántos bytes juntó. */
+/*
+ * Escucha una TRAMA entera y la vuelca en hexa + ASCII.
+ *
+ * Antes usaba drv_rs485_read(), y salía con el primer byte de la respuesta: el
+ * resto quedaba en el buffer y aparecía recién en la llamada siguiente. La culpa
+ * era del comentario de drv_uart_read(), que prometía "bloqueante hasta juntar
+ * xBytes" cuando en realidad el stream buffer vuelve con uno. Ahora se pide una
+ * trama, que además es lo que va a necesitar Modbus.
+ */
 static int16_t prvRs485Escuchar( uint32_t ulMs )
 {
-    char    pcDatos[ RS485_BUF ];
-    int16_t sRet = drv_rs485_read( pcDatos, RS485_BUF, pdMS_TO_TICKS( ulMs ) );
+    static char pcDatos[ RS485_BUF ];
+
+    int16_t sRet = drv_rs485_read_frame( pcDatos, RS485_BUF,
+                                         pdMS_TO_TICKS( ulMs ),
+                                         pdMS_TO_TICKS( RS485_SILENCIO_MS ) );
 
     if( sRet < 0 )
     {

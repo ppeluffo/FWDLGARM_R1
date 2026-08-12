@@ -65,9 +65,39 @@ bool drv_uart_init( void );
    Devuelve los bytes escritos, o -1 si el fd no existe / hubo error. */
 int16_t drv_uart_write( drv_uart_id_t id, const char *pvBuffer, uint16_t xBytes );
 
-/* Bloqueante hasta juntar xBytes o vencer xTicksToWait. Devuelve cuántos leyó
-   (puede ser menos que los pedidos si venció el timeout). */
+/*
+ * ⚠ Vuelve apenas hay **UN** byte disponible, no cuando junta xBytes.
+ *
+ * Es la semántica del stream buffer de FreeRTOS —se creó con nivel de disparo 1—
+ * y no un descuido: para la consola es lo que se quiere, porque hay que atender
+ * cada tecla apenas llega.
+ *
+ * El comentario anterior decía "bloqueante hasta juntar xBytes" y era FALSO. Con
+ * eso escrito, el comando de escucha del RS485 salía con el primer byte de la
+ * respuesta y el resto quedaba en el buffer para la próxima llamada. Si lo que
+ * se quiere es una TRAMA entera, usar drv_uart_read_frame().
+ */
 int16_t drv_uart_read( drv_uart_id_t id, char *pvBuffer, uint16_t xBytes, TickType_t xTicksToWait );
+
+/*
+ * Lee UNA TRAMA, delimitada por SILENCIO en la línea.
+ *
+ * Espera el primer byte hasta `xEsperaPrimero`; a partir de ahí sigue acumulando
+ * mientras los bytes lleguen separados por menos de `xSilencio`, y corta cuando
+ * la línea se queda callada ese tiempo. Devuelve el total, o 0 si nunca llegó
+ * nada.
+ *
+ * Es la delimitación de Modbus RTU: allá `xSilencio` es el t3.5. Y es también lo
+ * que quiere cualquier diálogo con un módulo que contesta en ráfaga.
+ *
+ * ⚠ El piso de resolución es un tick, o sea **1,95 ms** con el tick a 512 Hz. A
+ * 9600 el t3.5 son ~4 ms y entra cómodo; a 19200 son ~2 ms y queda al límite. Si
+ * alguna vez hay que ir más rápido, la salida no es subir el tick sino el
+ * registro `RTOR` del USART, que cuenta el silencio en tiempos de bit por
+ * hardware. Ver CLAUDE.md.
+ */
+int16_t drv_uart_read_frame( drv_uart_id_t id, char *pvBuffer, uint16_t xBytes,
+                             TickType_t xEsperaPrimero, TickType_t xSilencio );
 
 void drv_uart_rx_flush( drv_uart_id_t id );
 bool drv_uart_rx_enable( drv_uart_id_t id );
