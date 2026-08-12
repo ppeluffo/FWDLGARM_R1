@@ -32,19 +32,20 @@ propia **R001**. Linaje: firmware AVR `FWDLGX 3.0.0` (AVR128DA64) → port a ATS
 → **STM32L4**. El criterio de diseño permanente es **ultra bajo consumo**: es un datalogger a
 batería que duerme casi todo el tiempo.
 
-### Estado actual (2026-08-10)
+### Estado actual (2026-08-12)
 
 **La placa está poblada sólo parcialmente.** Hoy hay montados: la **fuente**, el **micro**, la
-**interfaz de programación SWD** (PA13/PA14), **LEDs en PB9 y PA2** y el **cristal de 32.768 kHz en
-PC14/PC15** con sus condensadores de carga a GND. Nada más: no hay modem LTE, ni RS485, ni
-dispositivos I2C, ni microSD, ni front-end analógico.
+**interfaz de programación SWD** (PA13/PA14), **LEDs en PB9 y PA2**, el **cristal de 32.768 kHz en
+PC14/PC15** con sus condensadores de carga a GND, y el **conector de la terminal** (PB6/PB7 más
+`TERM_SENSE` en PB5). Nada más: no hay modem LTE, ni RS485, ni dispositivos I2C, ni microSD, ni
+front-end analógico.
 
-Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED y SWD**. El resto del
-mapa de pines de `interfases_pines.csv` es el diseño completo de R001, no hardware presente — no
-tiene sentido escribir drivers contra periféricos que todavía no están montados.
+Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD y la consola**.
+El resto del mapa de pines de `interfases_pines.csv` es el diseño completo de R001, no hardware
+presente — no tiene sentido escribir drivers contra periféricos que todavía no están montados.
 
 El proyecto **se borró y se rehízo de cero el 2026-08-10** (ver control de versiones), y desde
-entonces avanzó en cuatro etapas, todas validadas en banco y etiquetadas en git:
+entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
 
 | Tag | Estado |
 |---|---|
@@ -53,6 +54,7 @@ entonces avanzó en cuatro etapas, todas validadas en banco y etiquetadas en git
 | `v0.0.3` | **Cristal externo: LSE + RTC**, `Error_Handler()` con destellos |
 | `v0.0.4` | **Tick del kernel por LPTIM1 desde el LSE**, 512 Hz exactos |
 | `v0.0.5` | **Tickless con Stop 2** — de 3,2 mA a 0,215 mA de placa |
+| `v0.0.6` | **Consola TERM (TX + RX) y `TERM_SENSE`** — el micro dormido queda en **~5 µA** |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
   `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
@@ -88,13 +90,21 @@ entonces avanzó en cuatro etapas, todas validadas en banco y etiquetadas en git
   `vTaskStepTick()`. **`HAL_GetTick()` queda atrasado lo que haya durado el sueño**, porque TIM6 se
   suspende antes de dormir: sirve para los timeouts relativos del HAL, **no como hora**.
   Ver la sección de bajo consumo y la advertencia sobre el SWD.
+- **Consola TERM** (`v0.0.6`), USART1 a **9600** por PB6/PB7: `Application/tasks/tkCmd.c` sobre
+  FRTOS-IO. TX por interrupción con semáforo y candado de energía; RX por interrupción a un stream
+  buffer, con la tarea **bloqueada en el kernel** (nada de poleo — ver el checklist de portación).
+  Comandos: `help`, `status`, `sense`, `reset`, `reboot`. ⚠ **El parser matchea por PREFIJO**, así
+  que `r` ejecuta `reset` y `s` ejecuta `status`; hay que tipear `res`/`reb` y `st`/`se`.
 - **Tareas:** `tkCtl` (`Application/tasks/tkCtl.c`), prioridad `tskIDLE_PRIORITY+1`, stack de 384
-  palabras, memoria **estática** (no toca el heap). Destella el LED cada 5 s. `defaultTask` existe
-  sólo porque CubeMX no deja vaciar la lista de tareas, y se elimina con `vTaskDelete(NULL)` apenas
-  arranca el scheduler.
+  palabras, memoria **estática** (no toca el heap). Destella el LED y polea `TERM_SENSE` **cada 1 s**
+  (`TKCTL_PERIOD_MS`). `tkCmd` (`Application/tasks/tkCmd.c`), también estática, 512 palabras de las
+  que usa 137. `defaultTask` existe sólo porque CubeMX no deja vaciar la lista de tareas, y se
+  elimina con `vTaskDelete(NULL)` apenas arranca el scheduler.
 - `Error_Handler()` tiene **patrón de destellos de diagnóstico** en el LED: **2 = no arrancó un
   oscilador de baja velocidad** (con el cristal: cristal, condensadores o drive muy bajo),
-  **5 = cualquier otra falla**. Es el único canal de diagnóstico hasta que exista la consola TERM.
+  **5 = cualquier otra falla**. Desde `v0.0.6` **además lo dice por texto**, con `error_print()` en
+  `main.c`: HAL por poleo, que es lo único que anda antes del scheduler y con las interrupciones
+  cortadas. El LED quedó como respaldo para cuando no hay nadie mirando la consola.
   Detalles de implementación más abajo.
 - `LED_PORT`/`LED_PIN`/`LED2_*` están en `main.h` (bloque *Private defines*) como **alias** de los
   símbolos que genera CubeMX, para que los vean todos los `.c` sin duplicar la definición del pin.
@@ -276,17 +286,26 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    LSE ya estaba resuelto y era el único requisito. Partido en dos para no mover dos variables juntas:
    - **4a** ✅ **validado en banco** (`v0.0.4`) — el tick del kernel deja el SysTick y pasa al LPTIM1
      alimentado por el LSE, **sin** tickless (`configUSE_TICKLESS_IDLE = 0`). Código en
-     `Application/FRTOS/port_lptim_tick.c`. El LED de `tkCtl` sigue destellando cada 5 s, que era el
+     `Application/FRTOS/port_lptim_tick.c`. El LED de `tkCtl` siguió destellando a su ritmo, que era el
      criterio de aceptación: el tick sale del cristal y los tiempos no cambiaron.
    - **4b** ✅ **validado en banco** (`v0.0.5`) — tickless de verdad: `configUSE_TICKLESS_IDLE = 2` y
      `vPortSuppressTicksAndSleep()` con Stop 2. Ver la sección de bajo consumo más abajo.
-5. **TERM / USART1** — consola y `printf`. Es el que más cambia el modo de trabajo: a partir de acá
-   se depura interactivamente en vez de contar destellos.
+5. ✅ **TERM / USART1** (`v0.0.6`) — consola, `printf` y `TERM_SENSE`. Es el que más cambió el modo
+   de trabajo: a partir de acá se depura interactivamente en vez de contar destellos. Comandos hoy:
+   `help`, `status`, `sense`, `reset`, `reboot`. Lo que costó el día **no fue firmware** —un cable de
+   serie malo y la frecuencia SWD en Auto—; ambos quedaron documentados más arriba.
 6. I2C (RTC externo, monitor de corriente) → RS485/Modbus → **microSD/SPI** → entradas analógicas →
    modem LTE. La microSD ya tiene relevamiento y decisiones pendientes anotadas: ver
    *microSD + FatFs: diseño pendiente*.
-7. **Bajo consumo** — el firmware ya está (`v0.0.5`). Lo que queda es **hardware**: ver abajo.
+7. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
+   hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
 8. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+
+**Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
+(`reboot` anda, así que no es la reinicialización del firmware); `MX_RTC_Init()` reinicializa la hora
+en cada arranque porque el bloque `Check_RTC_BKUP` está vacío; el parser de comandos matchea por
+**prefijo**, así que un carácter de ruido puede ejecutar un comando destructivo; y `BOR_LEV` sigue en
+el default más bajo (~1,7 V), que para un equipo a batería conviene decidir a propósito.
 
 ### Compilar en Release: por qué todavía no, y cuándo sí
 
@@ -326,26 +345,33 @@ conservan las verificaciones de FreeRTOS, incluidas las de prioridad de interrup
 `USE_FULL_ASSERT` está apagado en ambas configuraciones, con lo cual el `assert_param()` de la HAL no
 hace nada en ninguna de las dos: ahí no hay diferencia entre Debug y Release.
 
-### Bajo consumo: estado y dónde está el problema ahora
+### Bajo consumo: estado ✅
 
-El tickless anda (`v0.0.5`) y **el firmware dejó de ser el que manda el consumo**:
+**Cerrado en `v0.0.6`.** El tickless anda, la fuente se arregló, y los dos números que quedaron son
+los que corresponden.
 
 | Medición (placa entera, riel de 3,28 V) | Corriente |
 |---|---|
-| Antes del tickless | 3,2 mA |
-| Con tickless, **ST-LINK conectado al USB** | 0,36 mA |
-| Con tickless, ST-LINK desenchufado | **0,215 mA** |
-| **La fuente sola, en vacío** | **0,210 mA** |
+| Antes del tickless (`v0.0.4`) | 3,2 mA |
+| **Dormido, terminal desconectada** | **65 µA** |
+| La fuente sola, en vacío | 60 µA |
+| **Despierto, terminal conectada** | **3,5 mA** (+1,5 mA del conector y el adaptador) |
+| Con tickless, **ST-LINK conectado al USB** | +145 µA |
 
+- **El micro dormido consume ~5 µA**, la resta de las dos primeras filas. El número se midió **dos
+  veces con pisos distintos** —contra los 210 µA de quiescent de la fuente vieja y contra los 60 de
+  la nueva— y dio lo mismo las dos veces, así que ya no es "por debajo del piso del instrumento"
+  sino una medición. Coincide con lo esperable de Stop 2 con LSE + RTC + LPTIM1 vivos, más el LED al
+  2 % de duty.
+- **Los 3,5 mA con la terminal enchufada NO son una falla: son el diseño.** `TERM_SENSE` toma
+  `pwrLOCK_TERM` y el port baja de Stop 2 a **Sleep**, que deja el PLL a 60 MHz para que la USART
+  pueda recibir. Es el precio de tener consola, y sólo se paga mientras alguien está mirando. Si
+  alguna vez importa —una terminal olvidada enchufada en campo— la palanca es bajar el reloj
+  mientras dure la sesión, no sacar el candado.
 - **El ST-LINK aporta ~145 µA.** Las mediciones de bajo consumo se hacen con el dongle
   **desenchufado del USB** — no alcanza con desconectar el cable a la placa.
-- Lo que el micro suma por encima de la fuente en vacío son **~5 µA**, consistente con el piso de
-  Stop 2 (LSE + RTC + LPTIM1 vivos) más el LED al 2 % de duty. **Es la resta de dos lecturas casi
-  iguales: sirve para decir "por debajo del piso del instrumento", no como medición.**
-- ⏳ **PENDIENTE DE HARDWARE, y es el que importa: los 210 µA de quiescent de la fuente.** Son ~40
-  veces el micro dormido, así que hoy el regulador define la autonomía de la batería, no el firmware.
-- Para volver a medir el micro hace falta **medir después del regulador** o un instrumento con
-  resolución de µA. Con este setup el firmware ya no es medible.
+- Lo que queda por delante no es optimizar esto: es que cada periférico nuevo (modem, microSD, ADC)
+  entre con su candado y su corte de alimentación, sin arruinar estos 5 µA.
 
 #### ⚠ Con el tickless andando, el SWD se pone difícil
 
@@ -588,7 +614,7 @@ Application/
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
-└── tasks/      tkCtl.{h,c}             control, destello del LED
+└── tasks/      tkCtl.{h,c}             control: destello del LED + poleo de TERM_SENSE
                 tkCmd.{h,c}             consola
 ```
 
@@ -626,7 +652,29 @@ Es un bitmask, no un contador, así que tomar dos veces el mismo candado es idem
 uno tomado, `vPortSuppressTicksAndSleep()` baja de **Stop 2 a Sleep**: el micro se sigue durmiendo
 entre interrupciones pero los relojes quedan vivos. Sin esto, entrar en Stop a mitad de una
 transmisión la corta. Lo usan hoy TERM_SENSE y el TX de la consola; van a necesitarlo el modem, la
-microSD y el ADC.
+microSD y el ADC. Medido en `v0.0.6`: con `pwrLOCK_TERM` tomado la placa consume **3,5 mA**, contra
+**65 µA** sin candados. El mecanismo funciona en las dos direcciones.
+
+### ✅ TERM_SENSE se polea, no va por EXTI (decidido el 2026-08-12)
+
+La primera versión ponía PB5 en EXTI por ambos flancos, razonando que polear despertaría al micro.
+**El razonamiento era falso y conviene entender por qué, porque el mismo error se puede repetir con
+cualquier entrada digital que venga.** El porqué largo está en `Application/drivers/drv_term_sense.h`;
+el resumen:
+
+- **`tkCtl` ya despierta cada segundo** para destellar el LED. Leer un pin en esa vuelta no agrega ni
+  una despertada. El poleo sale caro cuando **obliga** a despertar; acá no obliga a nada.
+- **La EXTI sí costaba.** El conector rebota: se midieron **hasta 82 interrupciones por un solo
+  enchufe**, y cada flanco despierta al micro de Stop 2 y le hace rehacer `SystemClock_Config()`.
+- **Muestrear un nivel una vez por segundo es antirrebote perfecto y gratis.** Con EXTI habría que
+  agregar un filtro.
+- El datalogger trabaja **desatendido**; la terminal es la excepción. Detectarla en milisegundos era
+  resolver un problema que no existe.
+
+La regla general que queda: **EXTI para lo que tiene que despertar al micro, poleo desde `tkCtl` para
+lo que sólo tiene que estar al día.** Y cuando entre el watchdog, decidir de una vez el período de
+`tkCtl`, el kick y el poleo juntos — los tres comparten esa vuelta, así que subir sólo uno no ahorra
+nada.
 
 ### Portar FWDLGX a ARM: el checklist
 
