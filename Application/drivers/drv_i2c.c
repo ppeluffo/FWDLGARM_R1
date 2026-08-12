@@ -11,8 +11,16 @@
    a lo generado; de acá para arriba nadie lo ve. */
 extern I2C_HandleTypeDef hi2c2;
 
-/* Serializa a los usuarios del bus: el RTC y la EEPROM se leen desde tareas
-   distintas y una transacción no se puede entrelazar con otra. */
+/*
+ * Serializa a los usuarios del bus: el RTC y la EEPROM se leen desde tareas
+ * distintas y una transacción no se puede entrelazar con otra.
+ *
+ * Es RECURSIVO a propósito. Hay operaciones que son varias transacciones que no
+ * se pueden separar —una escritura multipágina en la EEPROM, con su acknowledge
+ * polling entre página y página— y que por eso toman el bus entero con
+ * drv_i2c_bus_take(). Si el mutex no fuera recursivo, la primera transacción de
+ * adentro se trabaría contra el candado que tomó su propio dueño.
+ */
 static SemaphoreHandle_t xMutex   = NULL;
 static StaticSemaphore_t xMutexCtrl;
 
@@ -49,7 +57,7 @@ static int16_t prvTransferir( bool bEsLectura,
         return -1;
     }
 
-    if( xSemaphoreTake( xMutex, xTicksToWait ) != pdTRUE )
+    if( xSemaphoreTakeRecursive( xMutex, xTicksToWait ) != pdTRUE )
     {
         return -1;
     }
@@ -101,7 +109,7 @@ static int16_t prvTransferir( bool bEsLectura,
     }
 
     pwr_lock_release( pwrLOCK_I2C );
-    ( void ) xSemaphoreGive( xMutex );
+    ( void ) xSemaphoreGiveRecursive( xMutex );
 
     return sRet;
 }
@@ -112,7 +120,7 @@ static int16_t prvTransferir( bool bEsLectura,
 
 bool drv_i2c_init( void )
 {
-    xMutex = xSemaphoreCreateMutexStatic( &xMutexCtrl );
+    xMutex = xSemaphoreCreateRecursiveMutexStatic( &xMutexCtrl );
     xDone  = xSemaphoreCreateBinaryStatic( &xDoneCtrl );
 
     return ( ( xMutex != NULL ) && ( xDone != NULL ) );
@@ -141,7 +149,7 @@ bool drv_i2c_probe( uint8_t ucDevAddr )
         return false;
     }
 
-    if( xSemaphoreTake( xMutex, portMAX_DELAY ) != pdTRUE )
+    if( xSemaphoreTakeRecursive( xMutex, portMAX_DELAY ) != pdTRUE )
     {
         return false;
     }
@@ -153,9 +161,27 @@ bool drv_i2c_probe( uint8_t ucDevAddr )
     ulUltimoError = HAL_I2C_GetError( &hi2c2 );
 
     pwr_lock_release( pwrLOCK_I2C );
-    ( void ) xSemaphoreGive( xMutex );
+    ( void ) xSemaphoreGiveRecursive( xMutex );
 
     return ( xEstado == HAL_OK );
+}
+//------------------------------------------------------------------------------
+bool drv_i2c_bus_take( TickType_t xTicksToWait )
+{
+    if( xMutex == NULL )
+    {
+        return false;
+    }
+
+    return ( xSemaphoreTakeRecursive( xMutex, xTicksToWait ) == pdTRUE );
+}
+//------------------------------------------------------------------------------
+void drv_i2c_bus_give( void )
+{
+    if( xMutex != NULL )
+    {
+        ( void ) xSemaphoreGiveRecursive( xMutex );
+    }
 }
 //------------------------------------------------------------------------------
 uint32_t drv_i2c_last_error( void )

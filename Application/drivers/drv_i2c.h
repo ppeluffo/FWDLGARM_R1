@@ -85,6 +85,21 @@ int16_t drv_i2c_write( uint8_t ucDevAddr, uint16_t usMemAddr, uint8_t ucMemAddrL
  */
 bool drv_i2c_probe( uint8_t ucDevAddr );
 
+/*
+ * Toma el bus para VARIAS transacciones seguidas, y lo suelta.
+ *
+ * Hace falta cuando una operación lógica no se puede partir: la escritura
+ * multipágina de la EEPROM es escribir-esperar-escribir-esperar, y si otra tarea
+ * se mete en el medio va a recibir un NACK de la memoria ocupada y lo va a leer
+ * como un error suyo.
+ *
+ * El mutex es recursivo, así que las llamadas a read/write/probe de adentro
+ * vuelven a tomarlo sin trabarse. **Cada take necesita su give**: lo más simple
+ * es que sólo los drivers de chip los usen, en la misma función.
+ */
+bool drv_i2c_bus_take( TickType_t xTicksToWait );
+void drv_i2c_bus_give( void );
+
 /* Código de error de la HAL de la última operación fallida (HAL_I2C_ERROR_*).
    `HAL_I2C_ERROR_AF` es un NACK: nadie contestó, o la EEPROM está ocupada. */
 uint32_t drv_i2c_last_error( void );

@@ -9,6 +9,7 @@
 #include "tkCmd.h"
 #include "drv_uart.h"
 #include "drv_i2c.h"
+#include "drv_eeprom.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -273,6 +274,7 @@ static void cmdHelp( void );
 static void cmdStatus( void );
 static void cmdSense( void );
 static void cmdI2c( void );
+static void cmdEe( void );
 static void cmdReset( void );
 static void cmdReboot( void );
 
@@ -345,6 +347,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "status", cmdStatus );
     FRTOS_CMD_register( "sense",  cmdSense  );
     FRTOS_CMD_register( "i2c",    cmdI2c    );
+    FRTOS_CMD_register( "ee",     cmdEe     );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
 
@@ -377,7 +380,8 @@ static void cmdHelp( void )
     xprintf( "  help    - esta ayuda\r\n" );
     xprintf( "  status  - estado del sistema\r\n" );
     xprintf( "  sense   - nivel del pin TERM_SENSE (PB5) + monitor de flancos\r\n" );
-    xprintf( "  i2c     - bus I2C2. Sin argumentos, dice como se usa\r\n" );
+    xprintf( "  i2c     - bus I2C2 crudo. Sin argumentos, dice como se usa\r\n" );
+    xprintf( "  ee      - EEPROM M24M01 (128 KB). Sin argumentos, dice como se usa\r\n" );
     xprintf( "  reset   - reset por NVIC_SystemReset (pulsa NRST)\r\n" );
     xprintf( "  reboot  - reinicio tibio, sin tocar NRST (diagnostico)\r\n" );
     /* OJO: el parser matchea por PREFIJO, así que 'r' y 're' caen en 'reset',
@@ -662,6 +666,184 @@ static void cmdI2c( void )
     }
 
     prvI2cUso();
+}
+//------------------------------------------------------------------------------
+/*
+ * EEPROM M24M01, con dirección PLANA de 17 bits: 00000..1FFFF.
+ *
+ *   ee rd   <addr> <n>            lee y muestra en hexa + ASCII
+ *   ee wr   <addr> <texto>        escribe el texto (sin espacios)
+ *   ee test                       las dos trampas de una vez
+ *
+ * El 'test' es el que vale. Prueba a la vez las dos cosas que rompen en silencio
+ * y que ningún read/write suelto detecta:
+ *
+ *  - CRUCE DE PÁGINA: escribe 300 bytes arrancando 100 antes de un borde de 256.
+ *    Sin partir en páginas, los últimos bytes darían la vuelta y pisarían el
+ *    principio de la misma página. La relectura lo caza.
+ *  - CRUCE DE BLOQUE: escribe a caballo de la frontera de los 64 KB, donde cambia
+ *    la dirección de dispositivo (A0 -> A2). Si el bit A16 no se calcula bien,
+ *    la segunda mitad aterriza en el bloque equivocado.
+ *
+ * Escribe de verdad, en dos zonas concretas: 0x00F60..0x0108B y 0x0FFC0..0x1003F.
+ */
+#define EE_BUF          32U
+#define EE_TEST_LARGO   300U
+
+static void prvEeUso( void )
+{
+    xprintf( "uso (addr y n en HEXA, espacio plano 00000..1FFFF):\r\n" );
+    xprintf( "  ee rd   <addr> <n>       n hasta %02X\r\n", ( unsigned ) EE_BUF );
+    xprintf( "  ee wr   <addr> <texto>   texto sin espacios\r\n" );
+    xprintf( "  ee test                  cruce de pagina y de bloque\r\n" );
+}
+
+/*
+ * Escribe un patrón, lo relee y compara. El patrón depende de la posición
+ * ABSOLUTA, así que si un tramo aterriza donde no va, el byte no coincide y de
+ * paso dice a qué posición correspondía.
+ */
+static bool prvEeProbarTramo( const char *pcNombre, uint32_t ulAddr )
+{
+    /* Estático y no en el stack: son 300 bytes contra las 512 palabras de tkCmd,
+       de las que hoy quedan libres unas 367. Entraría, pero dejar el margen del
+       stack colgando de un buffer de banco es pedirle un desborde al futuro. En
+       .bss no molesta: sobran 200 KB de RAM. */
+    static char pcDatos[ EE_TEST_LARGO ];
+
+    for( uint32_t i = 0U; i < EE_TEST_LARGO; i++ )
+    {
+        pcDatos[ i ] = ( char ) ( ( ulAddr + i ) & 0xFFU );
+    }
+
+    xprintf( "%s: escribiendo %u bytes en %05lX...\r\n",
+             pcNombre, ( unsigned ) EE_TEST_LARGO, ( unsigned long ) ulAddr );
+
+    if( drv_eeprom_write( ulAddr, pcDatos, EE_TEST_LARGO ) != ( int32_t ) EE_TEST_LARGO )
+    {
+        xprintf( "%s: FALLO la escritura (HAL_I2C_ERROR = 0x%08lX)\r\n",
+                 pcNombre, ( unsigned long ) drv_i2c_last_error() );
+        return false;
+    }
+
+    memset( pcDatos, 0, sizeof( pcDatos ) );
+
+    if( drv_eeprom_read( ulAddr, pcDatos, EE_TEST_LARGO ) != ( int32_t ) EE_TEST_LARGO )
+    {
+        xprintf( "%s: FALLO la lectura (HAL_I2C_ERROR = 0x%08lX)\r\n",
+                 pcNombre, ( unsigned long ) drv_i2c_last_error() );
+        return false;
+    }
+
+    for( uint32_t i = 0U; i < EE_TEST_LARGO; i++ )
+    {
+        uint8_t ucEsperado = ( uint8_t ) ( ( ulAddr + i ) & 0xFFU );
+
+        if( ( uint8_t ) pcDatos[ i ] != ucEsperado )
+        {
+            xprintf( "%s: DIFIERE en %05lX: leido %02X, esperado %02X\r\n",
+                     pcNombre, ( unsigned long ) ( ulAddr + i ),
+                     ( unsigned ) ( uint8_t ) pcDatos[ i ], ( unsigned ) ucEsperado );
+            return false;
+        }
+    }
+
+    xprintf( "%s: OK, %u bytes verificados\r\n", pcNombre, ( unsigned ) EE_TEST_LARGO );
+    return true;
+}
+
+static void cmdEe( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        prvEeUso();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "test" ) == 0 )
+    {
+        /* 0x00F60: arranca 160 bytes antes del borde de página de 0x01000, así
+           que los 300 bytes cruzan DOS bordes de página. */
+        bool bPag = prvEeProbarTramo( "pagina", 0x00F60UL );
+
+        /* 0x0FFC0: los 300 bytes cruzan la frontera de los 64 KB, donde cambia
+           la dirección de dispositivo. */
+        bool bBlq = prvEeProbarTramo( "bloque", 0x0FFC0UL );
+
+        xprintf( "\r\nresultado: %s\r\n",
+                 ( bPag && bBlq ) ? "EEPROM VALIDADA" : "HAY UNA FALLA, ver arriba" );
+        return;
+    }
+
+    if( ucArgs < 3U )
+    {
+        prvEeUso();
+        return;
+    }
+
+    uint32_t ulAddr = prvHex( argv[ 2 ] );
+    char     pcDatos[ EE_BUF + 1U ];
+
+    if( strcmp( argv[ 1 ], "rd" ) == 0 )
+    {
+        uint32_t ulN = prvHex( argv[ 3 ] );
+
+        if( ( ulN == 0UL ) || ( ulN > EE_BUF ) )
+        {
+            xprintf( "n debe estar entre 1 y %02X (en hexa)\r\n", ( unsigned ) EE_BUF );
+            return;
+        }
+
+        int32_t lRet = drv_eeprom_read( ulAddr, pcDatos, ulN );
+
+        if( lRet < 0 )
+        {
+            xprintf( "ERROR: fuera de rango, o HAL_I2C_ERROR = 0x%08lX\r\n",
+                     ( unsigned long ) drv_i2c_last_error() );
+            return;
+        }
+
+        xprintf( "%05lX:", ( unsigned long ) ulAddr );
+        for( int32_t i = 0; i < lRet; i++ )
+        {
+            xprintf( " %02X", ( unsigned ) ( ( uint8_t ) pcDatos[ i ] ) );
+        }
+        xprintf( "  |" );
+        for( int32_t i = 0; i < lRet; i++ )
+        {
+            char c = pcDatos[ i ];
+            xputChar( ( ( c >= 0x20 ) && ( c < 0x7F ) ) ? c : '.' );
+        }
+        xprintf( "|\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "wr" ) == 0 )
+    {
+        uint32_t ulN = ( uint32_t ) strlen( argv[ 3 ] );
+
+        if( ulN > EE_BUF )
+        {
+            ulN = EE_BUF;
+        }
+
+        int32_t lRet = drv_eeprom_write( ulAddr, argv[ 3 ], ulN );
+
+        if( lRet < 0 )
+        {
+            xprintf( "ERROR: fuera de rango, o HAL_I2C_ERROR = 0x%08lX\r\n",
+                     ( unsigned long ) drv_i2c_last_error() );
+            return;
+        }
+
+        xprintf( "escritos %ld bytes en %05lX\r\n",
+                 ( long ) lRet, ( unsigned long ) ulAddr );
+        return;
+    }
+
+    prvEeUso();
 }
 //------------------------------------------------------------------------------
 static void cmdReset( void )

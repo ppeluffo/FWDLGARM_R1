@@ -595,7 +595,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | TERM (consola) | PB6 TX, PB7 RX → **USART1** |
 | LTE (modem) | PA0 TX, PA1 RX → **UART4** |
 | RS485 (modbus) | PB10 TX, PB11 RX → **USART3** |
-| I2C | PB13 SCL, PB14 SDA |
+| I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | SPI (microSD) | PA15 NSS, PC10 SCK, PC11 MISO, PC12 MOSI |
 | Contador de pulsos CNT0 | PA12 (EXTI) |
 | Analógicas | PC5, PB0 |
@@ -631,6 +631,8 @@ Application/
 ├── pwr/        pwr_lock.{h,c}          candados de energía (ver abajo)
 ├── drivers/    drv_uart.{h,c}          UART sobre la HAL, tabla de instancias
 │               drv_term_sense.{h,c}    TERM_SENSE, poleado por tkCtl (no EXTI)
+│               drv_i2c.{h,c}           bus I2C2 por interrupción + candado de bus
+│               drv_eeprom.{h,c}        M24M01, dirección plana de 17 bits
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
@@ -695,6 +697,33 @@ La regla general que queda: **EXTI para lo que tiene que despertar al micro, pol
 lo que sólo tiene que estar al día.** Y cuando entre el watchdog, decidir de una vez el período de
 `tkCtl`, el kick y el poleo juntos — los tres comparten esa vuelta, así que subir sólo uno no ahorra
 nada.
+
+### ⚠ La EEPROM es una M24M01 de 128 KB, no una M24M02 de 256
+
+Descubierto el **2026-08-12** con `i2c scan`, y contradice el comentario heredado de
+`FWDLGX.X/SRC/ULIBS/eeprom.h`. La firma que lo delató: el chip contesta en las direcciones de 7 bits
+**`50` y `51`**, y su *Identification Page* en **`58` y `59`** (mismo chip, código de dispositivo
+`1011` en vez de `1010`). Una M24M02 **tendría** que contestar en `50..53`: los bits A17/A16 los
+decodifica adentro y no son patas que se puedan atar. Dos bloques y no cuatro = 1 Mbit.
+
+Consecuencias que ya están resueltas en `drv_eeprom.{h,c}`, pero que hay que tener presentes:
+
+- **La dirección es de 17 bits y el bit A16 viaja en el byte de dispositivo** (`0xA0` los primeros
+  64 KB, `0xA2` los segundos). El driver expone una dirección plana `0x00000..0x1FFFF` y esconde eso.
+- **`eeprom.c` de FWDLGX usa `uint16_t` y habla siempre a `0xA0`**: el firmware del AVR usaba **sólo
+  64 KB**, la mitad del chip. No era un error allá, pero **su direccionamiento no se puede portar
+  tal cual**.
+- ⚠ **No escribir nunca en `58`/`59`.** La página de identificación se bloquea en sólo-lectura de
+  forma **permanente e irreversible**, y el bloqueo se dispara con una escritura. Leerla es gratis.
+
+Y las dos trampas de escribir en cualquier EEPROM I2C, ambas mudas, ambas resueltas en el driver y
+ejercitadas por el comando `ee test`:
+
+1. **La escritura de página no desborda: DA LA VUELTA.** Pasarse del borde de 256 bytes no sigue en
+   la página siguiente, pisa el principio de *esa misma* página. Sin error y sin aviso.
+2. **Después de escribir, el chip queda sordo ~5 ms** y NACKea todo, incluso su propia dirección. Ese
+   NACK **no es un error**: es *acknowledge polling*, hay que reintentar. Sin esto, escribir dos
+   páginas seguidas falla siempre en la segunda.
 
 ### Portar FWDLGX a ARM: el checklist
 
