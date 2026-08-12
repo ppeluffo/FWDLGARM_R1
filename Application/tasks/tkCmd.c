@@ -26,8 +26,10 @@ StackType_t  tkCmd_Stack[ tkCmd_STACK_SIZE ];
  * Refresh(F5) + regenerar subdir.mk/objects.list en el IDE, y eso es una segunda
  * variable moviéndose justo cuando queremos aislar una.
  *
- * Además de esto, el tickless está anulado en FreeRTOSConfig.h (bloque USER CODE
- * Defines) y el EXTI de TERM_SENSE se apaga más abajo. El micro NO duerme.
+ * Mientras estuvo activo, el modo banco pedía además que el micro NO durmiera:
+ * el tickless anulado en FreeRTOSConfig.h y el EXTI de TERM_SENSE apagado más
+ * abajo. Las dos cosas ya se repusieron (2026-08-12); el apagado del EXTI queda
+ * acá dentro, compilado fuera, para cuando haya que volver a usar el andamio.
  *
  * ---------------------------------------------------------------------------
  * ETAPA 1 (2026-08-11) - TX. ✅ CERRADA.
@@ -414,9 +416,11 @@ static void cmdStatus( void )
  *   baja, hay eventos, pero el
  *   driver sigue diciendo ausente-> FIRMWARE, en prvActualizar().
  *
- * El monitor polea cada 100 ms, que acá no cuesta nada porque el tickless está
- * anulado. NO es la forma de leer el pin en producción —para eso está la EXTI—:
- * es un instrumento de banco, y por eso vive en el comando y no en el driver.
+ * El monitor polea cada 100 ms. Eso NO es la forma de leer el pin en producción
+ * —para eso está la EXTI, que es lo único que no arruina el tickless—: es un
+ * instrumento de banco, y por eso vive en el comando y no en el driver. Se puede
+ * hacer sin culpa porque para escribir el comando ya hay una terminal conectada,
+ * o sea el candado pwrLOCK_TERM tomado y el micro en Sleep, no en Stop 2.
  */
 #define SENSE_MONITOR_MS        20000U
 #define SENSE_MUESTREO_MS         100U

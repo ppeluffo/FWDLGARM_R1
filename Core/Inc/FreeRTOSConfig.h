@@ -170,23 +170,6 @@ standard names. */
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
 
-/*
- * ⚠ TEMPORAL - BANCO DE PRUEBA DE LA TERM (2026-08-11)
- *
- * El tickless queda ANULADO para depurar la consola: el micro no entra nunca en
- * Stop 2, así que la USART tiene reloj siempre y el SWD se puede conectar en
- * Hot plug. Con esto el consumo vuelve a ~3,2 mA: es a propósito.
- *
- * Se hace acá, en el bloque USER CODE, y no en CubeMX, porque este bloque va
- * DESPUÉS del #define generado (línea 80) y sobrevive una regeneración. El .ioc
- * sigue diciendo 2, que es el valor bueno.
- *
- * PARA VOLVER A BAJO CONSUMO: borrar estas cuatro líneas. No hay que tocar nada
- * más — vPortSuppressTicksAndSleep() sigue compilado y en su lugar.
- */
-#undef  configUSE_TICKLESS_IDLE
-#define configUSE_TICKLESS_IDLE                  0
-
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */
