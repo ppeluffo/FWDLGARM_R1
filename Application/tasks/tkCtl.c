@@ -6,6 +6,7 @@
  */
 
 #include "tkCtl.h"
+#include "drv_term_sense.h"
 #include "main.h"
 
 /* Memoria estática de la tarea: definida acá una sola vez. */
@@ -28,6 +29,16 @@ void tkCtl(void *pvParameters)
 
     for( ;; )
     {
+        /*
+         * Poleo de TERM_SENSE. Sale gratis: esta tarea ya despierta acá para el
+         * destello, así que leer un pin no agrega una sola despertada. Por eso
+         * el pin NO está en EXTI — ver el porqué largo en drv_term_sense.h.
+         *
+         * La latencia de detección es una vuelta del lazo, y con la terminal
+         * siendo un caso excepcional de monitoreo, eso no le molesta a nadie.
+         */
+        drv_term_sense_poll();
+
         led_flash();
         vTaskDelay( pdMS_TO_TICKS( TKCTL_PERIOD_MS ) );
     }

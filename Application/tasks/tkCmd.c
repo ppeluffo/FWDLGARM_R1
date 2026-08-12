@@ -138,17 +138,14 @@ void tkCmd( void *pvParameters )
      *   nada -> ni siquiera llegó a correr tkCmd, o el USART no está vivo.
      *           Ahí el sospechoso es el NRST trabado (ver CLAUDE.md), no esto.
      *   [A]  -> la tarea arrancó y la TX anda.
-     *   [B]  -> pasó el HAL_NVIC_DisableIRQ.
      *   [C]  -> frtos_open_all() volvió bien: semáforos y stream buffer creados.
      *   [D]  -> el Receive_IT quedó abortado.
+     *
+     * Hubo una miga [B] que apagaba la EXTI de TERM_SENSE en el NVIC. Se sacó el
+     * 2026-08-12, cuando el pin pasó a leerse por poleo desde tkCtl y dejó de
+     * tener línea EXTI que apagar.
      */
     prvTx( "\r\n\r\n[A] tkCmd arranco\r\n" );
-
-    /* TERM_SENSE afuera. CubeMX habilita EXTI9_5 en MX_GPIO_Init() pase lo que
-       pase, así que no alcanza con no llamar a drv_term_sense_init(): hay que
-       apagar la línea en el NVIC. */
-    HAL_NVIC_DisableIRQ( TERM_SENSE_EXTI_IRQn );
-    prvTx( "[B] EXTI de TERM_SENSE apagado\r\n" );
 
 #if ( TKCMD_BANCO_ONDA_U == 1 )
     /*
@@ -402,25 +399,23 @@ static void cmdStatus( void )
 }
 //------------------------------------------------------------------------------
 /*
- * TERM_SENSE: foto de la configuración + monitor de flancos en vivo.
+ * TERM_SENSE: foto del estado + monitor en vivo.
  *
- * El pin dice "ausente" con la terminal enchufada, y hay tres causas posibles que
- * desde afuera se ven igual. El comando las separa de una sola pasada:
+ * Separa de una pasada las tres causas de un "ausente" con la terminal puesta,
+ * que desde afuera se ven iguales:
  *
- *   el nivel NUNCA baja          -> HARDWARE. El pull-up interno lo deja en alto y
- *                                   nada lo tira a masa: o TERM_SENSE no está
- *                                   poblado en R001, o no llega al conector. Se
- *                                   confirma con el tester y el esquemático.
- *   el nivel baja, eventos = 0   -> CONFIGURACIÓN de la EXTI. Mirar los registros
- *                                   que imprime el encabezado.
- *   baja, hay eventos, pero el
- *   driver sigue diciendo ausente-> FIRMWARE, en prvActualizar().
+ *   el nivel NUNCA baja           -> HARDWARE: el pull-up interno lo deja en alto
+ *                                    y nada lo tira a masa. Tester y esquemático.
+ *   el nivel baja pero el driver
+ *   sigue diciendo ausente        -> el poleo de tkCtl no está corriendo.
+ *   el driver ve la terminal pero
+ *   el candado queda libre        -> FIRMWARE, en prvActualizar().
  *
- * El monitor polea cada 100 ms. Eso NO es la forma de leer el pin en producción
- * —para eso está la EXTI, que es lo único que no arruina el tickless—: es un
- * instrumento de banco, y por eso vive en el comando y no en el driver. Se puede
- * hacer sin culpa porque para escribir el comando ya hay una terminal conectada,
- * o sea el candado pwrLOCK_TERM tomado y el micro en Sleep, no en Stop 2.
+ * El monitor lee el pin CRUDO cada 100 ms, mucho más seguido que el poleo real de
+ * tkCtl: es a propósito, así se ve el atraso del muestreo (la columna "driver"
+ * cambia hasta una vuelta de tkCtl después que la columna del pin). Es un
+ * instrumento de banco; en producción el pin lo mira tkCtl una vez por vuelta y
+ * nada más.
  */
 #define SENSE_MONITOR_MS        20000U
 #define SENSE_MUESTREO_MS         100U
@@ -432,19 +427,17 @@ static void cmdSense( void )
 
     bool bNivel = drv_term_sense_nivel_pin();
 
-    xprintf( "TERM_SENSE (PB5), activo en BAJO\r\n" );
+    xprintf( "TERM_SENSE (PB5), activo en BAJO, leido por poleo desde tkCtl\r\n" );
     xprintf( "  nivel del pin : %d (%s)  -> terminal %s\r\n",
              bNivel ? 1 : 0,
              bNivel ? "alto" : "bajo",
              bNivel ? "AUSENTE" : "PRESENTE" );
     xprintf( "  driver dice   : %s\r\n", drv_term_sense_presente() ? "conectada" : "ausente" );
-    xprintf( "  eventos EXTI  : %lu\r\n", ( unsigned long ) drv_term_sense_eventos() );
+    xprintf( "  cambios       : %lu\r\n", ( unsigned long ) drv_term_sense_cambios() );
     xprintf( "  candado TERM  : %s\r\n",
              ( pwr_lock_estado() & ( 1UL << pwrLOCK_TERM ) ) ? "tomado" : "libre" );
     xprintf( "  MODER/PUPDR   : %lu / %lu (espera 0 = entrada / 1 = pull-up)\r\n",
              ( unsigned long ) xCfg.ulModer, ( unsigned long ) xCfg.ulPupdr );
-    xprintf( "  EXTI IMR/RTSR/FTSR : %d/%d/%d   NVIC EXTI9_5 : %d (espera 1/1/1  1)\r\n",
-             xCfg.bImr ? 1 : 0, xCfg.bRtsr ? 1 : 0, xCfg.bFtsr ? 1 : 0, xCfg.bNvic ? 1 : 0 );
 
     xprintf( "\r\nmonitor %lu s - enchufa y desenchufa la terminal.\r\n",
              ( unsigned long ) ( SENSE_MONITOR_MS / 1000U ) );
@@ -470,12 +463,12 @@ static void cmdSense( void )
 
         if( bNivel != bAnterior )
         {
-            xprintf( "  t=%lu  pin -> %d (%s)   eventos EXTI: %lu   driver: %s\r\n",
+            xprintf( "  t=%lu  pin -> %d (%s)   driver: %s   candado: %s\r\n",
                      ( unsigned long ) xTaskGetTickCount(),
                      bNivel ? 1 : 0,
                      bNivel ? "AUSENTE" : "PRESENTE",
-                     ( unsigned long ) drv_term_sense_eventos(),
-                     drv_term_sense_presente() ? "conectada" : "ausente" );
+                     drv_term_sense_presente() ? "conectada" : "ausente",
+                     ( pwr_lock_estado() & ( 1UL << pwrLOCK_TERM ) ) ? "tomado" : "libre" );
             bAnterior = bNivel;
         }
     }
@@ -484,8 +477,8 @@ static void cmdSense( void )
     xEspera = portMAX_DELAY;
     ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xEspera );
 
-    xprintf( "monitor terminado. eventos EXTI totales: %lu\r\n",
-             ( unsigned long ) drv_term_sense_eventos() );
+    xprintf( "monitor terminado. cambios de estado: %lu\r\n",
+             ( unsigned long ) drv_term_sense_cambios() );
 }
 //------------------------------------------------------------------------------
 static void cmdReset( void )
