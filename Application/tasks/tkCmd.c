@@ -279,6 +279,7 @@ static void cmdI2c( void );
 static void cmdEe( void );
 static void cmdRtc( void );
 static void cmdRs485( void );
+static void cmdKeys( void );
 static void cmdReset( void );
 static void cmdReboot( void );
 
@@ -368,10 +369,15 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "ee",     cmdEe     );
     FRTOS_CMD_register( "rtc",    cmdRtc    );
     FRTOS_CMD_register( "rs485",  cmdRs485  );
+    FRTOS_CMD_register( "keys",   cmdKeys   );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
 
-    xprintf( "\r\n\r\nFWDLGARM_R1 - consola TERM\r\n" );
+    /* La versión y la fecha de compilación en el banner, no sólo en 'status':
+       es lo primero que uno quiere ver al enchufar la terminal, y contesta sin
+       tipear nada la pregunta de si quedó flasheado el binario que se creía. */
+    xprintf( "\r\n\r\n%s %s - consola TERM\r\n", FW_NOMBRE, FW_VERSION );
+    xprintf( "compilado %s\r\n", FW_FECHA );
     prvImprimirCausaReset();
     xprintf( "cmd>" );
 
@@ -419,6 +425,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "ee",     "EEPROM M24M01 (128 KB): leer, escribir y test",         prvEeUso      },
     { "rtc",    "RTC externo MCP79410: hora, validez y cortes",          prvRtcUso     },
     { "rs485",  "bus RS485 y los 3 rieles de alimentacion",              prvRs485Uso   },
+    { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
     { "reboot", "reinicio tibio, sin tocar NRST (diagnostico)",          NULL          },
 };
@@ -477,6 +484,8 @@ static void cmdHelp( void )
 //------------------------------------------------------------------------------
 static void cmdStatus( void )
 {
+    xprintf( "version      : %s %s\r\n", FW_NOMBRE, FW_VERSION );
+    xprintf( "compilado    : %s\r\n", FW_FECHA );
     xprintf( "tick        : %lu (%lu Hz)\r\n",
              ( unsigned long ) xTaskGetTickCount(),
              ( unsigned long ) configTICK_RATE_HZ );
@@ -1269,6 +1278,64 @@ static void cmdRs485( void )
     }
 
     prvRs485Uso();
+}
+//------------------------------------------------------------------------------
+/*
+ * Muestra el código CRUDO de cada tecla, sin pasar por el parser.
+ *
+ * Existe porque "la flecha arriba no hace nada" tiene dos causas que desde este
+ * lado se ven iguales: que el historial esté vacío, o que la terminal no mande
+ * nada al apretar la flecha —muchos monitores serie simples no mandan las teclas
+ * de cursor—. Con esto se ve exactamente qué llega, si es que llega algo.
+ *
+ * Lo que TIENE que aparecer al apretar flecha arriba son tres bytes:
+ *
+ *     1B 5B 41    ESC [ A    modo normal (CSI)
+ *     1B 4F 41    ESC O A    modo application cursor keys (SS3)
+ *
+ * Los dos los entiende el parser. Si no aparece ninguno, el problema es la
+ * terminal y no el firmware.
+ */
+#define KEYS_TIMEOUT_S      20U
+
+static void cmdKeys( void )
+{
+    xprintf( "aprieta teclas y te muestro lo que llega.\r\n" );
+    xprintf( "flecha arriba deberia dar: 1B 5B 41  o bien  1B 4F 41\r\n" );
+    xprintf( "'q' o %u s para salir.\r\n\r\n", ( unsigned ) KEYS_TIMEOUT_S );
+
+    TickType_t xEspera = pdMS_TO_TICKS( 200 );
+    ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xEspera );
+
+    uint32_t ulVueltas = ( KEYS_TIMEOUT_S * 1000U ) / 200U;
+    char     cTecla;
+
+    while( ulVueltas-- > 0U )
+    {
+        if( frtos_read( fdTERM, &cTecla, 1U ) != 1 )
+        {
+            continue;
+        }
+
+        if( cTecla == 'q' )
+        {
+            break;
+        }
+
+        xprintf( " %02X", ( unsigned ) ( ( uint8_t ) cTecla ) );
+
+        /* El imprimible al lado del hexa, que ayuda a leer las secuencias: en
+           ESC [ A el '[' y la 'A' se reconocen de una. */
+        if( ( cTecla >= 0x20 ) && ( cTecla < 0x7F ) )
+        {
+            xprintf( "('%c')", cTecla );
+        }
+    }
+
+    xEspera = portMAX_DELAY;
+    ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xEspera );
+
+    xprintf( "\r\nfin.\r\n" );
 }
 //------------------------------------------------------------------------------
 static void cmdReset( void )

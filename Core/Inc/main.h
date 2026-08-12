@@ -113,6 +113,22 @@ void Error_Handler(void);
 #define LED2_PORT              LED2_GPIO_Port
 #define LED2_PIN               LED2_Pin
 
+/*
+ * Identificación del firmware.
+ *
+ * Vive acá, en un bloque USER CODE de main.h, y no en un header propio de
+ * Application/, porque main.h ya lo incluye todo el mundo y agregar un archivo
+ * nuevo obliga al baile de Refresh(F5) + regenerar el build en el IDE. El bloque
+ * USER CODE sobrevive las regeneraciones de CubeMX.
+ *
+ * FW_FECHA sale del compilador: dice qué binario está corriendo de verdad, que
+ * es la pregunta que más veces hubo que contestar en este bring-up. Un número de
+ * versión se olvida de subir; la fecha de compilación no miente nunca.
+ */
+#define FW_NOMBRE              "FWDLGARM_R1"
+#define FW_VERSION             "0.0.8"
+#define FW_FECHA               __DATE__ " " __TIME__
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
