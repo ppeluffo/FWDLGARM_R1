@@ -119,9 +119,51 @@ bool drv_rtc_leer_falla_power( bool bCaida, RtcTimeType_t *pxHora );
    Leer ANTES: esto es destructivo. */
 bool drv_rtc_limpiar_falla_power( void );
 
-/* SRAM de 64 bytes respaldada por la pila: 0x00..0x3F en direcciones relativas.
-   Es el lugar natural para una firma de "la configuración es válida". */
+/*==============================================================================
+ * ¿SE PUEDE CREER LA HORA?
+ *
+ * La pregunta no es retórica: el 2026-08-12, en cuatro cortes de alimentación
+ * seguidos, el respaldo aguantó tres y falló uno. En campo esto va a pasar —una
+ * pila se agota, un contacto se afloja— y **un datalogger que estampa
+ * `2001-01-01` en las muestras sin marcarlas es peor que uno que no estampa
+ * nada**: los datos malos se mezclan con los buenos y no hay forma de separarlos
+ * después.
+ *
+ * Adivinar por la fecha es frágil (¿qué año es "demasiado viejo"?). El mecanismo
+ * bueno es una FIRMA en la SRAM del propio MCP79410, y funciona porque **la SRAM
+ * y el contador de tiempo se alimentan de la misma pila**:
+ *
+ *     firma intacta  <=>  el respaldo sostuvo  <=>  el reloj nunca se detuvo
+ *     firma perdida  <=>  el respaldo falló    <=>  el chip arrancó frío
+ *
+ * No hay caso intermedio, y esa es toda la gracia: no es una heurística, es una
+ * equivalencia física. Si algún día la hora se guardara en un lado y la firma en
+ * otro con alimentaciones distintas, el mecanismo dejaría de valer.
+ *
+ * La firma la escribe drv_rtc_escribir(): fijar la hora es exactamente el
+ * momento en que alguien afirma que es correcta.
+ *============================================================================*/
+typedef enum {
+    rtcHORA_VALIDA = 0,     /* la firma está: el reloj no se interrumpió       */
+    rtcHORA_ARRANQUE_FRIO,  /* la firma no está: se perdió el respaldo         */
+    rtcHORA_SIN_RTC         /* el chip no contesta                             */
+} rtc_validez_t;
+
+rtc_validez_t drv_rtc_validez( void );
+
+/* Borra la firma. Es para PROBAR el mecanismo en banco sin tener que sacar la
+   pila: deja al equipo exactamente como si hubiera arrancado frío. */
+bool drv_rtc_invalidar( void );
+
+/*------------------------------------------------------------------------------
+ * SRAM de 64 bytes respaldada por la pila, direcciones 0x00..0x3F.
+ *
+ * Los primeros DRV_RTC_SRAM_USUARIO bytes son de la firma y el driver **rechaza
+ * escribirlos** desde acá; leerlos sí se puede, para diagnóstico. La aplicación
+ * empieza en DRV_RTC_SRAM_USUARIO.
+ *----------------------------------------------------------------------------*/
 #define DRV_RTC_SRAM_SIZE       64U
+#define DRV_RTC_SRAM_USUARIO     5U   /* 4 de magia + 1 de versión */
 
 int16_t drv_rtc_sram_leer   ( uint8_t ucAddr, char *pvBuffer, uint8_t ucBytes );
 int16_t drv_rtc_sram_escribir( uint8_t ucAddr, const char *pvBuffer, uint8_t ucBytes );

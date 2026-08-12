@@ -327,6 +327,44 @@ corte. Por eso el esquema es:
 | **MCP79410** | **Autoritativo.** Sobrevive al corte de alimentación. Es de donde sale la hora de verdad. |
 | **RTC interno del STM32** | **Copia de trabajo.** Se carga desde el externo al arrancar; los timestamps salen de registros, sin pagar una transacción I2C cada vez. Se resincroniza cada tanto para corregir deriva. |
 
+#### ✅ Cómo se sabe si la hora es confiable: la firma en la SRAM
+
+**El respaldo por pila es intermitente**, medido el 2026-08-12: de cuatro cortes de alimentación
+seguidos, el MCP79410 aguantó tres y falló uno, volviendo a su fecha en blanco (`2001-01-01`). No es
+firmware —se comportó igual las cuatro veces— ni una pila agotada, que fallaría siempre; el perfil es
+de **contacto intermitente en el porta pila**. Queda como pendiente de hardware.
+
+Pero el episodio destapó algo más importante que la pila: **el firmware tiene que poder decir "esta
+hora no es confiable"**. En campo esto va a pasar, y un datalogger que estampa `2001-01-01` en las
+muestras sin marcarlas es peor que uno que no estampa nada — los datos malos se mezclan con los
+buenos y después no hay forma de separarlos.
+
+Adivinar por la fecha es frágil (¿qué año es "demasiado viejo"?). El mecanismo implementado es una
+**firma de 5 bytes en la SRAM del propio MCP79410**, y funciona porque **la SRAM y el contador de
+tiempo se alimentan de la misma pila**:
+
+```
+firma intacta  <=>  el respaldo sostuvo  <=>  el reloj nunca se detuvo
+firma perdida  <=>  el respaldo falló    <=>  el chip arrancó frío
+```
+
+**No hay caso intermedio, y ahí está toda la gracia: no es una heurística, es una equivalencia
+física.** Si algún día la hora quedara en un lado y la firma en otro con alimentaciones distintas, el
+mecanismo dejaría de valer y habría que repensarlo.
+
+Detalles que importan:
+
+- La firma la escribe **`drv_rtc_escribir()`**, y **después** de poner la hora: fijar la hora es
+  justo el momento en que alguien afirma que es correcta. El orden no es casual — al revés, si
+  fallara la puesta en hora el equipo quedaría jurando que una hora incorrecta es confiable, que es
+  el único desenlace realmente malo.
+- `drv_rtc_validez()` chequea además que el oscilador esté corriendo: con la firma intacta pero
+  `ST` en 0 la hora está congelada, y devolver "válida" sería mentir.
+- Los primeros `DRV_RTC_SRAM_USUARIO` bytes de la SRAM son de la firma y `drv_rtc_sram_escribir()`
+  **rechaza escribirlos**. La aplicación empieza después.
+- El comando **`rtc invalid`** borra la firma para poder ejercitar el camino de arranque en frío
+  **sin sacar la pila**.
+
 #### ⚠ `PWRFAIL` es un latch, no un registro rodante
 
 Encontrado por Pablo el 2026-08-12, cortando la alimentación dos veces seguidas: la segunda vez las

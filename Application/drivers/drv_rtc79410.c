@@ -36,6 +36,23 @@
 #define RTC_TIMEOUT_MS      250U
 #define RTC_TICKS           pdMS_TO_TICKS( RTC_TIMEOUT_MS )
 
+/*
+ * Firma de "la hora es confiable", en la SRAM respaldada por la pila.
+ *
+ * Cuatro bytes de magia más uno de versión. Con cuatro bytes, que la SRAM caiga
+ * por casualidad en este patrón al arrancar en frío es 1 en 4 mil millones: el
+ * modo de falla real es perderlo todo, no que se dé vuelta un bit suelto.
+ *
+ * La versión está para el día que la aplicación quiera guardar más cosas en la
+ * SRAM y necesite saber con qué formato las escribió el firmware anterior.
+ */
+static const char pcFirma[ 5 ] = { 'S', 'P', 'Q', '\x01', 0x01 };
+
+#define FIRMA_LARGO         ( sizeof( pcFirma ) )
+
+/* La define la sección de validez, al final; la usa drv_rtc_escribir(), acá arriba. */
+static bool prvEscribirFirma( void );
+
 /*------------------------------------------------------------------------------
  * BCD. Los registros no son binarios: las 25 se guardan como 0x25.
  *----------------------------------------------------------------------------*/
@@ -293,7 +310,18 @@ bool drv_rtc_escribir( const RtcTimeType_t *pxHora )
            oscilador, así que el reloj arranca justo en el valor pedido. */
         cVal = ( char ) ( BIT_ST | prvABcd( pxHora->sec ) );
 
-        bOk = prvEscribirReg( REG_RTCSEC, &cVal, 1U );
+        if( prvEscribirReg( REG_RTCSEC, &cVal, 1U ) == false )
+        {
+            break;
+        }
+
+        /*
+         * Y recién ahora la firma. El orden importa: si se escribiera primero y
+         * fallara la puesta en hora, el equipo quedaría afirmando que una hora
+         * incorrecta es confiable, que es el único desenlace realmente malo.
+         * Al revés lo peor que pasa es un arranque frío de más.
+         */
+        bOk = prvEscribirFirma();
 
     } while( false );
 
@@ -369,6 +397,14 @@ int16_t drv_rtc_sram_leer( uint8_t ucAddr, char *pvBuffer, uint8_t ucBytes )
 //------------------------------------------------------------------------------
 int16_t drv_rtc_sram_escribir( uint8_t ucAddr, const char *pvBuffer, uint8_t ucBytes )
 {
+    /* La zona de la firma no se toca desde acá: si la aplicación la pisara sin
+       querer, el equipo pasaría a creer que la hora es basura —o peor, a creer
+       que es buena cuando no lo es— y el síntoma aparecería en otro lado. */
+    if( ucAddr < DRV_RTC_SRAM_USUARIO )
+    {
+        return -1;
+    }
+
     if( ( ( uint32_t ) ucAddr + ucBytes ) > DRV_RTC_SRAM_SIZE )
     {
         return -1;
@@ -378,5 +414,58 @@ int16_t drv_rtc_sram_escribir( uint8_t ucAddr, const char *pvBuffer, uint8_t ucB
        escribe de corrido y contesta enseguida. Nada del baile de la EEPROM. */
     return drv_i2c_write( DRV_I2C_ADDR_RTC, ( uint16_t ) ( REG_SRAM + ucAddr ), 1U,
                           pvBuffer, ucBytes, RTC_TICKS );
+}
+
+/*------------------------------------------------------------------------------
+ * Firma de validez
+ *----------------------------------------------------------------------------*/
+
+/* Interna: escribe la firma sin pasar por el guardarraíl de drv_rtc_sram_escribir. */
+static bool prvEscribirFirma( void )
+{
+    return ( drv_i2c_write( DRV_I2C_ADDR_RTC, REG_SRAM, 1U,
+                            pcFirma, FIRMA_LARGO, RTC_TICKS ) == ( int16_t ) FIRMA_LARGO );
+}
+
+//------------------------------------------------------------------------------
+rtc_validez_t drv_rtc_validez( void )
+{
+    char cLeido[ FIRMA_LARGO ];
+
+    if( drv_rtc_sram_leer( 0U, cLeido, FIRMA_LARGO ) != ( int16_t ) FIRMA_LARGO )
+    {
+        return rtcHORA_SIN_RTC;
+    }
+
+    for( uint32_t i = 0U; i < FIRMA_LARGO; i++ )
+    {
+        if( cLeido[ i ] != pcFirma[ i ] )
+        {
+            return rtcHORA_ARRANQUE_FRIO;
+        }
+    }
+
+    /*
+     * La firma está, pero falta un chequeo que no cuesta nada: si el oscilador
+     * NO está corriendo, la hora está congelada por más que la SRAM se haya
+     * conservado. Es un caso raro —alguien bajó ST a mano— pero devolver
+     * "válida" ahí sería mentir.
+     */
+    rtc_estado_t xEstado;
+
+    if( drv_rtc_estado( &xEstado ) == false )
+    {
+        return rtcHORA_SIN_RTC;
+    }
+
+    return xEstado.bOscilando ? rtcHORA_VALIDA : rtcHORA_ARRANQUE_FRIO;
+}
+//------------------------------------------------------------------------------
+bool drv_rtc_invalidar( void )
+{
+    char cCeros[ FIRMA_LARGO ] = { 0 };
+
+    return ( drv_i2c_write( DRV_I2C_ADDR_RTC, REG_SRAM, 1U,
+                            cCeros, FIRMA_LARGO, RTC_TICKS ) == ( int16_t ) FIRMA_LARGO );
 }
 //------------------------------------------------------------------------------

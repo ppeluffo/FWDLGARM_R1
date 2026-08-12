@@ -882,7 +882,8 @@ static void prvRtcUso( void )
     xprintf( "  rtc\r\n" );
     xprintf( "  rtc set <aa> <mm> <dd> <hh> <mi> <ss> [ds]   ds: 1=dom .. 7=sab\r\n" );
     xprintf( "  rtc pwrfail\r\n" );
-    xprintf( "  rtc clear\r\n" );
+    xprintf( "  rtc clear     baja PWRFAIL y borra sus marcas\r\n" );
+    xprintf( "  rtc invalid   borra la firma: simula un arranque en frio\r\n" );
 }
 
 static void prvRtcMostrarEstado( void )
@@ -914,6 +915,27 @@ static void prvRtcMostrarEstado( void )
              ( unsigned ) xHora.year,  ( unsigned ) xHora.month, ( unsigned ) xHora.day,
              ( unsigned ) xHora.hour,  ( unsigned ) xHora.min,   ( unsigned ) xHora.sec,
              pcDiaSemana( xHora.weekDay ) );
+
+    /*
+     * Va SIEMPRE y va pegado a la fecha, no en un comando aparte: una hora sin
+     * su marca de validez al lado invita a creerle.
+     */
+    switch( drv_rtc_validez() )
+    {
+        case rtcHORA_VALIDA:
+            xprintf( "validez   : CONFIABLE (firma en SRAM intacta)\r\n" );
+            break;
+
+        case rtcHORA_ARRANQUE_FRIO:
+            xprintf( "validez   : NO CONFIABLE - arranque en frio.\r\n" );
+            xprintf( "            Se perdio el respaldo: la fecha de arriba es basura.\r\n" );
+            xprintf( "            Se arregla con 'rtc set'.\r\n" );
+            break;
+
+        default:
+            xprintf( "validez   : no se pudo determinar (el RTC no contesta)\r\n" );
+            break;
+    }
 }
 
 static void cmdRtc( void )
@@ -1001,6 +1023,22 @@ static void cmdRtc( void )
         xprintf( "%s\r\n", drv_rtc_limpiar_falla_power()
                  ? "PWRFAIL bajado y marcas borradas"
                  : "ERROR: el RTC no contesta" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "invalid" ) == 0 )
+    {
+        /* Para probar el mecanismo sin sacar la pila: deja al equipo igual que
+           si hubiera arrancado en frio. La hora sigue corriendo; lo que cambia
+           es que deja de ser creible, que es exactamente el caso a ejercitar. */
+        if( drv_rtc_invalidar() == false )
+        {
+            xprintf( "ERROR: el RTC no contesta\r\n" );
+            return;
+        }
+
+        xprintf( "firma borrada. Estado:\r\n" );
+        prvRtcMostrarEstado();
         return;
     }
 
