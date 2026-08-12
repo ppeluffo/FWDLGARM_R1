@@ -10,6 +10,7 @@
 #include "drv_uart.h"
 #include "drv_i2c.h"
 #include "drv_eeprom.h"
+#include "drv_rtc79410.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -275,6 +276,7 @@ static void cmdStatus( void );
 static void cmdSense( void );
 static void cmdI2c( void );
 static void cmdEe( void );
+static void cmdRtc( void );
 static void cmdReset( void );
 static void cmdReboot( void );
 
@@ -342,12 +344,21 @@ void tkCmd( void *pvParameters )
 
     drv_term_sense_init();
 
+    /* Arranca el oscilador y habilita el respaldo por pila si hiciera falta. Es
+       idempotente. Si el chip no contesta no se aborta: la consola tiene que
+       levantar igual, que es justamente cuando más se la necesita. */
+    if( drv_rtc_init() == false )
+    {
+        xprintf( "\r\n[!] el RTC MCP79410 no contesta\r\n" );
+    }
+
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
     FRTOS_CMD_register( "sense",  cmdSense  );
     FRTOS_CMD_register( "i2c",    cmdI2c    );
     FRTOS_CMD_register( "ee",     cmdEe     );
+    FRTOS_CMD_register( "rtc",    cmdRtc    );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
 
@@ -382,6 +393,7 @@ static void cmdHelp( void )
     xprintf( "  sense   - nivel del pin TERM_SENSE (PB5) + monitor de flancos\r\n" );
     xprintf( "  i2c     - bus I2C2 crudo. Sin argumentos, dice como se usa\r\n" );
     xprintf( "  ee      - EEPROM M24M01 (128 KB). Sin argumentos, dice como se usa\r\n" );
+    xprintf( "  rtc     - RTC externo MCP79410. Sin argumentos, muestra el estado\r\n" );
     xprintf( "  reset   - reset por NVIC_SystemReset (pulsa NRST)\r\n" );
     xprintf( "  reboot  - reinicio tibio, sin tocar NRST (diagnostico)\r\n" );
     /* OJO: el parser matchea por PREFIJO, así que 'r' y 're' caen en 'reset',
@@ -844,6 +856,145 @@ static void cmdEe( void )
     }
 
     prvEeUso();
+}
+//------------------------------------------------------------------------------
+/*
+ * RTC externo MCP79410.
+ *
+ *   rtc                                    estado + fecha y hora
+ *   rtc set <aa> <mm> <dd> <hh> <mi> <ss> [ds]   en DECIMAL
+ *   rtc pwrfail                            marcas del ultimo corte
+ *   rtc clear                              baja PWRFAIL y borra las marcas
+ *
+ * En decimal y no en hexa, a diferencia de 'ee' e 'i2c': una fecha la tipea una
+ * persona, no sale de un mapa de registros.
+ */
+static const char *pcDiaSemana( uint8_t ucDia )
+{
+    static const char *pcNombres[ 8 ] = { "?", "dom", "lun", "mar", "mie", "jue", "vie", "sab" };
+
+    return pcNombres[ ( ucDia <= 7U ) ? ucDia : 0U ];
+}
+
+static void prvRtcUso( void )
+{
+    xprintf( "uso (en DECIMAL):\r\n" );
+    xprintf( "  rtc\r\n" );
+    xprintf( "  rtc set <aa> <mm> <dd> <hh> <mi> <ss> [ds]   ds: 1=dom .. 7=sab\r\n" );
+    xprintf( "  rtc pwrfail\r\n" );
+    xprintf( "  rtc clear\r\n" );
+}
+
+static void prvRtcMostrarEstado( void )
+{
+    rtc_estado_t  xEstado;
+    RtcTimeType_t xHora;
+
+    if( drv_rtc_estado( &xEstado ) == false )
+    {
+        xprintf( "el RTC no contesta (HAL_I2C_ERROR = 0x%08lX)\r\n",
+                 ( unsigned long ) drv_i2c_last_error() );
+        return;
+    }
+
+    xprintf( "oscilador : %s\r\n",
+             xEstado.bOscilando ? "corriendo" : "DETENIDO - la hora no avanza" );
+    xprintf( "pila      : %s\r\n",
+             xEstado.bPilaHab ? "respaldo habilitado (VBATEN)" : "VBATEN EN 0 - pierde la hora al cortar" );
+    xprintf( "corte     : %s\r\n",
+             xEstado.bFalloPower ? "HUBO uno - ver 'rtc pwrfail'" : "ninguno desde el ultimo clear" );
+
+    if( drv_rtc_leer( &xHora ) == false )
+    {
+        xprintf( "fecha/hora: no se pudo leer\r\n" );
+        return;
+    }
+
+    xprintf( "fecha/hora: 20%02u-%02u-%02u %02u:%02u:%02u (%s)\r\n",
+             ( unsigned ) xHora.year,  ( unsigned ) xHora.month, ( unsigned ) xHora.day,
+             ( unsigned ) xHora.hour,  ( unsigned ) xHora.min,   ( unsigned ) xHora.sec,
+             pcDiaSemana( xHora.weekDay ) );
+}
+
+static void cmdRtc( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        prvRtcMostrarEstado();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "set" ) == 0 )
+    {
+        if( ucArgs < 7U )
+        {
+            prvRtcUso();
+            return;
+        }
+
+        RtcTimeType_t xHora;
+
+        xHora.year    = ( uint8_t ) atoi( argv[ 2 ] );
+        xHora.month   = ( uint8_t ) atoi( argv[ 3 ] );
+        xHora.day     = ( uint8_t ) atoi( argv[ 4 ] );
+        xHora.hour    = ( uint8_t ) atoi( argv[ 5 ] );
+        xHora.min     = ( uint8_t ) atoi( argv[ 6 ] );
+        xHora.sec     = ( uint8_t ) atoi( argv[ 7 ] );
+        xHora.weekDay = ( ucArgs >= 8U ) ? ( uint8_t ) atoi( argv[ 8 ] ) : 1U;
+
+        if( drv_rtc_escribir( &xHora ) == false )
+        {
+            xprintf( "ERROR: valores fuera de rango, o el RTC no contesta\r\n" );
+            return;
+        }
+
+        xprintf( "hora fijada. Estado:\r\n" );
+        prvRtcMostrarEstado();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "pwrfail" ) == 0 )
+    {
+        rtc_estado_t  xEstado;
+        RtcTimeType_t xCaida, xVuelta;
+
+        if( ( drv_rtc_estado( &xEstado ) == false ) ||
+            ( drv_rtc_leer_falla_power( true,  &xCaida  ) == false ) ||
+            ( drv_rtc_leer_falla_power( false, &xVuelta ) == false ) )
+        {
+            xprintf( "el RTC no contesta\r\n" );
+            return;
+        }
+
+        if( xEstado.bFalloPower == false )
+        {
+            xprintf( "no hubo cortes desde el ultimo 'rtc clear'.\r\n" );
+            xprintf( "(las marcas de abajo son viejas o no significan nada)\r\n" );
+        }
+
+        /* El chip no guarda ni segundos ni año en estos registros. */
+        xprintf( "se cayo  : %02u-%02u %02u:%02u (%s)\r\n",
+                 ( unsigned ) xCaida.month, ( unsigned ) xCaida.day,
+                 ( unsigned ) xCaida.hour,  ( unsigned ) xCaida.min,
+                 pcDiaSemana( xCaida.weekDay ) );
+        xprintf( "volvio   : %02u-%02u %02u:%02u (%s)\r\n",
+                 ( unsigned ) xVuelta.month, ( unsigned ) xVuelta.day,
+                 ( unsigned ) xVuelta.hour,  ( unsigned ) xVuelta.min,
+                 pcDiaSemana( xVuelta.weekDay ) );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "clear" ) == 0 )
+    {
+        xprintf( "%s\r\n", drv_rtc_limpiar_falla_power()
+                 ? "PWRFAIL bajado y marcas borradas"
+                 : "ERROR: el RTC no contesta" );
+        return;
+    }
+
+    prvRtcUso();
 }
 //------------------------------------------------------------------------------
 static void cmdReset( void )

@@ -633,6 +633,7 @@ Application/
 │               drv_term_sense.{h,c}    TERM_SENSE, poleado por tkCtl (no EXTI)
 │               drv_i2c.{h,c}           bus I2C2 por interrupción + candado de bus
 │               drv_eeprom.{h,c}        M24M01, dirección plana de 17 bits
+│               drv_rtc79410.{h,c}      RTC externo MCP79410 (BCD, pila, PWRFAIL)
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
