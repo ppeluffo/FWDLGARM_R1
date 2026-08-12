@@ -983,6 +983,16 @@ static void cmdRtc( void )
                  ( unsigned ) xVuelta.month, ( unsigned ) xVuelta.day,
                  ( unsigned ) xVuelta.hour,  ( unsigned ) xVuelta.min,
                  pcDiaSemana( xVuelta.weekDay ) );
+
+        /*
+         * Sin esta aclaración el comando engaña: uno corta la alimentación tres
+         * veces, ve siempre la misma hora, y sale a buscar un bug que no existe.
+         */
+        if( xEstado.bFalloPower )
+        {
+            xprintf( "\r\nOJO: es el PRIMER corte desde el ultimo 'rtc clear'.\r\n" );
+            xprintf( "El chip NO pisa estas marcas mientras PWRFAIL siga en 1.\r\n" );
+        }
         return;
     }
 

@@ -30,6 +30,7 @@
  *   PWRFAIL (bit 4) 1 = se cortó la alimentación principal en algún momento. El
  *           chip guarda ADEMÁS la marca de tiempo de cuándo se cayó y cuándo
  *           volvió, en 0x18..0x1F. Es información de campo, no sólo de banco.
+ *           ⚠ Ver más abajo: esas marcas son un LATCH, no un registro rodante.
  *   VBATEN  (bit 3) 1 = habilitado el respaldo por pila. **Viene en 0 de
  *           fábrica**: si nadie lo pone en 1, el chip pierde la hora al cortar
  *           la alimentación aunque la pila esté soldada. Lo pone drv_rtc_init().
@@ -92,12 +93,30 @@ bool drv_rtc_leer( RtcTimeType_t *pxHora );
  */
 bool drv_rtc_escribir( const RtcTimeType_t *pxHora );
 
-/* Marca de tiempo del último corte de alimentación. `bCaida` elige entre cuándo
-   se cayó y cuándo volvió. Sólo tienen sentido si PWRFAIL está en 1.
-   El chip no guarda ni segundos ni año en estos registros. */
+/*
+ * Marca de tiempo del corte de alimentación. `bCaida` elige entre cuándo se cayó
+ * y cuándo volvió. El chip no guarda ni segundos ni año en estos registros.
+ *
+ * ⚠ ES UN LATCH, NO UN REGISTRO RODANTE — y confunde, porque parece lo segundo.
+ *
+ * El chip graba el PRIMER corte y ahí se congela: mientras PWRFAIL siga en 1,
+ * los cortes posteriores NO pisan las marcas. Recién vuelve a grabar cuando
+ * alguien baja PWRFAIL. Verificado en banco el 2026-08-12: dos cortes seguidos
+ * sin limpiar en el medio, y las marcas seguían mostrando el primero.
+ *
+ * Consecuencia para la aplicación, y no es menor: **al arrancar hay que leer las
+ * marcas, guardarlas donde corresponda, y recién ahí limpiar PWRFAIL.** Si no se
+ * limpia nunca, en campo se termina viendo para siempre el primer corte de la
+ * vida del equipo y ninguno de los que importan. Si se limpia sin leer antes, se
+ * tira la evidencia.
+ *
+ * drv_rtc_init() NO limpia a propósito: descartar evidencia en silencio, al
+ * arrancar, sería lo peor de los dos mundos.
+ */
 bool drv_rtc_leer_falla_power( bool bCaida, RtcTimeType_t *pxHora );
 
-/* Baja PWRFAIL y borra las marcas de tiempo, para poder detectar el próximo corte. */
+/* Baja PWRFAIL y borra las marcas, habilitando al chip a grabar el próximo corte.
+   Leer ANTES: esto es destructivo. */
 bool drv_rtc_limpiar_falla_power( void );
 
 /* SRAM de 64 bytes respaldada por la pila: 0x00..0x3F en direcciones relativas.

@@ -36,13 +36,15 @@ batería que duerme casi todo el tiempo.
 
 **La placa está poblada sólo parcialmente.** Hoy hay montados: la **fuente**, el **micro**, la
 **interfaz de programación SWD** (PA13/PA14), **LEDs en PB9 y PA2**, el **cristal de 32.768 kHz en
-PC14/PC15** con sus condensadores de carga a GND, y el **conector de la terminal** (PB6/PB7 más
-`TERM_SENSE` en PB5). Nada más: no hay modem LTE, ni RS485, ni dispositivos I2C, ni microSD, ni
-front-end analógico.
+PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal** (PB6/PB7 más
+`TERM_SENSE` en PB5), y el **bus I2C2** (PB13/PB14, pull-up de 10 kΩ) con la **EEPROM M24M01** y el
+**RTC MCP79410 con su pila**. Nada más: no hay modem LTE, ni RS485, ni microSD, ni front-end
+analógico.
 
-Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD y la consola**.
-El resto del mapa de pines de `interfases_pines.csv` es el diseño completo de R001, no hardware
-presente — no tiene sentido escribir drivers contra periféricos que todavía no están montados.
+Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola y el
+bus I2C**. El resto del mapa de pines de `interfases_pines.csv` es el diseño completo de R001, no
+hardware presente — no tiene sentido escribir drivers contra periféricos que todavía no están
+montados.
 
 El proyecto **se borró y se rehízo de cero el 2026-08-10** (ver control de versiones), y desde
 entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
@@ -55,6 +57,7 @@ entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
 | `v0.0.4` | **Tick del kernel por LPTIM1 desde el LSE**, 512 Hz exactos |
 | `v0.0.5` | **Tickless con Stop 2** — de 3,2 mA a 0,215 mA de placa |
 | `v0.0.6` | **Consola TERM (TX + RX) y `TERM_SENSE`** — el micro dormido queda en **~5 µA** |
+| `v0.0.7` | **Bus I2C2, EEPROM M24M01 y RTC MCP79410** — los tres validados con datos reales |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
   `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
@@ -294,38 +297,58 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    de trabajo: a partir de acá se depura interactivamente en vez de contar destellos. Comandos hoy:
    `help`, `status`, `sense`, `reset`, `reboot`. Lo que costó el día **no fue firmware** —un cable de
    serie malo y la frecuencia SWD en Auto—; ambos quedaron documentados más arriba.
-6. I2C (RTC externo, monitor de corriente) → RS485/Modbus → **microSD/SPI** → entradas analógicas →
-   modem LTE. La microSD ya tiene relevamiento y decisiones pendientes anotadas: ver
-   *microSD + FatFs: diseño pendiente*.
-7. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
+6. ✅ **I2C** (`v0.0.7`) — bus I2C2 por interrupción, EEPROM **M24M01** (128 KB) y RTC externo
+   **MCP79410**. Los tres validados con datos reales, no sólo con ACKs: la EEPROM con escrituras que
+   cruzan bordes de página y de bloque (`ee test`), y el RTC conservando la hora tras un minuto sin
+   alimentación. Falta el **monitor de corriente INA**, que todavía no está poblado.
+7. RS485/Modbus → **microSD/SPI** → entradas analógicas → modem LTE. La microSD ya tiene relevamiento
+   y decisiones pendientes anotadas: ver *microSD + FatFs: diseño pendiente*.
+8. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
    hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
-8. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+9. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
 **Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
 (`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
 **prefijo**, así que un carácter de ruido puede ejecutar un comando destructivo; y `BOR_LEV` sigue en
 el default más bajo (~1,7 V), que para un equipo a batería conviene decidir a propósito.
 
-### ⏳ Quién es el dueño de la hora: decisión postergada (2026-08-12)
+### ✅ Quién es el dueño de la hora: el MCP79410 (decidido el 2026-08-12)
 
-`MX_RTC_Init()` reinicializa la hora en **cada arranque** —el bloque `Check_RTC_BKUP` que genera
-CubeMX está vacío— así que el reloj interno vuelve siempre a las 00:00 del 1-Ene-2000. **Se decidió
-NO arreglarlo todavía**, porque va a haber un **MCP79410 externo** en el bus I2C y probablemente sea
-él el dueño de la hora: tiene batería propia y sobrevive al corte de alimentación, cosa que el RTC
-interno no hace (VBAT no está poblado en R001).
+**El dato que lo decidió, medido en banco:** se fijó la hora en el MCP79410, se dejó la placa
+**un minuto entero sin alimentación** y al volver **el reloj había seguido corriendo**. Un minuto no
+lo aguanta ningún capacitor: la pila de respaldo está poblada y funciona. El `PWRFAIL` del chip
+además registró el corte con marca de tiempo de caída y de retorno.
 
-Cuando se llegue a ese punto hay que elegir entre tres esquemas, y conviene hacerlo a propósito:
+El RTC interno no puede hacer eso: **`VBAT` no está poblado en R001**, así que pierde la hora en cada
+corte. Por eso el esquema es:
 
-| Esquema | Qué implica |
+| | Rol |
 |---|---|
-| **Sólo el externo** | Es lo que hacía FWDLGX, porque el AVR no tenía un RTC decente. Cada timestamp cuesta una transacción I2C. |
-| **Externo autoritativo, interno sincronizado** | Se lee el MCP79410 al arrancar y se carga el RTC interno; los timestamps salen de registros, sin tocar el bus. El externo se reconsulta cada tanto para corregir deriva. **Es el que mejor encaja acá.** |
-| **Sólo el interno** | Requiere poblar VBAT y una pila. Hoy no es opción. |
+| **MCP79410** | **Autoritativo.** Sobrevive al corte de alimentación. Es de donde sale la hora de verdad. |
+| **RTC interno del STM32** | **Copia de trabajo.** Se carga desde el externo al arrancar; los timestamps salen de registros, sin pagar una transacción I2C cada vez. Se resincroniza cada tanto para corregir deriva. |
 
-⚠ **Sea cual sea la decisión, NO desactivar el RTC interno en CubeMX.** Dos motivos: no cuesta nada
-—ya corre del LSE, que está encendido igual— y es el consumidor que destrabó el encendido del LSE en
-`v0.0.3` (ver la sección de la trampa de CubeMX). Hoy `LPTIM1` también lo consume, así que en teoría
-el LSE sobreviviría, pero no vale la pena volver a poner un pie en ese pozo para ahorrar cero.
+#### ⚠ `PWRFAIL` es un latch, no un registro rodante
+
+Encontrado por Pablo el 2026-08-12, cortando la alimentación dos veces seguidas: la segunda vez las
+marcas de tiempo **seguían mostrando el primer corte**. No es un bug del driver, es el chip: el
+MCP79410 graba el primer corte y se congela, y **mientras `PWRFAIL` siga en 1 los cortes posteriores
+no pisan las marcas**. Recién vuelve a grabar cuando alguien baja el bit.
+
+Consecuencia para la aplicación, y hay que tenerla en cuenta cuando exista el registro de eventos:
+**al arrancar hay que leer las marcas, guardarlas, y recién ahí limpiar `PWRFAIL`.** Los dos errores
+posibles duelen: si no se limpia nunca, en campo se ve para siempre el primer corte de la vida del
+equipo y ninguno de los que importan; si se limpia sin leer antes, se tira la evidencia.
+`drv_rtc_init()` **no limpia a propósito**.
+
+⏳ **Falta implementar la sincronización**, y con ella se arregla lo que quedó pendiente: el bloque
+`Check_RTC_BKUP` que genera CubeMX está **vacío**, así que `MX_RTC_Init()` reinicializa la hora en
+cada arranque. Al haber una fuente autoritativa afuera, eso deja de importar: se pisa con lo que
+diga el MCP79410.
+
+⚠ **NO desactivar el RTC interno en CubeMX.** No cuesta nada —ya corre del LSE, que está encendido
+igual— y es el consumidor que destrabó el encendido del LSE en `v0.0.3` (ver la sección de la trampa
+de CubeMX). Hoy `LPTIM1` también lo consume, así que en teoría el LSE sobreviviría, pero no vale la
+pena volver a poner un pie en ese pozo para ahorrar cero.
 
 ### Compilar en Release: por qué todavía no, y cuándo sí
 
