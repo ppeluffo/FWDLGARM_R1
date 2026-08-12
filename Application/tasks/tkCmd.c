@@ -271,6 +271,7 @@ void tkCmd( void *pvParameters )
 
 static void cmdHelp( void );
 static void cmdStatus( void );
+static void cmdSense( void );
 static void cmdReset( void );
 static void cmdReboot( void );
 
@@ -341,6 +342,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
+    FRTOS_CMD_register( "sense",  cmdSense  );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
 
@@ -372,11 +374,13 @@ static void cmdHelp( void )
     xprintf( "Comandos:\r\n" );
     xprintf( "  help    - esta ayuda\r\n" );
     xprintf( "  status  - estado del sistema\r\n" );
+    xprintf( "  sense   - nivel del pin TERM_SENSE (PB5) + monitor de flancos\r\n" );
     xprintf( "  reset   - reset por NVIC_SystemReset (pulsa NRST)\r\n" );
     xprintf( "  reboot  - reinicio tibio, sin tocar NRST (diagnostico)\r\n" );
     /* OJO: el parser matchea por PREFIJO, así que 'r' y 're' caen en 'reset',
-       que es el primero registrado. Para reboot hay que tipear al menos 'reb'. */
-    xprintf( "  (el parser matchea por prefijo: 'reb' para reboot, 'res' para reset)\r\n" );
+       que es el primero registrado. Para reboot hay que tipear al menos 'reb'.
+       Y 's' cae en 'status'; para sense hay que tipear al menos 'se'. */
+    xprintf( "  (matchea por prefijo: 'res'/'reb', 'st'/'se')\r\n" );
 }
 //------------------------------------------------------------------------------
 static void cmdStatus( void )
@@ -393,6 +397,91 @@ static void cmdStatus( void )
     xprintf( "heap libre   : %u bytes\r\n", ( unsigned ) xPortGetFreeHeapSize() );
     xprintf( "stack tkCmd  : %u palabras libres\r\n",
              ( unsigned ) uxTaskGetStackHighWaterMark( NULL ) );
+}
+//------------------------------------------------------------------------------
+/*
+ * TERM_SENSE: foto de la configuración + monitor de flancos en vivo.
+ *
+ * El pin dice "ausente" con la terminal enchufada, y hay tres causas posibles que
+ * desde afuera se ven igual. El comando las separa de una sola pasada:
+ *
+ *   el nivel NUNCA baja          -> HARDWARE. El pull-up interno lo deja en alto y
+ *                                   nada lo tira a masa: o TERM_SENSE no está
+ *                                   poblado en R001, o no llega al conector. Se
+ *                                   confirma con el tester y el esquemático.
+ *   el nivel baja, eventos = 0   -> CONFIGURACIÓN de la EXTI. Mirar los registros
+ *                                   que imprime el encabezado.
+ *   baja, hay eventos, pero el
+ *   driver sigue diciendo ausente-> FIRMWARE, en prvActualizar().
+ *
+ * El monitor polea cada 100 ms, que acá no cuesta nada porque el tickless está
+ * anulado. NO es la forma de leer el pin en producción —para eso está la EXTI—:
+ * es un instrumento de banco, y por eso vive en el comando y no en el driver.
+ */
+#define SENSE_MONITOR_MS        20000U
+#define SENSE_MUESTREO_MS         100U
+
+static void cmdSense( void )
+{
+    drv_term_sense_cfg_t xCfg;
+    drv_term_sense_config( &xCfg );
+
+    bool bNivel = drv_term_sense_nivel_pin();
+
+    xprintf( "TERM_SENSE (PB5), activo en BAJO\r\n" );
+    xprintf( "  nivel del pin : %d (%s)  -> terminal %s\r\n",
+             bNivel ? 1 : 0,
+             bNivel ? "alto" : "bajo",
+             bNivel ? "AUSENTE" : "PRESENTE" );
+    xprintf( "  driver dice   : %s\r\n", drv_term_sense_presente() ? "conectada" : "ausente" );
+    xprintf( "  eventos EXTI  : %lu\r\n", ( unsigned long ) drv_term_sense_eventos() );
+    xprintf( "  candado TERM  : %s\r\n",
+             ( pwr_lock_estado() & ( 1UL << pwrLOCK_TERM ) ) ? "tomado" : "libre" );
+    xprintf( "  MODER/PUPDR   : %lu / %lu (espera 0 = entrada / 1 = pull-up)\r\n",
+             ( unsigned long ) xCfg.ulModer, ( unsigned long ) xCfg.ulPupdr );
+    xprintf( "  EXTI IMR/RTSR/FTSR : %d/%d/%d   NVIC EXTI9_5 : %d (espera 1/1/1  1)\r\n",
+             xCfg.bImr ? 1 : 0, xCfg.bRtsr ? 1 : 0, xCfg.bFtsr ? 1 : 0, xCfg.bNvic ? 1 : 0 );
+
+    xprintf( "\r\nmonitor %lu s - enchufa y desenchufa la terminal.\r\n",
+             ( unsigned long ) ( SENSE_MONITOR_MS / 1000U ) );
+    xprintf( "cualquier tecla corta.\r\n" );
+
+    /* Lecturas con timeout corto: sirven a la vez de espera entre muestras y de
+       chequeo de tecla, sin un vTaskDelay aparte. */
+    TickType_t xEspera = pdMS_TO_TICKS( SENSE_MUESTREO_MS );
+    ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xEspera );
+
+    bool     bAnterior = bNivel;
+    uint32_t ulVueltas = SENSE_MONITOR_MS / SENSE_MUESTREO_MS;
+    char     cTecla;
+
+    while( ulVueltas-- > 0U )
+    {
+        if( frtos_read( fdTERM, &cTecla, 1U ) == 1 )
+        {
+            break;
+        }
+
+        bNivel = drv_term_sense_nivel_pin();
+
+        if( bNivel != bAnterior )
+        {
+            xprintf( "  t=%lu  pin -> %d (%s)   eventos EXTI: %lu   driver: %s\r\n",
+                     ( unsigned long ) xTaskGetTickCount(),
+                     bNivel ? 1 : 0,
+                     bNivel ? "AUSENTE" : "PRESENTE",
+                     ( unsigned long ) drv_term_sense_eventos(),
+                     drv_term_sense_presente() ? "conectada" : "ausente" );
+            bAnterior = bNivel;
+        }
+    }
+
+    /* Devolver el bloqueo indefinido: es lo que espera el lazo de la consola. */
+    xEspera = portMAX_DELAY;
+    ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xEspera );
+
+    xprintf( "monitor terminado. eventos EXTI totales: %lu\r\n",
+             ( unsigned long ) drv_term_sense_eventos() );
 }
 //------------------------------------------------------------------------------
 static void cmdReset( void )
