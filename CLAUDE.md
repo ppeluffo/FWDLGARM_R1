@@ -302,10 +302,30 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
 8. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
 **Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
-(`reboot` anda, así que no es la reinicialización del firmware); `MX_RTC_Init()` reinicializa la hora
-en cada arranque porque el bloque `Check_RTC_BKUP` está vacío; el parser de comandos matchea por
+(`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
 **prefijo**, así que un carácter de ruido puede ejecutar un comando destructivo; y `BOR_LEV` sigue en
 el default más bajo (~1,7 V), que para un equipo a batería conviene decidir a propósito.
+
+### ⏳ Quién es el dueño de la hora: decisión postergada (2026-08-12)
+
+`MX_RTC_Init()` reinicializa la hora en **cada arranque** —el bloque `Check_RTC_BKUP` que genera
+CubeMX está vacío— así que el reloj interno vuelve siempre a las 00:00 del 1-Ene-2000. **Se decidió
+NO arreglarlo todavía**, porque va a haber un **MCP79410 externo** en el bus I2C y probablemente sea
+él el dueño de la hora: tiene batería propia y sobrevive al corte de alimentación, cosa que el RTC
+interno no hace (VBAT no está poblado en R001).
+
+Cuando se llegue a ese punto hay que elegir entre tres esquemas, y conviene hacerlo a propósito:
+
+| Esquema | Qué implica |
+|---|---|
+| **Sólo el externo** | Es lo que hacía FWDLGX, porque el AVR no tenía un RTC decente. Cada timestamp cuesta una transacción I2C. |
+| **Externo autoritativo, interno sincronizado** | Se lee el MCP79410 al arrancar y se carga el RTC interno; los timestamps salen de registros, sin tocar el bus. El externo se reconsulta cada tanto para corregir deriva. **Es el que mejor encaja acá.** |
+| **Sólo el interno** | Requiere poblar VBAT y una pila. Hoy no es opción. |
+
+⚠ **Sea cual sea la decisión, NO desactivar el RTC interno en CubeMX.** Dos motivos: no cuesta nada
+—ya corre del LSE, que está encendido igual— y es el consumidor que destrabó el encendido del LSE en
+`v0.0.3` (ver la sección de la trampa de CubeMX). Hoy `LPTIM1` también lo consume, así que en teoría
+el LSE sobreviviría, pero no vale la pena volver a poner un pie en ese pozo para ahorrar cero.
 
 ### Compilar en Release: por qué todavía no, y cuándo sí
 
