@@ -106,24 +106,18 @@ static void led_config( void )
 }
 
 /*
- * ⚠ TEMPORAL - migas de pan del arranque (2026-08-11).
+ * Emisión CRUDA por la TERM: HAL por poleo, sin FreeRTOS y sin FRTOS-IO.
  *
- * Se cuelga al segundo "reset" por consola, con el LED fijo y sin llegar a la
- * tarea. Como el cuelgue puede estar en MX_RTC_Init() o MX_LPTIM1_Init() —lo que
- * toca el dominio de backup, que es justamente lo que SOBREVIVE a un reset por
- * software— hay que poder emitir antes de que corran.
+ * Es el canal de diagnóstico de último recurso, para el código que corre antes
+ * del scheduler y para Error_Handler(). No usarlo en la aplicación: ahí va
+ * xprintf(), que transmite por interrupción y toma el candado de energía.
  *
- * Por eso la USART se adelanta a USER CODE BEGIN SysInit y las migas van dentro
- * de los bloques USER CODE de cada MX_*_Init(), que son los únicos puntos entre
- * inicializaciones que sobreviven una regeneración de CubeMX.
- *
- * Nada de esto usa FreeRTOS ni FRTOS-IO: es HAL por poleo, que es lo único que
- * anda antes del scheduler.
- *
- * PARA SACARLO: borrar bc(), la llamada adelantada a MX_USART1_UART_Init() y las
- * seis llamadas a bc() repartidas por el archivo.
+ * Que exista salió de un día entero perdido (2026-08-11) contando destellos de
+ * un LED que además mentía. Un renglón de texto vale por diez patrones de
+ * parpadeo, y desde que la USART se levanta antes de SystemClock_Config() —ver
+ * USER CODE BEGIN Init— este canal anda incluso cuando el que falla es el reloj.
  */
-static void bc( const char *pcTexto )
+static void error_print( const char *pcTexto )
 {
     ( void ) HAL_UART_Transmit( &huart1, ( uint8_t * ) pcTexto,
                                 ( uint16_t ) strlen( pcTexto ), 500U );
@@ -182,26 +176,27 @@ int main(void)
 
   /* USER CODE BEGIN Init */
   /*
-   * TEMPORAL: la USART se levanta ANTES de SystemClock_Config() — o sea corriendo
-   * con el MSI a 4 MHz, todavía sin PLL. Es a propósito: el cuelgue del "reset"
-   * ocurre ANTES de la primera miga, así que el sospechoso es SystemClock_Config()
-   * mismo, y sin esto no hay forma de emitir desde ahí ni desde Error_Handler().
+   * La USART se levanta ANTES de SystemClock_Config(), o sea corriendo con el MSI
+   * a 4 MHz y todavía sin PLL. Es a propósito: si el que falla es el RELOJ, esta
+   * es la única forma de que Error_Handler() pueda decirlo por texto en vez de
+   * dejarnos contando destellos.
    *
-   * A 4 MHz el divisor de 9600 baudios da 417 con 0,08% de error, así que se
-   * entiende igual. Se vuelve a inicializar después del cambio de reloj.
+   * A 4 MHz el divisor de 9600 baudios da 417, con 0,08 % de error. Se vuelve a
+   * inicializar apenas cambia el reloj (USER CODE BEGIN SysInit) para recalcular
+   * el divisor contra los 60 MHz.
    */
   MX_USART1_UART_Init();
-  bc( "\r\n\r\n[0] HAL_Init OK, entrando a SystemClock_Config\r\n" );
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  /* TEMPORAL: ver el comentario de bc(). La USART se adelanta para poder emitir
-     antes de los MX_ inits; volver a inicializarla más abajo no molesta. */
+  /* Recalcula el divisor contra el reloj nuevo (60 MHz). Sin esto la USART queda
+     con el divisor del MSI y todo lo que emitan los MX_*_Init() —Error_Handler()
+     incluido— sale ilegible. La reinicialización de más abajo es redundante y no
+     molesta: es la que genera CubeMX y no se puede sacar. */
   MX_USART1_UART_Init();
-  bc( "\r\n\r\n[1] clock OK\r\n" );
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -210,7 +205,6 @@ int main(void)
   MX_LPTIM1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  bc( "[6] perifericos OK\r\n" );
 
   /* USER CODE END 2 */
 
@@ -268,7 +262,6 @@ int main(void)
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
-  bc( "[7] arranca el scheduler\r\n" );
   /* add events, ... */
   /* USER CODE END RTOS_EVENTS */
 
@@ -357,7 +350,6 @@ static void MX_LPTIM1_Init(void)
   /* USER CODE END LPTIM1_Init 0 */
 
   /* USER CODE BEGIN LPTIM1_Init 1 */
-  bc( "[4] entrando a LPTIM1\r\n" );
 
   /* USER CODE END LPTIM1_Init 1 */
   hlptim1.Instance = LPTIM1;
@@ -374,7 +366,6 @@ static void MX_LPTIM1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN LPTIM1_Init 2 */
-  bc( "[5] LPTIM1 OK\r\n" );
 
   /* USER CODE END LPTIM1_Init 2 */
 
@@ -396,7 +387,6 @@ static void MX_RTC_Init(void)
   RTC_DateTypeDef sDate = {0};
 
   /* USER CODE BEGIN RTC_Init 1 */
-  bc( "[2] entrando a RTC\r\n" );
 
   /* USER CODE END RTC_Init 1 */
 
@@ -440,7 +430,6 @@ static void MX_RTC_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN RTC_Init 2 */
-  bc( "[3] RTC OK\r\n" );
 
   /* USER CODE END RTC_Init 2 */
 
@@ -634,7 +623,7 @@ void Error_Handler(void)
    * reloj. Va ANTES de cortar las interrupciones, porque HAL_UART_Transmit()
    * usa HAL_GetTick() para su timeout.
    */
-  bc( reloj_caido
+  error_print( reloj_caido
       ? "\r\n[!] Error_Handler: NO ARRANCO UN OSCILADOR DE BAJA VELOCIDAD (LSE/LSI)\r\n"
       : "\r\n[!] Error_Handler: falla generica\r\n" );
 
