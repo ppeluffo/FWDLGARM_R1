@@ -282,6 +282,12 @@ static void cmdRs485( void );
 static void cmdReset( void );
 static void cmdReboot( void );
 
+/* Ayudas detalladas de cada comando. Se definen junto a su comando, más abajo. */
+static void prvI2cUso  ( void );
+static void prvEeUso   ( void );
+static void prvRtcUso  ( void );
+static void prvRs485Uso( void );
+
 /*
  * Causa del último reset, leída de RCC_CSR antes de limpiarla.
  *
@@ -388,22 +394,85 @@ void tkCmd( void *pvParameters )
  * Comandos
  *----------------------------------------------------------------------------*/
 
+/*==============================================================================
+ * Ayuda
+ *
+ * UNA tabla, dos usos: el resumen de una línea que sale con 'help' pelado, y el
+ * puntero a la ayuda detallada que sale con 'help <comando>'.
+ *
+ * Está en una tabla y no repartido por el archivo porque antes SÍ estaba
+ * repartido, y se notó: los comandos tenían opciones que el 'help' no
+ * mencionaba, así que existían pero nadie las encontraba. Un resumen escrito
+ * lejos del comando que describe envejece mal.
+ *============================================================================*/
+typedef struct {
+    const char *pcNombre;
+    const char *pcResumen;      /* una línea, para el listado general */
+    void      ( *fnUso )( void ); /* el detalle, o NULL si no toma argumentos */
+} cmd_ayuda_t;
+
+static const cmd_ayuda_t xAyuda[] = {
+    { "help",   "esta ayuda. 'help <comando>' para el detalle de uno",   NULL          },
+    { "status", "estado del sistema",                                    NULL          },
+    { "sense",  "nivel de TERM_SENSE (PB5) + monitor de flancos",        NULL          },
+    { "i2c",    "bus I2C2 crudo: escaneo y acceso a registros",          prvI2cUso     },
+    { "ee",     "EEPROM M24M01 (128 KB): leer, escribir y test",         prvEeUso      },
+    { "rtc",    "RTC externo MCP79410: hora, validez y cortes",          prvRtcUso     },
+    { "rs485",  "bus RS485 y los 3 rieles de alimentacion",              prvRs485Uso   },
+    { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
+    { "reboot", "reinicio tibio, sin tocar NRST (diagnostico)",          NULL          },
+};
+
+#define AYUDA_COUNT     ( sizeof( xAyuda ) / sizeof( xAyuda[ 0 ] ) )
+
 static void cmdHelp( void )
 {
-    xprintf( "Comandos:\r\n" );
-    xprintf( "  help    - esta ayuda\r\n" );
-    xprintf( "  status  - estado del sistema\r\n" );
-    xprintf( "  sense   - nivel del pin TERM_SENSE (PB5) + monitor de flancos\r\n" );
-    xprintf( "  i2c     - bus I2C2 crudo. Sin argumentos, dice como se usa\r\n" );
-    xprintf( "  ee      - EEPROM M24M01 (128 KB). Sin argumentos, dice como se usa\r\n" );
-    xprintf( "  rtc     - RTC externo MCP79410. Sin argumentos, muestra el estado\r\n" );
-    xprintf( "  rs485   - bus RS485 y los 3 rieles de alimentacion\r\n" );
-    xprintf( "  reset   - reset por NVIC_SystemReset (pulsa NRST)\r\n" );
-    xprintf( "  reboot  - reinicio tibio, sin tocar NRST (diagnostico)\r\n" );
-    /* OJO: el parser matchea por PREFIJO, así que 'r' y 're' caen en 'reset',
-       que es el primero registrado. Para reboot hay que tipear al menos 'reb'.
-       Y 's' cae en 'status'; para sense hay que tipear al menos 'se'. */
-    xprintf( "  (matchea por prefijo: 'res'/'reb', 'st'/'se')\r\n" );
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    /* ---- 'help' pelado: el listado ---- */
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        xprintf( "Comandos:\r\n" );
+
+        for( uint32_t i = 0U; i < AYUDA_COUNT; i++ )
+        {
+            xprintf( "  %-7s - %s%s\r\n",
+                     xAyuda[ i ].pcNombre, xAyuda[ i ].pcResumen,
+                     ( xAyuda[ i ].fnUso != NULL ) ? "  [+]" : "" );
+        }
+
+        xprintf( "\r\n  [+] tiene mas opciones: 'help <comando>'\r\n" );
+
+        /* El parser matchea por PREFIJO, así que 'r' y 're' caen en 'reset', que
+           es el primero registrado, y 's' cae en 'status'. */
+        xprintf( "  (matchea por prefijo: 'res'/'reb', 'st'/'se', 'rt'/'rs')\r\n" );
+        return;
+    }
+
+    /* ---- 'help <comando>' ---- */
+    size_t xLargo = strlen( argv[ 1 ] );
+
+    for( uint32_t i = 0U; i < AYUDA_COUNT; i++ )
+    {
+        /* Por prefijo y no por igualdad, para que 'help rs' funcione igual que
+           'rs': una sola regla de matcheo en toda la consola. */
+        if( strncmp( xAyuda[ i ].pcNombre, argv[ 1 ], xLargo ) == 0 )
+        {
+            xprintf( "%s - %s\r\n\r\n", xAyuda[ i ].pcNombre, xAyuda[ i ].pcResumen );
+
+            if( xAyuda[ i ].fnUso != NULL )
+            {
+                xAyuda[ i ].fnUso();
+            }
+            else
+            {
+                xprintf( "no toma argumentos.\r\n" );
+            }
+            return;
+        }
+    }
+
+    xprintf( "'%s' no existe. 'help' lista los comandos.\r\n", argv[ 1 ] );
 }
 //------------------------------------------------------------------------------
 static void cmdStatus( void )

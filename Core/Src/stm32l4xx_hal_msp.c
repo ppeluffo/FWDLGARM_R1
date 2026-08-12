@@ -353,7 +353,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     PB10     ------> USART3_TX
     PB11     ------> USART3_RX
     */
-    GPIO_InitStruct.Pin = RS485_RTS_DE_Pin|RS485_TX_Pin|RS485_RX_Pin;
+    GPIO_InitStruct.Pin = RS485_RTS_Pin|RS485_TX_Pin|RS485_RX_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
@@ -411,7 +411,7 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* huart)
     PB10     ------> USART3_TX
     PB11     ------> USART3_RX
     */
-    HAL_GPIO_DeInit(GPIOB, RS485_RTS_DE_Pin|RS485_TX_Pin|RS485_RX_Pin);
+    HAL_GPIO_DeInit(GPIOB, RS485_RTS_Pin|RS485_TX_Pin|RS485_RX_Pin);
 
     /* USART3 interrupt DeInit */
     HAL_NVIC_DisableIRQ(USART3_IRQn);

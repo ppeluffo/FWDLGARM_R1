@@ -83,8 +83,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define LED2_Pin GPIO_PIN_2
 #define LED2_GPIO_Port GPIOA
-#define RS485_RTS_DE_Pin GPIO_PIN_1
-#define RS485_RTS_DE_GPIO_Port GPIOB
+#define RS485_RTS_Pin GPIO_PIN_1
+#define RS485_RTS_GPIO_Port GPIOB
 #define RS485_TX_Pin GPIO_PIN_10
 #define RS485_TX_GPIO_Port GPIOB
 #define RS485_RX_Pin GPIO_PIN_11
