@@ -20,13 +20,19 @@ static uint8_t            BDCMD_numCommands;
 
 static uint8_t cmdLine_ptr;
 
-/* Estado del decodificador VT100: 0 normal, 1 recibí ESC, 2 recibí ESC [ */
+/*
+ * Estado del decodificador de secuencias de escape:
+ *   0 = normal
+ *   1 = llegó ESC, espero el introductor
+ *   2 = llegó el introductor, espero parámetros y el byte final
+ */
 static uint8_t VT100State;
 
 static void pv_CMD_print_prompt( void );
 static void pv_CMD_print_error( void );
 static void pv_CMD_execute( void );
 static void pv_CMD_init( void );
+static void pv_CMD_borrar_linea( void );
 
 /*
  * strlcpy es de BSD y newlib no la trae, así que va una versión local. Copia
@@ -87,12 +93,22 @@ bool FRTOS_CMD_process( char cRxedChar )
 
     if( VT100State == 2 )
     {
-        /* Llegó ESC [ , así que este carácter es un código de control. */
+        /*
+         * Los parámetros numéricos y los ';' son intermedios: la secuencia recién
+         * termina en un byte del rango 0x40..0x7E. Sin consumirlos, teclas como
+         * Supr (ESC [ 3 ~) dejarían el '~' suelto y la consola lo metería en el
+         * comando como si el usuario lo hubiera tipeado.
+         */
+        if( ( ( cRxedChar >= '0' ) && ( cRxedChar <= '9' ) ) || ( cRxedChar == ';' ) )
+        {
+            return ret;
+        }
+
         switch( cRxedChar )
         {
             case VT100_ARROWUP:   FRTOS_CMD_History( CMDLINE_HISTORY_PREV ); break;
             case VT100_ARROWDOWN: FRTOS_CMD_History( CMDLINE_HISTORY_NEXT ); break;
-            default: break;
+            default: break;   /* izquierda, derecha, Inicio, Fin...: se ignoran */
         }
         VT100State = 0;
         return ret;
@@ -100,7 +116,14 @@ bool FRTOS_CMD_process( char cRxedChar )
 
     if( VT100State == 1 )
     {
-        VT100State = ( cRxedChar == '[' ) ? 2 : 0;
+        /*
+         * Hay DOS introductores válidos y esto costaba que el historial no
+         * anduviera: '[' es el modo normal (CSI) y 'O' es el modo "application
+         * cursor keys" (SS3), que usan minicom, screen y PuTTY según cómo estén
+         * configurados. Con sólo '[' reconocido, en esas terminales la flecha no
+         * hacía nada y encima la 'A' final se colaba en el renglón como texto.
+         */
+        VT100State = ( ( cRxedChar == '[' ) || ( cRxedChar == 'O' ) ) ? 2 : 0;
         return ret;
     }
 
@@ -156,6 +179,8 @@ void FRTOS_CMD_History( uint8_t action )
     switch( action )
     {
         case CMDLINE_HISTORY_SAVE:
+            /* Sólo si hay algo: así un Enter en vacío no borra el historial, que
+               es justo lo que uno hace para ver el prompt antes de repetir. */
             if( strlen( cmdLine_buffer ) )
             {
                 memset( cmdLine_History_buffer, '\0', MAX_INPUT_LENGTH );
@@ -164,6 +189,16 @@ void FRTOS_CMD_History( uint8_t action )
             break;
 
         case CMDLINE_HISTORY_PREV:
+            /*
+             * Borrar lo tipeado ANTES de escribir lo recuperado. Sin esto, con
+             * algo a medio escribir la pantalla mostraba lo viejo pegado a lo
+             * nuevo mientras el buffer tenía sólo lo nuevo: a partir de ahí, cada
+             * backspace borraba en la pantalla un carácter distinto del que
+             * borraba en el buffer, y el comando que se ejecutaba no era el que
+             * se leía. Confuso de la peor manera.
+             */
+            pv_CMD_borrar_linea();
+
             memset( cmdLine_buffer, '\0', MAX_INPUT_LENGTH );
             pv_strlcpy( cmdLine_buffer, cmdLine_History_buffer, MAX_INPUT_LENGTH );
             cmdLine_ptr = strlen( cmdLine_buffer );
@@ -171,6 +206,13 @@ void FRTOS_CMD_History( uint8_t action )
             break;
 
         case CMDLINE_HISTORY_NEXT:
+            /* Con un solo nivel de historial, "el siguiente" es el renglón en
+               blanco. Da una forma de descartar lo recuperado sin borrarlo a
+               backspazos. */
+            pv_CMD_borrar_linea();
+            pv_CMD_init();
+            break;
+
         default:
             break;
     }
@@ -219,6 +261,24 @@ static void pv_CMD_init( void )
 {
     cmdLine_ptr = 0;
     memset( cmdLine_buffer, 0x00, MAX_INPUT_LENGTH );
+}
+//------------------------------------------------------------------------------
+/*
+ * Deja el renglón visualmente vacío, sin tocar el buffer.
+ *
+ * Se hace con backspace-espacio-backspace y no con una secuencia de escape tipo
+ * ESC[2K: así funciona en cualquier terminal, incluso una tonta, que es
+ * exactamente el tipo de terminal con el que uno termina en el campo.
+ */
+static void pv_CMD_borrar_linea( void )
+{
+    while( cmdLine_ptr > 0 )
+    {
+        xputChar( ASCII_BS );
+        xputChar( ' ' );
+        xputChar( ASCII_BS );
+        cmdLine_ptr--;
+    }
 }
 //------------------------------------------------------------------------------
 static void pv_CMD_execute( void )
