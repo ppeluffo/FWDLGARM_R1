@@ -37,14 +37,15 @@ batería que duerme casi todo el tiempo.
 **La placa está poblada sólo parcialmente.** Hoy hay montados: la **fuente**, el **micro**, la
 **interfaz de programación SWD** (PA13/PA14), **LEDs en PB9 y PA2**, el **cristal de 32.768 kHz en
 PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal** (PB6/PB7 más
-`TERM_SENSE` en PB5), y el **bus I2C2** (PB13/PB14, pull-up de 10 kΩ) con la **EEPROM M24M01** y el
-**RTC MCP79410 con su pila**. Nada más: no hay modem LTE, ni RS485, ni microSD, ni front-end
-analógico.
+`TERM_SENSE` en PB5), el **bus I2C2** (PB13/PB14, pull-up de 10 kΩ) con la **EEPROM M24M01** y el
+**RTC MCP79410 con su pila**, y el **RS485** con su transceiver **SP3485** y los tres rieles
+conmutados. Nada más: no hay modem LTE, ni microSD, ni front-end analógico, ni el monitor de
+corriente INA del I2C.
 
-Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola y el
-bus I2C**. El resto del mapa de pines de `interfases_pines.csv` es el diseño completo de R001, no
-hardware presente — no tiene sentido escribir drivers contra periféricos que todavía no están
-montados.
+Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola, el
+bus I2C y el RS485**. El resto del mapa de pines de `interfases_pines.csv` es el diseño completo de
+R001, no hardware presente — no tiene sentido escribir drivers contra periféricos que todavía no
+están montados.
 
 El proyecto **se borró y se rehízo de cero el 2026-08-10** (ver control de versiones), y desde
 entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
@@ -58,6 +59,7 @@ entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
 | `v0.0.5` | **Tickless con Stop 2** — de 3,2 mA a 0,215 mA de placa |
 | `v0.0.6` | **Consola TERM (TX + RX) y `TERM_SENSE`** — el micro dormido queda en **~5 µA** |
 | `v0.0.7` | **Bus I2C2, EEPROM M24M01 y RTC MCP79410** — los tres validados con datos reales |
+| `v0.0.8` | **RS485 (SP3485) con DE por hardware** y los 3 rieles conmutados. De paso, el tickless dejó de comerse bytes |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
   `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
@@ -301,8 +303,11 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    **MCP79410**. Los tres validados con datos reales, no sólo con ACKs: la EEPROM con escrituras que
    cruzan bordes de página y de bloque (`ee test`), y el RTC conservando la hora tras un minuto sin
    alimentación. Falta el **monitor de corriente INA**, que todavía no está poblado.
-7. RS485/Modbus → **microSD/SPI** → entradas analógicas → modem LTE. La microSD ya tiene relevamiento
-   y decisiones pendientes anotadas: ver *microSD + FatFs: diseño pendiente*.
+7. ✅ **RS485** (`v0.0.8`) — `USART3` con el **DE manejado por hardware** (PB1 = `USART3_RTS_DE`), tres
+   rieles conmutados y lectura por **tramas delimitadas por silencio**, que es ya la delimitación de
+   Modbus RTU. Falta la capa **Modbus** y los mapas de registros de los módulos.
+   Después: **microSD/SPI** → entradas analógicas → modem LTE. La microSD ya tiene relevamiento y
+   decisiones pendientes anotadas: ver *microSD + FatFs: diseño pendiente*.
 8. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
    hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
 9. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
@@ -669,7 +674,8 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | SWD | PA13 SWDIO, PA14 SWCLK |
 | TERM (consola) | PB6 TX, PB7 RX → **USART1** |
 | LTE (modem) | PA0 TX, PA1 RX → **UART4** |
-| RS485 (modbus) | PB10 TX, PB11 RX → **USART3** |
+| RS485 (modbus) | PB10 TX, PB11 RX, **PB1 `USART3_RTS_DE`** → **USART3**, 9600 8N1, transceiver **SP3485** |
+| Rieles conmutados (TPS22819, EN=1 prende, pull-down de 100 K) | PC6 `EN_PWR_RS485`, PC7 `EN_PWR_QMBUS`, PB15 `EN_PWR_CPRES` |
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | SPI (microSD) | PA15 NSS, PC10 SCK, PC11 MISO, PC12 MOSI |
 | Contador de pulsos CNT0 | PA12 (EXTI) |
@@ -709,6 +715,7 @@ Application/
 │               drv_i2c.{h,c}           bus I2C2 por interrupción + candado de bus
 │               drv_eeprom.{h,c}        M24M01, dirección plana de 17 bits
 │               drv_rtc79410.{h,c}      RTC externo MCP79410 (BCD, pila, PWRFAIL)
+│               drv_rs485.{h,c}         rieles conmutados y pines del SP3485
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
