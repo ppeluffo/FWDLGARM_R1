@@ -771,8 +771,10 @@ cerró, con el comando `keys`:
 |---|---|---|
 | Tecla `ESC` ×3 — **un byte suelto** cada vez | `1B 1B 1B` | **0** |
 | Flecha ×3 — **tres bytes pegados** cada vez | `1B 1B 1B` | **3** |
+| **Flecha ×3, ya con el arreglo** | `1B 5B 41` ×3 — **los 9** | **0** |
 
-O sea que de cada secuencia `ESC [ A` sobrevivía sólo el primer byte.
+O sea que de cada secuencia `ESC [ A` sobrevivía sólo el primer byte, y con el arreglo llegan las tres
+completas.
 
 **El mecanismo:** `vPortSuppressTicksAndSleep()` hacía `__disable_irq()` —que enmascara por `PRIMASK`
 **todas** las interrupciones sin importar la prioridad, así que subir la del USART no habría servido—
