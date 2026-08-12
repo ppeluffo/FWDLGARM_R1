@@ -8,6 +8,7 @@
 #include "frtos-io.h"
 #include "drv_uart.h"
 #include "drv_i2c.h"
+#include "drv_rs485.h"
 #include "semphr.h"
 
 /*------------------------------------------------------------------------------
@@ -165,7 +166,7 @@ typedef struct {
 static const frtos_fd_t xFdTable[ fdCOUNT ] = {
     [ fdTERM   ] = { &xUartOps, drvUART_TERM },
     [ fdWAN    ] = { NULL, 0 },
-    [ fdRS485A ] = { NULL, 0 },
+    [ fdRS485A ] = { &xUartOps, drvUART_RS485 },
     [ fdI2C    ] = { &xI2cOps, 0 },
     [ fdNVM    ] = { NULL, 0 },
 };
@@ -194,7 +195,9 @@ bool frtos_open_all( void )
         xTimeouts[ i ] = portMAX_DELAY;
     }
 
-    return ( drv_uart_init() && drv_i2c_init() );
+    /* El orden importa: drv_rs485_init() apaga rieles y toca la recepción de la
+       UART del 485, así que la UART tiene que existir antes. */
+    return ( drv_uart_init() && drv_i2c_init() && drv_rs485_init() );
 }
 //------------------------------------------------------------------------------
 int16_t frtos_write( file_descriptor_t fd, const char *pvBuffer, uint16_t xBytes )

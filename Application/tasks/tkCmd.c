@@ -11,6 +11,7 @@
 #include "drv_i2c.h"
 #include "drv_eeprom.h"
 #include "drv_rtc79410.h"
+#include "drv_rs485.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -277,6 +278,7 @@ static void cmdSense( void );
 static void cmdI2c( void );
 static void cmdEe( void );
 static void cmdRtc( void );
+static void cmdRs485( void );
 static void cmdReset( void );
 static void cmdReboot( void );
 
@@ -359,6 +361,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "i2c",    cmdI2c    );
     FRTOS_CMD_register( "ee",     cmdEe     );
     FRTOS_CMD_register( "rtc",    cmdRtc    );
+    FRTOS_CMD_register( "rs485",  cmdRs485  );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
 
@@ -394,6 +397,7 @@ static void cmdHelp( void )
     xprintf( "  i2c     - bus I2C2 crudo. Sin argumentos, dice como se usa\r\n" );
     xprintf( "  ee      - EEPROM M24M01 (128 KB). Sin argumentos, dice como se usa\r\n" );
     xprintf( "  rtc     - RTC externo MCP79410. Sin argumentos, muestra el estado\r\n" );
+    xprintf( "  rs485   - bus RS485 y los 3 rieles de alimentacion\r\n" );
     xprintf( "  reset   - reset por NVIC_SystemReset (pulsa NRST)\r\n" );
     xprintf( "  reboot  - reinicio tibio, sin tocar NRST (diagnostico)\r\n" );
     /* OJO: el parser matchea por PREFIJO, así que 'r' y 're' caen en 'reset',
@@ -1047,6 +1051,155 @@ static void cmdRtc( void )
     }
 
     prvRtcUso();
+}
+//------------------------------------------------------------------------------
+/*
+ * Bring-up del RS485.
+ *
+ *   rs485                          estado de los tres rieles
+ *   rs485 on|off  bus|qmbus|cpres  prende y apaga cada riel
+ *   rs485 tx <texto>               transmite (sin espacios) y escucha la respuesta
+ *   rs485 rx <ms>                  escucha n ms y vuelca lo que llegue
+ *
+ * Sirve para medir con el tester riel por riel ANTES de que exista Modbus, y
+ * para ver la trama en el osciloscopio sin depender de que un esclavo conteste.
+ */
+#define RS485_BUF           64U
+#define RS485_ESCUCHA_MS    500U
+
+static const char *pcNombreRiel( rs485_rail_t eRail )
+{
+    switch( eRail )
+    {
+        case rs485RAIL_BUS:   return "bus   (SP3485, PC6) ";
+        case rs485RAIL_QMBUS: return "qmbus (caudal,  PC7) ";
+        default:              return "cpres (presion, PB15)";
+    }
+}
+
+static void prvRs485Uso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  rs485\r\n" );
+    xprintf( "  rs485 on|off  bus|qmbus|cpres\r\n" );
+    xprintf( "  rs485 tx <texto>    transmite y escucha %u ms\r\n", ( unsigned ) RS485_ESCUCHA_MS );
+    xprintf( "  rs485 rx <ms>       solo escucha\r\n" );
+}
+
+static void prvRs485Estado( void )
+{
+    for( uint32_t i = 0U; i < rs485RAIL_COUNT; i++ )
+    {
+        xprintf( "  %s : %s\r\n", pcNombreRiel( ( rs485_rail_t ) i ),
+                 drv_rs485_power_estado( ( rs485_rail_t ) i ) ? "ENCENDIDO" : "apagado" );
+    }
+
+    xprintf( "  pwr locks   : 0x%08lX %s\r\n",
+             ( unsigned long ) pwr_lock_estado(),
+             pwr_deep_sleep_permitido() ? "(Stop 2 habilitado)" : "(solo Sleep)" );
+}
+
+/* Escucha y vuelca en hexa + ASCII. Devuelve cuántos bytes juntó. */
+static int16_t prvRs485Escuchar( uint32_t ulMs )
+{
+    char    pcDatos[ RS485_BUF ];
+    int16_t sRet = drv_rs485_read( pcDatos, RS485_BUF, pdMS_TO_TICKS( ulMs ) );
+
+    if( sRet < 0 )
+    {
+        xprintf( "ERROR: el bus esta apagado ('rs485 on bus')\r\n" );
+        return sRet;
+    }
+
+    if( sRet == 0 )
+    {
+        xprintf( "silencio (%lu ms, nada recibido)\r\n", ( unsigned long ) ulMs );
+        return 0;
+    }
+
+    xprintf( "recibidos %d:", ( int ) sRet );
+    for( int16_t i = 0; i < sRet; i++ )
+    {
+        xprintf( " %02X", ( unsigned ) ( ( uint8_t ) pcDatos[ i ] ) );
+    }
+    xprintf( "  |" );
+    for( int16_t i = 0; i < sRet; i++ )
+    {
+        char c = pcDatos[ i ];
+        xputChar( ( ( c >= 0x20 ) && ( c < 0x7F ) ) ? c : '.' );
+    }
+    xprintf( "|\r\n" );
+
+    return sRet;
+}
+
+static void cmdRs485( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        prvRs485Estado();
+        return;
+    }
+
+    bool bOn  = ( strcmp( argv[ 1 ], "on"  ) == 0 );
+    bool bOff = ( strcmp( argv[ 1 ], "off" ) == 0 );
+
+    if( bOn || bOff )
+    {
+        if( ( ucArgs < 2U ) || ( argv[ 2 ] == NULL ) )
+        {
+            prvRs485Uso();
+            return;
+        }
+
+        rs485_rail_t eRail;
+
+        if     ( strcmp( argv[ 2 ], "bus"   ) == 0 ) { eRail = rs485RAIL_BUS;   }
+        else if( strcmp( argv[ 2 ], "qmbus" ) == 0 ) { eRail = rs485RAIL_QMBUS; }
+        else if( strcmp( argv[ 2 ], "cpres" ) == 0 ) { eRail = rs485RAIL_CPRES; }
+        else { prvRs485Uso(); return; }
+
+        drv_rs485_power( eRail, bOn );
+
+        if( bOn )
+        {
+            /* Los módulos externos tardan mucho más, pero eso lo decide quien los
+               polee: acá sólo se espera al transceiver. */
+            vTaskDelay( pdMS_TO_TICKS( DRV_RS485_SETTLE_BUS_MS ) );
+        }
+
+        prvRs485Estado();
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "tx" ) == 0 ) && ( ucArgs >= 2U ) )
+    {
+        uint16_t usLargo = ( uint16_t ) strlen( argv[ 2 ] );
+
+        /* Se limpia ANTES de transmitir. En un bus half duplex el eco propio y
+           cualquier basura previa quedarían mezclados con la respuesta. */
+        drv_rs485_rx_flush();
+
+        if( drv_rs485_write( argv[ 2 ], usLargo ) != ( int16_t ) usLargo )
+        {
+            xprintf( "ERROR: el bus esta apagado ('rs485 on bus')\r\n" );
+            return;
+        }
+
+        xprintf( "transmitidos %u bytes, escuchando...\r\n", ( unsigned ) usLargo );
+        ( void ) prvRs485Escuchar( RS485_ESCUCHA_MS );
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "rx" ) == 0 ) && ( ucArgs >= 2U ) )
+    {
+        ( void ) prvRs485Escuchar( ( uint32_t ) atoi( argv[ 2 ] ) );
+        return;
+    }
+
+    prvRs485Uso();
 }
 //------------------------------------------------------------------------------
 static void cmdReset( void )

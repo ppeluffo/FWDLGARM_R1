@@ -35,14 +35,25 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-/* Instancias físicas. Hoy sólo está poblada la consola; las otras entran cuando
-   se pueble el hardware, agregando una fila a la tabla de drv_uart.c. */
+/* Instancias físicas. Entran agregando una fila a la tabla de drv_uart.c, que es
+   justamente para lo que la tabla existe: el RS485 no necesitó una línea de
+   código nuevo de UART. Falta el modem LTE, cuando se pueble. */
 typedef enum {
     drvUART_TERM = 0,
+    drvUART_RS485,
     drvUART_COUNT
 } drv_uart_id_t;
 
 #define DRV_UART_TERM_RXSIZE    128U    /* buffer de RX de la consola */
+
+/*
+ * 256 bytes para el RS485: una trama Modbus RTU son 256 como máximo (PDU de 253
+ * más dirección y CRC). Con menos, una respuesta larga se perdería por la mitad
+ * y el síntoma —tramas que fallan sólo cuando el esclavo contesta mucho— es de
+ * los que cuestan encontrar.
+ */
+#define DRV_UART_RS485_RXSIZE   256U
+
 #define DRV_UART_TX_TIMEOUT_MS  1000U   /* techo para que termine una transmisión */
 
 /* Arranca todas las instancias de la tabla. Se llama una vez, antes del scheduler

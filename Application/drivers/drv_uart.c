@@ -11,6 +11,7 @@
 /* Los handles los crea CubeMX en main.c. Es el único punto donde este driver se
    ata a lo generado; de acá para arriba nadie los ve. */
 extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart3;
 
 /*------------------------------------------------------------------------------
  * La tabla
@@ -34,7 +35,8 @@ typedef struct {
     uint8_t              ucRxByte;    /* destino del Receive_IT, un byte por vez */
 } drv_uart_t;
 
-static uint8_t pucTermRxStore[ DRV_UART_TERM_RXSIZE + 1U ];  /* +1: el stream buffer usa uno de guarda */
+static uint8_t pucTermRxStore [ DRV_UART_TERM_RXSIZE  + 1U ]; /* +1: el stream buffer usa uno de guarda */
+static uint8_t pucRs485RxStore[ DRV_UART_RS485_RXSIZE + 1U ];
 
 static drv_uart_t xUarts[ drvUART_COUNT ] = {
     [ drvUART_TERM ] = {
@@ -42,6 +44,12 @@ static drv_uart_t xUarts[ drvUART_COUNT ] = {
         .pucRxStore = pucTermRxStore,
         .xRxSize    = DRV_UART_TERM_RXSIZE,
         .eTxLock    = pwrLOCK_TERM_TX,
+    },
+    [ drvUART_RS485 ] = {
+        .pxHal      = &huart3,
+        .pucRxStore = pucRs485RxStore,
+        .xRxSize    = DRV_UART_RS485_RXSIZE,
+        .eTxLock    = pwrLOCK_RS485,
     },
 };
 

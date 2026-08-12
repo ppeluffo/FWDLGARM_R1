@@ -83,6 +83,18 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define LED2_Pin GPIO_PIN_2
 #define LED2_GPIO_Port GPIOA
+#define RS485_RTS_DE_Pin GPIO_PIN_1
+#define RS485_RTS_DE_GPIO_Port GPIOB
+#define RS485_TX_Pin GPIO_PIN_10
+#define RS485_TX_GPIO_Port GPIOB
+#define RS485_RX_Pin GPIO_PIN_11
+#define RS485_RX_GPIO_Port GPIOB
+#define EN_PWR_CPRES_Pin GPIO_PIN_15
+#define EN_PWR_CPRES_GPIO_Port GPIOB
+#define EN_PWR_RS485_Pin GPIO_PIN_6
+#define EN_PWR_RS485_GPIO_Port GPIOC
+#define EN_PWR_QMBUS_Pin GPIO_PIN_7
+#define EN_PWR_QMBUS_GPIO_Port GPIOC
 #define TERM_SENSE_Pin GPIO_PIN_5
 #define TERM_SENSE_GPIO_Port GPIOB
 #define TERM_TX_Pin GPIO_PIN_6
