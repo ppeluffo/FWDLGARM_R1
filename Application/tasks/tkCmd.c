@@ -8,6 +8,7 @@
 
 #include "tkCmd.h"
 #include "drv_uart.h"
+#include "drv_i2c.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -271,6 +272,7 @@ void tkCmd( void *pvParameters )
 static void cmdHelp( void );
 static void cmdStatus( void );
 static void cmdSense( void );
+static void cmdI2c( void );
 static void cmdReset( void );
 static void cmdReboot( void );
 
@@ -342,6 +344,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
     FRTOS_CMD_register( "sense",  cmdSense  );
+    FRTOS_CMD_register( "i2c",    cmdI2c    );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
 
@@ -374,6 +377,7 @@ static void cmdHelp( void )
     xprintf( "  help    - esta ayuda\r\n" );
     xprintf( "  status  - estado del sistema\r\n" );
     xprintf( "  sense   - nivel del pin TERM_SENSE (PB5) + monitor de flancos\r\n" );
+    xprintf( "  i2c     - bus I2C2. Sin argumentos, dice como se usa\r\n" );
     xprintf( "  reset   - reset por NVIC_SystemReset (pulsa NRST)\r\n" );
     xprintf( "  reboot  - reinicio tibio, sin tocar NRST (diagnostico)\r\n" );
     /* OJO: el parser matchea por PREFIJO, así que 'r' y 're' caen en 'reset',
@@ -479,6 +483,185 @@ static void cmdSense( void )
 
     xprintf( "monitor terminado. cambios de estado: %lu\r\n",
              ( unsigned long ) drv_term_sense_cambios() );
+}
+//------------------------------------------------------------------------------
+/*
+ * Herramienta de bring-up del bus I2C2.
+ *
+ *   i2c scan
+ *   i2c read  <dev> <mem> <largoDir> <n>
+ *   i2c write <dev> <mem> <largoDir> <byte> [byte...]
+ *
+ * Todo en HEXA y con la dirección de dispositivo en FORMATO DE 8 BITS: 0xA0 para
+ * la EEPROM, 0xDE para el RTC. Ver drv_i2c.h para el porqué.
+ *
+ * El escaneo vale incluso con la placa pelada, y es lo primero que hay que correr:
+ *
+ *   contesta alguien          -> pines, pull-up, reloj y el chip: todo bien.
+ *   no contesta nadie, pero
+ *   el comando vuelve rapido  -> el bus ELECTRICAMENTE anda. Cada dirección
+ *                                terminó en NACK, que es lo correcto cuando no
+ *                                hay nadie: el micro generó los clocks y las
+ *                                líneas volvieron a alto solas.
+ *   el barrido tarda ~un
+ *   cuarto de segundo por
+ *   dirección, o se cuelga    -> una línea trabada en BAJO. Sospechar pull-up
+ *                                ausentes, un esclavo colgado, o un corto.
+ */
+#define I2C_MAX_BYTES       32U
+
+static uint32_t prvHex( const char *pcTexto )
+{
+    return ( pcTexto != NULL ) ? strtoul( pcTexto, NULL, 16 ) : 0UL;
+}
+
+static void prvI2cUso( void )
+{
+    xprintf( "uso (todo en HEXA, dev en formato de 8 bits: EEPROM=A0, RTC=DE):\r\n" );
+    xprintf( "  i2c scan\r\n" );
+    xprintf( "  i2c read  <dev> <mem> <largoDir> <n>\r\n" );
+    xprintf( "  i2c write <dev> <mem> <largoDir> <byte> [byte...]\r\n" );
+    xprintf( "  largoDir: 1 para el RTC, 2 para la EEPROM\r\n" );
+}
+
+static void prvI2cScan( void )
+{
+    xprintf( "escaneando I2C2 (direcciones de 7 bits)...\r\n" );
+    xprintf( "     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f\r\n" );
+
+    uint32_t ulEncontrados = 0U;
+
+    for( uint8_t ucFila = 0U; ucFila < 8U; ucFila++ )
+    {
+        xprintf( "%02x: ", ( unsigned ) ( ucFila << 4 ) );
+
+        for( uint8_t ucCol = 0U; ucCol < 16U; ucCol++ )
+        {
+            uint8_t ucAddr7 = ( uint8_t ) ( ( ucFila << 4 ) | ucCol );
+
+            /* 0x00-0x07 y 0x78-0x7F son direcciones reservadas por el estándar:
+               no se sondean para no meter ruido en el bus. */
+            if( ( ucAddr7 < 0x08U ) || ( ucAddr7 > 0x77U ) )
+            {
+                xprintf( "   " );
+                continue;
+            }
+
+            if( drv_i2c_probe( ( uint8_t ) ( ucAddr7 << 1 ) ) )
+            {
+                xprintf( "%02x ", ( unsigned ) ucAddr7 );
+                ulEncontrados++;
+            }
+            else
+            {
+                xprintf( "-- " );
+            }
+        }
+        xprintf( "\r\n" );
+    }
+
+    xprintf( "dispositivos: %lu\r\n", ( unsigned long ) ulEncontrados );
+
+    if( ulEncontrados == 0U )
+    {
+        xprintf( "nadie contesto. Si el barrido fue RAPIDO el bus esta sano y no\r\n" );
+        xprintf( "hay chips; si fue LENTO, sospechar una linea trabada en bajo.\r\n" );
+    }
+    else
+    {
+        /* Traducir lo conocido, para no tener que ir al datasheet. */
+        xprintf( "esperados en R001: 50..53 = EEPROM M24M02 (dev A0..A6)\r\n" );
+        xprintf( "                   6f     = MCP79410 RTCC (dev DE)\r\n" );
+        xprintf( "                   57     = MCP79410 EEPROM interna (dev AE)\r\n" );
+    }
+}
+
+static void cmdI2c( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        prvI2cUso();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "scan" ) == 0 )
+    {
+        prvI2cScan();
+        return;
+    }
+
+    /* Los dos comandos restantes comparten los tres primeros parámetros. */
+    if( ucArgs < 5U )
+    {
+        prvI2cUso();
+        return;
+    }
+
+    uint8_t  ucDev    = ( uint8_t )  prvHex( argv[ 2 ] );
+    uint16_t usMem    = ( uint16_t ) prvHex( argv[ 3 ] );
+    uint8_t  ucLargo  = ( uint8_t )  prvHex( argv[ 4 ] );
+    char     pcDatos[ I2C_MAX_BYTES ];
+
+    if( strcmp( argv[ 1 ], "read" ) == 0 )
+    {
+        uint32_t ulN = prvHex( argv[ 5 ] );
+
+        if( ( ulN == 0UL ) || ( ulN > I2C_MAX_BYTES ) )
+        {
+            xprintf( "n debe estar entre 1 y %u (en hexa)\r\n", ( unsigned ) I2C_MAX_BYTES );
+            return;
+        }
+
+        int16_t sRet = drv_i2c_read( ucDev, usMem, ucLargo, pcDatos,
+                                     ( uint16_t ) ulN, pdMS_TO_TICKS( 1000 ) );
+
+        if( sRet < 0 )
+        {
+            xprintf( "ERROR: HAL_I2C_ERROR = 0x%08lX%s\r\n",
+                     ( unsigned long ) drv_i2c_last_error(),
+                     ( drv_i2c_last_error() & HAL_I2C_ERROR_AF ) ? "  (AF = nadie contesto)" : "" );
+            return;
+        }
+
+        xprintf( "dev %02X mem %04X:", ( unsigned ) ucDev, ( unsigned ) usMem );
+        for( int16_t i = 0; i < sRet; i++ )
+        {
+            xprintf( " %02X", ( unsigned ) ( ( uint8_t ) pcDatos[ i ] ) );
+        }
+        xprintf( "\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "write" ) == 0 )
+    {
+        uint8_t ucN = 0U;
+
+        /* argv[5] en adelante son los bytes. makeArgv() devuelve la cantidad de
+           argumentos sin contar el comando, así que el último válido es argv[ucArgs]. */
+        for( uint8_t i = 5U; ( i <= ucArgs ) && ( ucN < I2C_MAX_BYTES ); i++ )
+        {
+            pcDatos[ ucN++ ] = ( char ) prvHex( argv[ i ] );
+        }
+
+        int16_t sRet = drv_i2c_write( ucDev, usMem, ucLargo, pcDatos,
+                                      ucN, pdMS_TO_TICKS( 1000 ) );
+
+        if( sRet < 0 )
+        {
+            xprintf( "ERROR: HAL_I2C_ERROR = 0x%08lX%s\r\n",
+                     ( unsigned long ) drv_i2c_last_error(),
+                     ( drv_i2c_last_error() & HAL_I2C_ERROR_AF ) ? "  (AF = nadie contesto)" : "" );
+            return;
+        }
+
+        xprintf( "escritos %d bytes en dev %02X mem %04X\r\n",
+                 ( int ) sRet, ( unsigned ) ucDev, ( unsigned ) usMem );
+        return;
+    }
+
+    prvI2cUso();
 }
 //------------------------------------------------------------------------------
 static void cmdReset( void )

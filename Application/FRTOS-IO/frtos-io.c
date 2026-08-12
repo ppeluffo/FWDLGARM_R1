@@ -7,6 +7,7 @@
 
 #include "frtos-io.h"
 #include "drv_uart.h"
+#include "drv_i2c.h"
 #include "semphr.h"
 
 /*------------------------------------------------------------------------------
@@ -71,6 +72,85 @@ static const frtos_ops_t xUartOps = {
 };
 
 /*------------------------------------------------------------------------------
+ * Operaciones de I2C
+ *
+ * El I2C no encaja natural en una API estilo POSIX: `read(fd, buf, n)` no tiene
+ * dónde decir a QUÉ chip ni a qué dirección interna. FWDLGX resolvió eso fijando
+ * los tres datos por `ioctl` y dejándolos pegados al fd hasta el próximo cambio,
+ * y acá se conserva **el mismo idioma con los mismos códigos**, para que el
+ * código heredado del AVR compile sin tocarlo:
+ *
+ *     frtos_ioctl( fdI2C, ioctl_I2C_SET_DEVADDRESS,        &devAddr );
+ *     frtos_ioctl( fdI2C, ioctl_I2C_SET_DATAADDRESS,       &memAddr );
+ *     frtos_ioctl( fdI2C, ioctl_I2C_SET_DATAADDRESSLENGTH, &largo   );
+ *     frtos_read ( fdI2C, buffer, n );
+ *
+ * ⚠ Es estado pegajoso y compartido: dos tareas usando fdI2C se pisarían los
+ * parámetros entre el ioctl y el read, y el mutex de drv_i2c NO protege eso
+ * —protege la transacción, que empieza después—. Por eso el acceso a los chips
+ * va a ir siempre por sus drivers (EEPROM, RTC), que llaman a `drv_i2c_*`
+ * directo y pasan todo junto. Esta fila existe para el código heredado.
+ *----------------------------------------------------------------------------*/
+
+static uint8_t  ucI2cDevAddr     = 0U;
+static uint16_t usI2cMemAddr     = 0U;
+static uint8_t  ucI2cMemAddrLen  = 1U;
+
+static int16_t prvI2cWrite( uint8_t ucInstancia, const char *pvBuffer, uint16_t xBytes )
+{
+    ( void ) ucInstancia;
+    return drv_i2c_write( ucI2cDevAddr, usI2cMemAddr, ucI2cMemAddrLen,
+                          pvBuffer, xBytes, portMAX_DELAY );
+}
+
+static int16_t prvI2cRead( uint8_t ucInstancia, char *pvBuffer, uint16_t xBytes, TickType_t xTicksToWait )
+{
+    ( void ) ucInstancia;
+    return drv_i2c_read( ucI2cDevAddr, usI2cMemAddr, ucI2cMemAddrLen,
+                         pvBuffer, xBytes, xTicksToWait );
+}
+
+static int16_t prvI2cIoctl( uint8_t ucInstancia, uint32_t ulRequest, void *pvValue )
+{
+    ( void ) ucInstancia;
+
+    switch( ulRequest )
+    {
+        case ioctl_I2C_SET_DEVADDRESS:
+            if( pvValue == NULL ) { return -1; }
+            ucI2cDevAddr = *( ( uint8_t * ) pvValue );
+            return 0;
+
+        case ioctl_I2C_SET_DATAADDRESS:
+            if( pvValue == NULL ) { return -1; }
+            usI2cMemAddr = *( ( uint16_t * ) pvValue );
+            return 0;
+
+        case ioctl_I2C_SET_DATAADDRESSLENGTH:
+            if( pvValue == NULL ) { return -1; }
+            ucI2cMemAddrLen = *( ( uint8_t * ) pvValue );
+            return 0;
+
+        case ioctl_I2C_GET_LAST_ERROR:
+            if( pvValue == NULL ) { return -1; }
+            *( ( uint32_t * ) pvValue ) = drv_i2c_last_error();
+            return 0;
+
+        case ioctl_I2C_RESET:
+            return ( drv_i2c_reset() == true ) ? 0 : -1;
+
+        default:
+            return -1;
+    }
+}
+
+static const frtos_ops_t xI2cOps = {
+    .write = prvI2cWrite,
+    .read  = prvI2cRead,
+    .ioctl = prvI2cIoctl,
+};
+
+/*------------------------------------------------------------------------------
  * La tabla de file descriptors.
  *
  * Las filas en NULL son los periféricos cuyo hardware todavía no está poblado:
@@ -86,7 +166,7 @@ static const frtos_fd_t xFdTable[ fdCOUNT ] = {
     [ fdTERM   ] = { &xUartOps, drvUART_TERM },
     [ fdWAN    ] = { NULL, 0 },
     [ fdRS485A ] = { NULL, 0 },
-    [ fdI2C    ] = { NULL, 0 },
+    [ fdI2C    ] = { &xI2cOps, 0 },
     [ fdNVM    ] = { NULL, 0 },
 };
 
@@ -114,7 +194,7 @@ bool frtos_open_all( void )
         xTimeouts[ i ] = portMAX_DELAY;
     }
 
-    return drv_uart_init();
+    return ( drv_uart_init() && drv_i2c_init() );
 }
 //------------------------------------------------------------------------------
 int16_t frtos_write( file_descriptor_t fd, const char *pvBuffer, uint16_t xBytes )
