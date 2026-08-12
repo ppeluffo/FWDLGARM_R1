@@ -305,7 +305,12 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    y decisiones pendientes anotadas: ver *microSD + FatFs: diseño pendiente*.
 8. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
    hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
-9. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+9. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
+   que conviene hacer una sola vez, al final, en vez de rehacerlas cada vez que entra un periférico:
+   la **sincronización del RTC interno desde el MCP79410**, el período definitivo de `tkCtl` junto
+   con el watchdog y el poleo de `TERM_SENSE` (los tres comparten la misma vuelta), el
+   comportamiento del parser de comandos, y `BOR_LEV`.
+10. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
 **Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
 (`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
@@ -378,10 +383,19 @@ posibles duelen: si no se limpia nunca, en campo se ve para siempre el primer co
 equipo y ninguno de los que importan; si se limpia sin leer antes, se tira la evidencia.
 `drv_rtc_init()` **no limpia a propósito**.
 
-⏳ **Falta implementar la sincronización**, y con ella se arregla lo que quedó pendiente: el bloque
-`Check_RTC_BKUP` que genera CubeMX está **vacío**, así que `MX_RTC_Init()` reinicializa la hora en
-cada arranque. Al haber una fuente autoritativa afuera, eso deja de importar: se pisa con lo que
-diga el MCP79410.
+⏳ **La sincronización queda POSTERGADA a propósito** (decidido por Pablo el 2026-08-12): se
+implementa **en la etapa final de pulido del firmware, cuando el hardware esté terminado**, no ahora.
+El motivo es de método: mientras se sigan poblando periféricos, el trabajo que rinde es bring-up, y
+esto es una optimización —evitar una transacción I2C por timestamp— que no habilita nada que hoy
+falte. **No adelantarla sin que Pablo lo pida.**
+
+Cuando toque, dos cosas que ya están resueltas y no hay que volver a pensar:
+
+- **Copiar sólo si `drv_rtc_validez()` devuelve `rtcHORA_VALIDA`.** Sin ese chequeo se copia basura
+  con toda confianza, que es exactamente el problema que la firma vino a resolver.
+- Con eso se cierra solo el pendiente del `Check_RTC_BKUP` **vacío** que genera CubeMX, por el cual
+  `MX_RTC_Init()` reinicializa la hora en cada arranque: al haber una fuente autoritativa afuera, se
+  pisa con lo que diga el MCP79410 y deja de importar.
 
 ⚠ **NO desactivar el RTC interno en CubeMX.** No cuesta nada —ya corre del LSE, que está encendido
 igual— y es el consumidor que destrabó el encendido del LSE en `v0.0.3` (ver la sección de la trampa
