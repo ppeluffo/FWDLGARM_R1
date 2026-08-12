@@ -84,4 +84,11 @@ void drv_uart_rx_disable( drv_uart_id_t id );
 uint32_t drv_uart_errores( drv_uart_id_t id );
 uint32_t drv_uart_ultimo_error( drv_uart_id_t id );
 
+/* El registro ISR crudo del periférico al entrar al callback, acumulado con OR.
+   No es redundante con el anterior: no depende de la contabilidad de la HAL, así
+   que sirve justamente cuando esa contabilidad no cierra. */
+uint32_t drv_uart_ultimo_isr( drv_uart_id_t id );
+
+void     drv_uart_errores_reset( drv_uart_id_t id );
+
 #endif /* APPLICATION_DRIVERS_DRV_UART_H_ */

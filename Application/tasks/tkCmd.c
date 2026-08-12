@@ -1314,9 +1314,9 @@ static void cmdKeys( void )
     static uint8_t pucCapturado[ KEYS_MAX_BYTES ];
     uint32_t       ulN = 0U;
 
-    uint32_t ulErrAntes = drv_uart_errores( drvUART_TERM );
+    drv_uart_errores_reset( drvUART_TERM );
 
-    xprintf( "apreta flecha ARRIBA tres veces y espera %u s sin tocar nada.\r\n",
+    xprintf( "apreta la tecla que quieras probar TRES veces y espera %u s.\r\n",
              ( unsigned ) KEYS_CAPTURA_S );
     xprintf( "no voy a mostrar nada hasta el final: si imprimo mientras escucho,\r\n" );
     xprintf( "el propio mensaje tapa los bytes que estoy tratando de ver.\r\n\r\n" );
@@ -1352,24 +1352,23 @@ static void cmdKeys( void )
     }
     xprintf( "\r\n" );
 
-    uint32_t ulErr = drv_uart_errores( drvUART_TERM ) - ulErrAntes;
+    uint32_t ulErr   = drv_uart_errores( drvUART_TERM );
+    uint32_t ulIsr   = drv_uart_ultimo_isr( drvUART_TERM );
 
-    xprintf( "errores de UART durante la captura: %lu", ( unsigned long ) ulErr );
+    xprintf( "errores de UART : %lu\r\n", ( unsigned long ) ulErr );
 
     if( ulErr > 0U )
     {
-        uint32_t ulFlags = drv_uart_ultimo_error( drvUART_TERM );
-
-        xprintf( "  (0x%08lX:%s%s%s )", ( unsigned long ) ulFlags,
-                 ( ulFlags & HAL_UART_ERROR_ORE ) ? " ORE" : "",
-                 ( ulFlags & HAL_UART_ERROR_FE  ) ? " FE"  : "",
-                 ( ulFlags & HAL_UART_ERROR_NE  ) ? " NE"  : "" );
+        /* El ISR crudo del periférico. ORE es el que importa: dice que llegó un
+           byte antes de que se levantara el anterior, o sea que SE PERDIO. */
+        xprintf( "ISR acumulado   : 0x%08lX%s%s%s%s\r\n", ( unsigned long ) ulIsr,
+                 ( ulIsr & USART_ISR_ORE ) ? "  ORE(se perdieron bytes)" : "",
+                 ( ulIsr & USART_ISR_FE  ) ? "  FE(trama)"  : "",
+                 ( ulIsr & USART_ISR_NE  ) ? "  NE(ruido)"  : "",
+                 ( ulIsr & USART_ISR_PE  ) ? "  PE(paridad)": "" );
+        xprintf( "ErrorCode HAL   : 0x%08lX\r\n",
+                 ( unsigned long ) drv_uart_ultimo_error( drvUART_TERM ) );
     }
-    xprintf( "\r\n\r\n" );
-
-    xprintf( "3 flechas deberian dar 9 bytes: 1B 5B 41 repetido 3 veces\r\n" );
-    xprintf( "  (o 1B 4F 41 si minicom esta en application cursor keys)\r\n" );
-    xprintf( "si dan 3 bytes (1B 1B 1B), minicom manda solo el ESC.\r\n" );
 }
 //------------------------------------------------------------------------------
 static void cmdReset( void )

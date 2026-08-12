@@ -34,8 +34,9 @@ typedef struct {
 
     uint8_t              ucRxByte;    /* destino del Receive_IT, un byte por vez */
 
-    volatile uint32_t    ulErrores;      /* entradas al callback de error   */
-    volatile uint32_t    ulUltimoError;  /* banderas de la última vez       */
+    volatile uint32_t    ulErrores;      /* entradas al callback de error       */
+    volatile uint32_t    ulUltimoError;  /* ErrorCode de la HAL, acumulado (OR) */
+    volatile uint32_t    ulUltimoISR;    /* registro ISR crudo, acumulado (OR)  */
 } drv_uart_t;
 
 static uint8_t pucTermRxStore [ DRV_UART_TERM_RXSIZE  + 1U ]; /* +1: el stream buffer usa uno de guarda */
@@ -162,6 +163,21 @@ uint32_t drv_uart_ultimo_error( drv_uart_id_t id )
     return ( id < drvUART_COUNT ) ? xUarts[ id ].ulUltimoError : 0U;
 }
 //------------------------------------------------------------------------------
+uint32_t drv_uart_ultimo_isr( drv_uart_id_t id )
+{
+    return ( id < drvUART_COUNT ) ? xUarts[ id ].ulUltimoISR : 0U;
+}
+//------------------------------------------------------------------------------
+void drv_uart_errores_reset( drv_uart_id_t id )
+{
+    if( id < drvUART_COUNT )
+    {
+        xUarts[ id ].ulErrores     = 0U;
+        xUarts[ id ].ulUltimoError = 0U;
+        xUarts[ id ].ulUltimoISR   = 0U;
+    }
+}
+//------------------------------------------------------------------------------
 void drv_uart_rx_flush( drv_uart_id_t id )
 {
     if( id < drvUART_COUNT )
@@ -244,8 +260,20 @@ void HAL_UART_ErrorCallback( UART_HandleTypeDef *huart )
         return;
     }
 
-    /* Se anota ANTES de limpiar, que es la única oportunidad de saber qué pasó. */
-    px->ulUltimoError = HAL_UART_GetError( px->pxHal );
+    /*
+     * Se anota ANTES de limpiar, que es la única oportunidad de saber qué pasó.
+     *
+     * Se guarda el ISR CRUDO del periférico además del ErrorCode de la HAL, y no
+     * es redundante: el 2026-08-12 apareció un caso donde el callback entraba con
+     * ErrorCode en cero, cosa que ningún camino de la HAL explica. El registro
+     * del hardware no depende de la contabilidad de la HAL, así que dice la
+     * verdad aunque esa contabilidad esté mal.
+     *
+     * Los dos se ACUMULAN con OR: guardar sólo el último pierde el evento que
+     * importa cuando después viene uno más benigno.
+     */
+    px->ulUltimoError |= HAL_UART_GetError( px->pxHal );
+    px->ulUltimoISR   |= px->pxHal->Instance->ISR;
     px->ulErrores++;
 
     __HAL_UART_CLEAR_OREFLAG( px->pxHal );
