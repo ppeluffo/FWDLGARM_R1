@@ -584,7 +584,7 @@ El código propio vive **fuera de `Core/`**, para que una regeneración de CubeM
 Application/
 ├── pwr/        pwr_lock.{h,c}          candados de energía (ver abajo)
 ├── drivers/    drv_uart.{h,c}          UART sobre la HAL, tabla de instancias
-│               drv_term_sense.{h,c}    TERM_SENSE por EXTI
+│               drv_term_sense.{h,c}    TERM_SENSE, poleado por tkCtl (no EXTI)
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
