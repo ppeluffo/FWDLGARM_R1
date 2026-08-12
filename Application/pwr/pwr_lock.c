@@ -8,11 +8,16 @@
 static volatile uint32_t ulCandados = 0U;
 
 /*
- * Se protege con PRIMASK guardado y restaurado, no con taskENTER_CRITICAL(),
- * porque estas funciones se llaman TAMBIÉN desde ISR (la de TERM_SENSE) y desde
- * el port con las interrupciones ya cortadas. Guardar y reponer el estado previo
- * es lo único que funciona en los tres contextos sin habilitar interrupciones
- * donde no corresponde.
+ * Se protege con PRIMASK guardado y restaurado, no con taskENTER_CRITICAL().
+ *
+ * El motivo es el port: vPortSuppressTicksAndSleep() consulta el estado con las
+ * interrupciones YA cortadas, y taskENTER_CRITICAL()/taskEXIT_CRITICAL() las
+ * volvería a habilitar al salir, justo en medio de la cuenta de ticks. Guardar y
+ * reponer el estado previo funciona igual desde tarea, desde ISR y desde ahí.
+ *
+ * (Hasta el 2026-08-12 el caso ISR era real: TERM_SENSE tomaba el candado desde
+ * la EXTI. Ahora se polea desde tkCtl, pero el modem y la microSD van a volver a
+ * necesitarlo desde interrupción.)
  */
 static inline uint32_t prvEntrar( void )
 {

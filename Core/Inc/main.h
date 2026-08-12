@@ -85,7 +85,6 @@ void Error_Handler(void);
 #define LED2_GPIO_Port GPIOA
 #define TERM_SENSE_Pin GPIO_PIN_5
 #define TERM_SENSE_GPIO_Port GPIOB
-#define TERM_SENSE_EXTI_IRQn EXTI9_5_IRQn
 #define TERM_TX_Pin GPIO_PIN_6
 #define TERM_TX_GPIO_Port GPIOB
 #define TERM_RX_Pin GPIO_PIN_7
