@@ -862,9 +862,13 @@ static void cmdEe( void )
  * RTC externo MCP79410.
  *
  *   rtc                                    estado + fecha y hora
- *   rtc set <aa> <mm> <dd> <hh> <mi> <ss> [ds]   en DECIMAL
- *   rtc pwrfail                            marcas del ultimo corte
+ *   rtc set <aa> <mm> <dd> <hh> <mi> <ss>  en DECIMAL
+ *   rtc pwrfail                            marcas del corte
  *   rtc clear                              baja PWRFAIL y borra las marcas
+ *   rtc invalid                            borra la firma de validez
+ *
+ * El dia de la semana NO se pide: lo calcula el driver de la fecha. Pedirlo era
+ * pedir que alguien se equivocara, y se equivoco en la primera prueba.
  *
  * En decimal y no en hexa, a diferencia de 'ee' e 'i2c': una fecha la tipea una
  * persona, no sale de un mapa de registros.
@@ -880,7 +884,7 @@ static void prvRtcUso( void )
 {
     xprintf( "uso (en DECIMAL):\r\n" );
     xprintf( "  rtc\r\n" );
-    xprintf( "  rtc set <aa> <mm> <dd> <hh> <mi> <ss> [ds]   ds: 1=dom .. 7=sab\r\n" );
+    xprintf( "  rtc set <aa> <mm> <dd> <hh> <mi> <ss>   el dia de semana se calcula\r\n" );
     xprintf( "  rtc pwrfail\r\n" );
     xprintf( "  rtc clear     baja PWRFAIL y borra sus marcas\r\n" );
     xprintf( "  rtc invalid   borra la firma: simula un arranque en frio\r\n" );
@@ -964,7 +968,7 @@ static void cmdRtc( void )
         xHora.hour    = ( uint8_t ) atoi( argv[ 5 ] );
         xHora.min     = ( uint8_t ) atoi( argv[ 6 ] );
         xHora.sec     = ( uint8_t ) atoi( argv[ 7 ] );
-        xHora.weekDay = ( ucArgs >= 8U ) ? ( uint8_t ) atoi( argv[ 8 ] ) : 1U;
+        xHora.weekDay = 0U;   /* se ignora: lo calcula drv_rtc_escribir() */
 
         if( drv_rtc_escribir( &xHora ) == false )
         {

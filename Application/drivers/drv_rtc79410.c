@@ -66,6 +66,34 @@ static inline uint8_t prvABcd( uint8_t ucBin )
     return ( uint8_t ) ( ( ( ucBin / 10U ) << 4 ) | ( ucBin % 10U ) );
 }
 
+//------------------------------------------------------------------------------
+uint8_t drv_rtc_dia_de_semana( uint8_t ucAnio2, uint8_t ucMes, uint8_t ucDia )
+{
+    /* Sakamoto. La tabla son los corrimientos de cada mes respecto de enero; el
+       ajuste de enero y febrero es porque el día bisiesto va al final del año
+       juliano, no en medio. */
+    static const uint8_t ucCorrimiento[ 12 ] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+
+    if( ( ucMes < 1U ) || ( ucMes > 12U ) )
+    {
+        return 1U;
+    }
+
+    uint16_t usAnio = ( uint16_t ) ( 2000U + ucAnio2 );
+
+    if( ucMes < 3U )
+    {
+        usAnio--;
+    }
+
+    uint32_t ulDia = ( uint32_t ) usAnio
+                   + ( usAnio / 4U ) - ( usAnio / 100U ) + ( usAnio / 400U )
+                   + ucCorrimiento[ ucMes - 1U ] + ucDia;
+
+    /* Sakamoto da 0 = domingo; el chip y esta casa usan 1 = domingo. */
+    return ( uint8_t ) ( ( ulDia % 7U ) + 1U );
+}
+
 /*------------------------------------------------------------------------------
  * Acceso a registros
  *----------------------------------------------------------------------------*/
@@ -254,11 +282,11 @@ bool drv_rtc_escribir( const RtcTimeType_t *pxHora )
         return false;
     }
 
+    /* El día de la semana NO se valida porque no se usa: se calcula abajo. */
     if( ( pxHora->sec > 59U ) || ( pxHora->min > 59U ) || ( pxHora->hour > 23U ) ||
         ( pxHora->day < 1U ) || ( pxHora->day > 31U ) ||
         ( pxHora->month < 1U ) || ( pxHora->month > 12U ) ||
-        ( pxHora->year > 99U ) ||
-        ( pxHora->weekDay < 1U ) || ( pxHora->weekDay > 7U ) )
+        ( pxHora->year > 99U ) )
     {
         return false;
     }
@@ -296,7 +324,12 @@ bool drv_rtc_escribir( const RtcTimeType_t *pxHora )
 
         cBuf[ 0 ] = ( char ) prvABcd( pxHora->min );
         cBuf[ 1 ] = ( char ) prvABcd( pxHora->hour );          /* bit 12/24 en 0 */
-        cBuf[ 2 ] = ( char ) ( ( ( uint8_t ) cVal & BIT_VBATEN ) | ( pxHora->weekDay & MASK_WKDAY ) );
+        /* El día de la semana se CALCULA de la fecha, no se copia de lo que
+           mandó el llamador: es un dato derivado, y uno derivado que se ingresa
+           a mano termina mal tarde o temprano. Ver drv_rtc_dia_de_semana(). */
+        uint8_t ucDs = drv_rtc_dia_de_semana( pxHora->year, pxHora->month, pxHora->day );
+
+        cBuf[ 2 ] = ( char ) ( ( ( uint8_t ) cVal & BIT_VBATEN ) | ( ucDs & MASK_WKDAY ) );
         cBuf[ 3 ] = ( char ) prvABcd( pxHora->day );
         cBuf[ 4 ] = ( char ) prvABcd( pxHora->month );         /* LPYR es de sólo lectura */
         cBuf[ 5 ] = ( char ) prvABcd( pxHora->year );

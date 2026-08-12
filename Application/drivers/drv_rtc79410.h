@@ -52,11 +52,22 @@ typedef struct {
     uint8_t sec;        /* 0..59 */
     uint8_t min;        /* 0..59 */
     uint8_t hour;       /* 0..23 - siempre 24 horas, el driver fuerza el modo */
-    uint8_t weekDay;    /* 1..7, lo lleva el chip pero no lo calcula solo */
+    uint8_t weekDay;    /* 1=dom .. 7=sab. DE SALIDA: al escribir se ignora     */
     uint8_t day;        /* 1..31 */
     uint8_t month;      /* 1..12 */
     uint8_t year;       /* 0..99 */
 } RtcTimeType_t;
+
+/*
+ * Día de la semana a partir de la fecha (algoritmo de Sakamoto). 1=dom .. 7=sab.
+ *
+ * Existe porque el MCP79410 **no lo calcula**: sólo cuenta de 1 a 7 y da la
+ * vuelta, así que un valor mal cargado queda mal para siempre y nadie lo nota
+ * hasta que algo lo usa. Es un dato DERIVADO de la fecha, y pedirlo a mano es
+ * pedir que alguien se equivoque — pasó en banco el 2026-08-12, con un miércoles
+ * cargado como domingo.
+ */
+uint8_t drv_rtc_dia_de_semana( uint8_t ucAnio2, uint8_t ucMes, uint8_t ucDia );
 
 /* Estado del chip, para diagnóstico y para decidir si la hora sirve. */
 typedef struct {
@@ -90,6 +101,11 @@ bool drv_rtc_leer( RtcTimeType_t *pxHora );
  * Fija la fecha y hora, siguiendo la secuencia que pide el datasheet: parar el
  * oscilador, escribir, arrancarlo de nuevo. Escribir los registros con el reloj
  * corriendo puede caer justo en un acarreo y dejar la hora corrida.
+ *
+ * ⚠ `pxHora->weekDay` SE IGNORA: se calcula de la fecha con
+ * drv_rtc_dia_de_semana(). Ver el porqué ahí.
+ *
+ * Al terminar deja la firma de validez en la SRAM (ver más abajo).
  */
 bool drv_rtc_escribir( const RtcTimeType_t *pxHora );
 
