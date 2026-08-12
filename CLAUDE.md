@@ -745,13 +745,56 @@ USART eran constantes de compilación; acá cada UART es un `UART_HandleTypeDef`
 fila por instancia. Los fd cuyo hardware no está poblado (`fdWAN`, `fdRS485A`, `fdI2C`, `fdNVM`)
 figuran en la tabla con `NULL`: compilan y devuelven `-1`.
 
-**Candados de energía (`pwr_lock.h`).** Los drivers avisan "mientras trabajo, no entres en Stop".
-Es un bitmask, no un contador, así que tomar dos veces el mismo candado es idempotente. Mientras haya
-uno tomado, `vPortSuppressTicksAndSleep()` baja de **Stop 2 a Sleep**: el micro se sigue durmiendo
-entre interrupciones pero los relojes quedan vivos. Sin esto, entrar en Stop a mitad de una
-transmisión la corta. Lo usan hoy TERM_SENSE y el TX de la consola; van a necesitarlo el modem, la
-microSD y el ADC. Medido en `v0.0.6`: con `pwrLOCK_TERM` tomado la placa consume **3,5 mA**, contra
-**65 µA** sin candados. El mecanismo funciona en las dos direcciones.
+**Candados de energía (`pwr_lock.h`).** Son la política de energía del equipo, definida por Pablo:
+
+| Situación | Qué hace el sistema |
+|---|---|
+| **Terminal conectada** (`TERM_SENSE`, poleado por `tkCtl`) | **Nunca** entra en ningún modo de sueño |
+| **Poleo Modbus o sesión de modem** | La tarea levanta su candado antes y lo baja al terminar |
+| **El resto del tiempo** | **Stop 2** — y es el ~95 %, donde vive la autonomía |
+
+Es un bitmask, no un contador: tomar dos veces el mismo candado es idempotente, y si el modem y el
+Modbus se solapan cada uno tiene su bit sin pisarle la bandera al otro. Mientras haya **al menos uno**
+tomado, `vPortSuppressTicksAndSleep()` **vuelve enseguida sin hacer nada** y el idle gira.
+
+⚠ **Esto NO es una optimización de consumo: es de CORRECTITUD.** Ver la sección siguiente.
+
+Medido en `v0.0.6`: con `pwrLOCK_TERM` tomado la placa consumía **3,5 mA** durmiendo en Sleep, contra
+**65 µA** sin candados. Girando será más —falta medirlo— y está anotado como pendiente.
+
+#### ⚠ El tickless se comía bytes del USART, y no era un problema de energía
+
+Encontrado el **2026-08-12** persiguiendo "la flecha arriba no anda en la consola". La medición que lo
+cerró, con el comando `keys`:
+
+| Prueba | Bytes capturados | Errores de UART |
+|---|---|---|
+| Tecla `ESC` ×3 — **un byte suelto** cada vez | `1B 1B 1B` | **0** |
+| Flecha ×3 — **tres bytes pegados** cada vez | `1B 1B 1B` | **3** |
+
+O sea que de cada secuencia `ESC [ A` sobrevivía sólo el primer byte.
+
+**El mecanismo:** `vPortSuppressTicksAndSleep()` hacía `__disable_irq()` —que enmascara por `PRIMASK`
+**todas** las interrupciones sin importar la prioridad, así que subir la del USART no habría servido—
+y recién las habilitaba al final, después de parar y rearmar el LPTIM1 **dos veces**. Cada espera del
+flag `ARROK` son 3 ciclos de LSE, ~92 µs. Esa ventana se acerca a los **1042 µs** que dura un byte a
+9600: el segundo byte se queda en `RDR` sin que nadie lo lea y el tercero lo pisa. Overrun.
+
+**Con tecleo humano no se ve nunca** —las teclas van a 100 ms— pero **Modbus es todo ráfagas de bytes
+pegados**, así que esto habría roto el RS485 de la peor manera posible: intermitente y dependiente del
+momento.
+
+Dos cosas que conviene no olvidar:
+
+- **El peligro nunca fue el `WFI`**, que despierta con cualquier interrupción en unos ciclos. Fue el
+  `__disable_irq()` que el tickless ponía alrededor.
+- **No "arreglarlo" acortando la ventana.** La haría menos probable, que en un bug dependiente del
+  momento es peor que no tocarlo: pasa el banco y falla en campo.
+
+⏳ **Pendiente anotado:** con el candado tomado el idle **gira**, que es la opción segura. Reemplazarlo
+por un **`__WFI()` pelado** no pierde un solo byte y bajaría el consumo activo a un tercio; se hace
+cuando se pueda medir. Con 15 s de poleo cada 5 minutos el ciclo de trabajo es del 5 %, así que hoy no
+aprieta.
 
 ### ✅ TERM_SENSE se polea, no va por EXTI (decidido el 2026-08-12)
 

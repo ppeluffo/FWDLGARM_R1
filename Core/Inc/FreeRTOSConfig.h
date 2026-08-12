@@ -170,30 +170,6 @@ standard names. */
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
 
-/*
- * ⚠ TEMPORAL - PRUEBA DEL 2026-08-12: ¿el tickless nos come bytes del USART?
- *
- * Con tres bytes pegados (la secuencia de una flecha, 1042 us entre byte y byte
- * a 9600) se pierden el segundo y el tercero, y el driver registra un error.
- * Con bytes sueltos no pasa.
- *
- * La hipótesis es vPortSuppressTicksAndSleep(): hace __disable_irq(), que tapa
- * TODAS las interrupciones vía PRIMASK sin importar prioridad, y recién las
- * habilita al final, después de parar y rearmar el LPTIM1 dos veces (cada espera
- * del flag ARROK son ~92 us). Si esa ventana supera el tiempo de un byte, hay
- * overrun.
- *
- * Anulando el tickless esa ventana desaparece. Si con esto el 'keys' captura los
- * 9 bytes de tres flechas y 0 errores, la hipótesis queda confirmada.
- *
- * PARA VOLVER: borrar estas dos líneas. La solución de fondo NO es dejar esto
- * apagado —el bajo consumo es el criterio del proyecto— sino recibir por DMA,
- * que mueve el byte de RDR a memoria sin CPU y por lo tanto sin importar el
- * PRIMASK.
- */
-#undef  configUSE_TICKLESS_IDLE
-#define configUSE_TICKLESS_IDLE                  0
-
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

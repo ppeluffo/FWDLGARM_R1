@@ -160,6 +160,42 @@ void vPortSuppressTicksAndSleep( TickType_t xExpectedIdleTime )
     uint32_t   ulCuentasDormidas;
     TickType_t xTicksDormidos;
 
+    /*
+     * ⚠ SI HAY UN CANDADO TOMADO, ACÁ NO SE HACE NADA. Volver y que el idle gire.
+     *
+     * Esta es LA política de energía del datalogger, y no es una optimización:
+     *
+     *   terminal conectada  -> nunca se duerme (lo marca tkCtl poleando TERM_SENSE)
+     *   poleo Modbus o modem-> la tarea levanta su candado antes y lo baja después
+     *   el resto del tiempo -> Stop 2, que es el 95 % y donde vive la batería
+     *
+     * POR QUÉ ES UN PROBLEMA DE CORRECTITUD Y NO DE CONSUMO (2026-08-12):
+     *
+     * Todo lo que sigue a este return corre con __disable_irq(), que enmascara
+     * por PRIMASK TODAS las interrupciones sin importar su prioridad. Entre parar
+     * y rearmar el LPTIM1 dos veces —cada espera del flag ARROK son 3 ciclos de
+     * LSE, ~92 us— la ventana se acerca a los 1042 us que dura un byte a 9600.
+     *
+     * Con eso, un byte que llega mientras dura la ventana se queda en RDR sin que
+     * nadie lo lea, y el siguiente lo pisa: overrun. Se midió con la secuencia de
+     * tres bytes pegados de una flecha del terminal: sobrevivía el primero y se
+     * perdían los otros dos, un error de UART por flecha. Con tecleo humano no se
+     * ve NUNCA, porque las teclas van a 100 ms; pero Modbus es todo ráfagas.
+     *
+     * Ojo con "arreglarlo" acortando la ventana: la haría menos probable, que en
+     * un bug dependiente del momento es peor que no tocarlo — pasa el banco y
+     * falla en campo.
+     *
+     * ⏳ PENDIENTE, decidido con Pablo el 2026-08-12: acá va a ir un __WFI()
+     * pelado en vez de girar. No pierde bytes —el peligro nunca fue el WFI sino
+     * el __disable_irq() de abajo— y bajaría el consumo activo a un tercio. Se
+     * deja para cuando se pueda MEDIR, no ahora: primero seguro, después barato.
+     */
+    if( pwr_deep_sleep_permitido() == false )
+    {
+        return;
+    }
+
     if( xExpectedIdleTime > TICKLESS_MAX_TICKS )
     {
         xExpectedIdleTime = TICKLESS_MAX_TICKS;
@@ -177,9 +213,18 @@ void vPortSuppressTicksAndSleep( TickType_t xExpectedIdleTime )
     __DSB();
     __ISB();
 
-    /* El kernel puede haber quedado listo para correr entre que decidió dormir y que
-       cortamos las interrupciones. */
-    if( eTaskConfirmSleepModeStatus() == eAbortSleep )
+    /*
+     * El kernel puede haber quedado listo para correr entre que decidió dormir y
+     * que cortamos las interrupciones.
+     *
+     * Y se rechequea el candado por la misma razón: la primera consulta se hizo
+     * con las interrupciones habilitadas, así que una ISR pudo tomar uno en el
+     * medio. Hoy ninguna lo hace —TERM_SENSE se polea— pero el modem y la microSD
+     * van a necesitarlo desde interrupción, y entonces esta línea es lo único que
+     * separa "duerme cuando no debe" de "anda".
+     */
+    if( ( eTaskConfirmSleepModeStatus() == eAbortSleep ) ||
+        ( pwr_deep_sleep_permitido() == false ) )
     {
         __enable_irq();
         return;
@@ -199,30 +244,20 @@ void vPortSuppressTicksAndSleep( TickType_t xExpectedIdleTime )
         Error_Handler();
     }
 
-    /* ---- Duerme acá. El LPTIM1 sigue contando del LSE en los dos modos. ----
+    /* ---- Duerme acá. El LPTIM1 sigue contando del LSE. ----
      *
-     * Stop 2 apaga el PLL y deja sin reloj a casi todos los periféricos, así que
-     * no se puede entrar si alguien los necesita: una USART transmitiendo se
-     * cortaría a la mitad, y con una terminal conectada no podría recibir. Los
-     * drivers lo señalizan con los candados de pwr_lock.h.
-     *
-     * Cuando hay un candado tomado se duerme igual, pero en Sleep: la CPU se
-     * apaga hasta la próxima interrupción y los relojes siguen vivos. Se pierde
-     * el grueso del ahorro, pero sólo mientras alguien esté trabajando de verdad.
+     * Siempre Stop 2: si hubiera un candado tomado no habríamos llegado hasta acá,
+     * porque se vuelve al principio de la función. Antes existía un camino
+     * alternativo que dormía en Sleep con el candado tomado; se sacó el 2026-08-12
+     * al descubrir que el problema no era el MODO de sueño sino el __disable_irq()
+     * que lo rodea, y que ese camino sufría igual.
      */
-    if( pwr_deep_sleep_permitido() )
-    {
-        HAL_PWREx_EnterSTOP2Mode( PWR_STOPENTRY_WFI );
+    HAL_PWREx_EnterSTOP2Mode( PWR_STOPENTRY_WFI );
 
-        /* Stop apaga el PLL y devuelve el SYSCLK al MSI. Hay que rearmar el árbol ANTES
-           de tocar cualquier cosa del HAL, porque sus timeouts se calculan con
-           SystemCoreClock. En Sleep no hace falta: los clocks nunca se perdieron. */
-        SystemClock_Config();
-    }
-    else
-    {
-        __WFI();
-    }
+    /* Stop apaga el PLL y devuelve el SYSCLK al MSI. Hay que rearmar el árbol ANTES
+       de tocar cualquier cosa del HAL, porque sus timeouts se calculan con
+       SystemCoreClock. */
+    SystemClock_Config();
 
     /* ¿Durmió todo o lo despertó otra cosa? Si el flag de autoreload está puesto, el
        período se completó; si no, CNT dice hasta dónde llegó. */
