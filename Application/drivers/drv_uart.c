@@ -33,6 +33,9 @@ typedef struct {
     StaticSemaphore_t    xTxMutexCtrl;
 
     uint8_t              ucRxByte;    /* destino del Receive_IT, un byte por vez */
+
+    volatile uint32_t    ulErrores;      /* entradas al callback de error   */
+    volatile uint32_t    ulUltimoError;  /* banderas de la última vez       */
 } drv_uart_t;
 
 static uint8_t pucTermRxStore [ DRV_UART_TERM_RXSIZE  + 1U ]; /* +1: el stream buffer usa uno de guarda */
@@ -149,6 +152,16 @@ int16_t drv_uart_read( drv_uart_id_t id, char *pvBuffer, uint16_t xBytes, TickTy
     return ( int16_t ) xLeidos;
 }
 //------------------------------------------------------------------------------
+uint32_t drv_uart_errores( drv_uart_id_t id )
+{
+    return ( id < drvUART_COUNT ) ? xUarts[ id ].ulErrores : 0U;
+}
+//------------------------------------------------------------------------------
+uint32_t drv_uart_ultimo_error( drv_uart_id_t id )
+{
+    return ( id < drvUART_COUNT ) ? xUarts[ id ].ulUltimoError : 0U;
+}
+//------------------------------------------------------------------------------
 void drv_uart_rx_flush( drv_uart_id_t id )
 {
     if( id < drvUART_COUNT )
@@ -230,6 +243,10 @@ void HAL_UART_ErrorCallback( UART_HandleTypeDef *huart )
     {
         return;
     }
+
+    /* Se anota ANTES de limpiar, que es la única oportunidad de saber qué pasó. */
+    px->ulUltimoError = HAL_UART_GetError( px->pxHal );
+    px->ulErrores++;
 
     __HAL_UART_CLEAR_OREFLAG( px->pxHal );
     __HAL_UART_CLEAR_NEFLAG( px->pxHal );

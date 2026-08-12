@@ -73,4 +73,15 @@ void drv_uart_rx_flush( drv_uart_id_t id );
 bool drv_uart_rx_enable( drv_uart_id_t id );
 void drv_uart_rx_disable( drv_uart_id_t id );
 
+/*
+ * Diagnóstico: cuántas veces entró el callback de error, y con qué banderas la
+ * última vez (ORE = overrun, o sea que llegó un byte antes de que se levantara el
+ * anterior; FE = error de trama; NE = ruido).
+ *
+ * Un ORE distinto de cero explica por sí solo los bytes que faltan, así que
+ * conviene mirarlo ANTES de sospechar de la terminal o del cable.
+ */
+uint32_t drv_uart_errores( drv_uart_id_t id );
+uint32_t drv_uart_ultimo_error( drv_uart_id_t id );
+
 #endif /* APPLICATION_DRIVERS_DRV_UART_H_ */

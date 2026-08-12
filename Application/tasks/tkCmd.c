@@ -1296,46 +1296,80 @@ static void cmdRs485( void )
  * Los dos los entiende el parser. Si no aparece ninguno, el problema es la
  * terminal y no el firmware.
  */
-#define KEYS_TIMEOUT_S      20U
+#define KEYS_CAPTURA_S      8U
+#define KEYS_MAX_BYTES      48U
 
 static void cmdKeys( void )
 {
-    xprintf( "aprieta teclas y te muestro lo que llega.\r\n" );
-    xprintf( "flecha arriba deberia dar: 1B 5B 41  o bien  1B 4F 41\r\n" );
-    xprintf( "'q' o %u s para salir.\r\n\r\n", ( unsigned ) KEYS_TIMEOUT_S );
+    /*
+     * CAPTURA EN SILENCIO Y RECIÉN DESPUÉS IMPRIME. No es un detalle de estilo.
+     *
+     * La primera versión imprimía cada byte antes de leer el siguiente, y a 9600
+     * imprimir " 1B" son 3,1 ms — justo el tiempo en que llegan los otros dos
+     * bytes de la flecha. O sea que el instrumento podía estar causando el
+     * fenómeno que venía a medir. Capturando primero, la única forma de que
+     * falten bytes es que no hayan llegado, o que el driver los pierda; y de eso
+     * se encarga el contador de errores de abajo.
+     */
+    static uint8_t pucCapturado[ KEYS_MAX_BYTES ];
+    uint32_t       ulN = 0U;
 
-    TickType_t xEspera = pdMS_TO_TICKS( 200 );
+    uint32_t ulErrAntes = drv_uart_errores( drvUART_TERM );
+
+    xprintf( "apreta flecha ARRIBA tres veces y espera %u s sin tocar nada.\r\n",
+             ( unsigned ) KEYS_CAPTURA_S );
+    xprintf( "no voy a mostrar nada hasta el final: si imprimo mientras escucho,\r\n" );
+    xprintf( "el propio mensaje tapa los bytes que estoy tratando de ver.\r\n\r\n" );
+
+    /* Que salga TODO lo de arriba antes de empezar a escuchar: si no, la cola de
+       transmisión sigue saliendo mientras capturamos y volvemos al mismo problema. */
+    vTaskDelay( pdMS_TO_TICKS( 500 ) );
+    drv_uart_rx_flush( drvUART_TERM );
+
+    TickType_t xEspera = pdMS_TO_TICKS( 100 );
     ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xEspera );
 
-    uint32_t ulVueltas = ( KEYS_TIMEOUT_S * 1000U ) / 200U;
+    uint32_t ulVueltas = ( KEYS_CAPTURA_S * 1000U ) / 100U;
     char     cTecla;
 
-    while( ulVueltas-- > 0U )
+    while( ( ulVueltas-- > 0U ) && ( ulN < KEYS_MAX_BYTES ) )
     {
-        if( frtos_read( fdTERM, &cTecla, 1U ) != 1 )
+        if( frtos_read( fdTERM, &cTecla, 1U ) == 1 )
         {
-            continue;
-        }
-
-        if( cTecla == 'q' )
-        {
-            break;
-        }
-
-        xprintf( " %02X", ( unsigned ) ( ( uint8_t ) cTecla ) );
-
-        /* El imprimible al lado del hexa, que ayuda a leer las secuencias: en
-           ESC [ A el '[' y la 'A' se reconocen de una. */
-        if( ( cTecla >= 0x20 ) && ( cTecla < 0x7F ) )
-        {
-            xprintf( "('%c')", cTecla );
+            pucCapturado[ ulN++ ] = ( uint8_t ) cTecla;
         }
     }
 
     xEspera = portMAX_DELAY;
     ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xEspera );
 
-    xprintf( "\r\nfin.\r\n" );
+    /* ---- Recién ahora, el informe ---- */
+    xprintf( "capturados %lu bytes:", ( unsigned long ) ulN );
+
+    for( uint32_t i = 0U; i < ulN; i++ )
+    {
+        xprintf( " %02X", ( unsigned ) pucCapturado[ i ] );
+    }
+    xprintf( "\r\n" );
+
+    uint32_t ulErr = drv_uart_errores( drvUART_TERM ) - ulErrAntes;
+
+    xprintf( "errores de UART durante la captura: %lu", ( unsigned long ) ulErr );
+
+    if( ulErr > 0U )
+    {
+        uint32_t ulFlags = drv_uart_ultimo_error( drvUART_TERM );
+
+        xprintf( "  (0x%08lX:%s%s%s )", ( unsigned long ) ulFlags,
+                 ( ulFlags & HAL_UART_ERROR_ORE ) ? " ORE" : "",
+                 ( ulFlags & HAL_UART_ERROR_FE  ) ? " FE"  : "",
+                 ( ulFlags & HAL_UART_ERROR_NE  ) ? " NE"  : "" );
+    }
+    xprintf( "\r\n\r\n" );
+
+    xprintf( "3 flechas deberian dar 9 bytes: 1B 5B 41 repetido 3 veces\r\n" );
+    xprintf( "  (o 1B 4F 41 si minicom esta en application cursor keys)\r\n" );
+    xprintf( "si dan 3 bytes (1B 1B 1B), minicom manda solo el ESC.\r\n" );
 }
 //------------------------------------------------------------------------------
 static void cmdReset( void )
