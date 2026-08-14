@@ -313,8 +313,9 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    lineal de los sensores en `EN_PWR_SENS420` (PB12). Validado contra un calibrador: ver abajo.
 9. ✅ **microSD, etapa 1: la tarjeta** (`v0.0.10`) — SPI3 con el CS por software, energía conmutada
    por `EN_PWR_SD` y presencia por `SD_DET`. Protocolo SD-SPI completo hasta leer y escribir
-   sectores. **Falta la etapa 2, FatFs encima**: ver *microSD + FatFs*, donde queda una sola
-   decisión abierta (¿primaria o exportación?).
+   sectores. ⏸ **La etapa 2 —FatFs encima— la difirió Pablo el 2026-08-14 a las capas de
+   aplicación**, junto con Modbus y el registro de muestras. El hardware de la SD está cerrado; lo
+   que falta es política de datos, no bring-up. **No adelantarla.**
 10. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
    suelda; de cada uno hay que pedirle los pines, y de algunos algo más:
 
@@ -1033,7 +1034,12 @@ Estas son las trampas que ya aparecieron, todas encontradas al portar TERM:
 | `cli()` / `sei()`, `<avr/io.h>`, `<avr/interrupt.h>` | `taskENTER_CRITICAL()` / HAL, y el acceso a registros **baja al driver** | Principio HAL: sólo la capa de drivers toca el hardware. |
 | Acceso a registros desde un header de capa alta | empujarlo al driver | El `frtos-io.h` viejo tenía macros que escribían el USART del AVR. |
 
-### microSD + FatFs: diseño pendiente (paso 6 del roadmap)
+### microSD + FatFs: diseño pendiente (⏸ diferido a las capas de aplicación)
+
+> **Estado al 2026-08-14.** El **driver de la tarjeta ya está** y validado (`v0.0.10`, ver arriba):
+> lee y escribe sectores. Lo que sigue en esta sección es la capa de arriba, que **Pablo difirió a
+> propósito** hasta terminar de poblar el hardware. La decisión que la destraba —**¿la SD es
+> almacenamiento primario o exportación?**— sigue abierta y hay que tomarla antes de escribir código.
 
 Relevado el **2026-08-11**, antes de escribir una línea. **No es código a escribir todavía**: la
 microSD no está poblada, y la regla del bring-up incremental es no escribir contra hardware ausente.
