@@ -55,6 +55,7 @@
 #define DRV_I2C_ADDR_EEPROM     0xA0U   /* M24M02 - A16/A17 van en el propio byte */
 #define DRV_I2C_ADDR_RTC        0xDEU   /* MCP79410 - RTCC + SRAM                 */
 #define DRV_I2C_ADDR_RTC_EE     0xAEU   /* MCP79410 - su EEPROM interna y el UID  */
+#define DRV_I2C_ADDR_INA        0x82U   /* INA3221 - monitor de 4-20 mA, A0 a VS  */
 
 /* Crea el mutex y el semáforo. Necesita el scheduler corriendo. */
 bool drv_i2c_init( void );

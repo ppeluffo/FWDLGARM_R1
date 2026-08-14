@@ -32,20 +32,20 @@ propia **R001**. Linaje: firmware AVR `FWDLGX 3.0.0` (AVR128DA64) → port a ATS
 → **STM32L4**. El criterio de diseño permanente es **ultra bajo consumo**: es un datalogger a
 batería que duerme casi todo el tiempo.
 
-### Estado actual (2026-08-12)
+### Estado actual (2026-08-14)
 
 **La placa está poblada sólo parcialmente.** Hoy hay montados: la **fuente**, el **micro**, la
 **interfaz de programación SWD** (PA13/PA14), **LEDs en PB9 y PA2**, el **cristal de 32.768 kHz en
 PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal** (PB6/PB7 más
-`TERM_SENSE` en PB5), el **bus I2C2** (PB13/PB14, pull-up de 10 kΩ) con la **EEPROM M24M01** y el
-**RTC MCP79410 con su pila**, y el **RS485** con su transceiver **SP3485** y los tres rieles
-conmutados. Nada más: no hay modem LTE, ni microSD, ni front-end analógico, ni el monitor de
-corriente INA del I2C.
+`TERM_SENSE` en PB5), el **bus I2C2** (PB13/PB14, pull-up de 10 kΩ) con la **EEPROM M24M01**, el
+**RTC MCP79410 con su pila** y el **INA3221** que mide los lazos de 4-20 mA, el **RS485** con su
+transceiver **SP3485** y los tres rieles conmutados, y la **fuente lineal de los sensores 4-20 mA**
+(`EN_PWR_SENS420`, PB12). Nada más: no hay modem LTE ni microSD.
 
 Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola, el
-bus I2C y el RS485**. El resto del mapa de pines de `interfases_pines.csv` es el diseño completo de
-R001, no hardware presente — no tiene sentido escribir drivers contra periféricos que todavía no
-están montados.
+bus I2C, el RS485 y la medida de 4-20 mA**. El resto del mapa de pines de `interfases_pines.csv` es
+el diseño completo de R001, no hardware presente — no tiene sentido escribir drivers contra
+periféricos que todavía no están montados.
 
 El proyecto **se borró y se rehízo de cero el 2026-08-10** (ver control de versiones), y desde
 entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
@@ -60,6 +60,7 @@ entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
 | `v0.0.6` | **Consola TERM (TX + RX) y `TERM_SENSE`** — el micro dormido queda en **~5 µA** |
 | `v0.0.7` | **Bus I2C2, EEPROM M24M01 y RTC MCP79410** — los tres validados con datos reales |
 | `v0.0.8` | **RS485 (SP3485) con DE por hardware** y los 3 rieles conmutados. De paso, el tickless dejó de comerse bytes |
+| `v0.0.9` | **INA3221: medida de 4-20 mA** y el riel de la fuente lineal de sensores. Validado contra un calibrador de 0 a 20 mA |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
   `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
@@ -302,20 +303,22 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
 6. ✅ **I2C** (`v0.0.7`) — bus I2C2 por interrupción, EEPROM **M24M01** (128 KB) y RTC externo
    **MCP79410**. Los tres validados con datos reales, no sólo con ACKs: la EEPROM con escrituras que
    cruzan bordes de página y de bloque (`ee test`), y el RTC conservando la hora tras un minuto sin
-   alimentación. Falta el **monitor de corriente INA**, que todavía no está poblado.
+   alimentación.
 7. ✅ **RS485** (`v0.0.8`) — `USART3` con el **DE manejado por hardware** (PB1 = `USART3_RTS_DE`), tres
    rieles conmutados y lectura por **tramas delimitadas por silencio**, que es ya la delimitación de
    Modbus RTU. Falta la capa **Modbus** y los mapas de registros de los módulos.
-   Después: **microSD/SPI** → entradas analógicas → modem LTE. La microSD ya tiene relevamiento y
+8. ✅ **Entradas de 4-20 mA** (`v0.0.9`) — **INA3221** en el I2C2 (dirección 7 bits `41`) y la fuente
+   lineal de los sensores en `EN_PWR_SENS420` (PB12). Validado contra un calibrador: ver abajo.
+   Después: **microSD/SPI** → contador de pulsos → modem LTE. La microSD ya tiene relevamiento y
    decisiones pendientes anotadas: ver *microSD + FatFs: diseño pendiente*.
-8. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
+9. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
    hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
-9. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
+10. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
    que conviene hacer una sola vez, al final, en vez de rehacerlas cada vez que entra un periférico:
    la **sincronización del RTC interno desde el MCP79410**, el período definitivo de `tkCtl` junto
    con el watchdog y el poleo de `TERM_SENSE` (los tres comparten la misma vuelta), el
    comportamiento del parser de comandos, y `BOR_LEV`.
-10. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+11. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
 **Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
 (`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
@@ -676,6 +679,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | LTE (modem) | PA0 TX, PA1 RX → **UART4** |
 | RS485 (modbus) | PB10 TX, PB11 RX, **PB1 `USART3_RTS_DE`** → **USART3**, 9600 8N1, transceiver **SP3485** |
 | Rieles conmutados (TPS22819, EN=1 prende, pull-down de 100 K) | PC6 `EN_PWR_RS485`, PC7 `EN_PWR_QMBUS`, PB15 `EN_PWR_CPRES` |
+| Fuente lineal de los sensores 4-20 mA | **PB12 `EN_PWR_SENS420`** (EN=1 prende) |
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | SPI (microSD) | PA15 NSS, PC10 SCK, PC11 MISO, PC12 MOSI |
 | Contador de pulsos CNT0 | PA12 (EXTI) |
@@ -716,6 +720,7 @@ Application/
 │               drv_eeprom.{h,c}        M24M01, dirección plana de 17 bits
 │               drv_rtc79410.{h,c}      RTC externo MCP79410 (BCD, pila, PWRFAIL)
 │               drv_rs485.{h,c}         rieles conmutados y pines del SP3485
+│               drv_ina3221.{h,c}       medida de 4-20 mA + riel de la fuente lineal
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
@@ -852,6 +857,79 @@ ejercitadas por el comando `ee test`:
 2. **Después de escribir, el chip queda sordo ~5 ms** y NACKea todo, incluso su propia dirección. Ese
    NACK **no es un error**: es *acknowledge polling*, hay que reintentar. Sin esto, escribir dos
    páginas seguidas falla siempre en la segunda.
+
+### ✅ Las entradas de 4-20 mA: el INA3221 (`v0.0.9`)
+
+Monitor de corriente de 3 canales en el I2C2, dirección de 7 bits **`41`** (A0 a VS) = `0x82` en 8
+bits — el mismo chip y la misma dirección que FWDLGX (`DEVADDRESS_INA1`, y por eso aquel código
+forzaba `ina_id = 1` en todas sus funciones). Driver en `Application/drivers/drv_ina3221.{h,c}`,
+comando `ina` en la consola.
+
+**Validado el 2026-08-14 contra un calibrador**, aplicando 4, 8, 12, 16 y 20 mA. El ajuste por
+mínimos cuadrados da `I_leída = 0,99770 · I_real + 0,002`, con **todos los residuos por debajo de
+media cuenta** (1 cuenta = 40 µV / 7,32 Ω = 5,46 µA). O sea: la linealidad es perfecta dentro de la
+resolución del chip, y lo único que hay es un **error de ganancia de −0,23 %**, que equivale a que el
+shunt real sea de 7,337 Ω en vez de 7,32 — dentro de la tolerancia de una resistencia del 0,5 %.
+
+⚠ **Ese −0,23 % NO se corrige en el driver.** Es exactamente lo que absorbe la calibración de dos
+puntos que ya existía en FWDLGX (`imin`/`imax` contra `mmin`/`mmax`), y meterle un factor acá lo
+escondería donde nadie lo va a buscar el día que cambie una placa.
+
+**Las cuatro cosas que hay que tener presentes:**
+
+- **El consumo manda el diseño del driver.** El INA3221 consume **~350 µA midiendo y ~2 µA en
+  power-down**, contra los ~5 µA del micro dormido: dejarlo encendido multiplica por setenta el
+  consumo de reposo del equipo. Por eso el estado de reposo es **dormido**, `drv_ina_init()` lo deja
+  así, y `drv_ina_medir()` lo duerme **también en el camino de error** — si no, un fallo aislado del
+  I2C dejaría al chip consumiendo para siempre sin que nada lo delate salvo la autonomía.
+- **Una medida tarda ~1,4 s** (500 ms de asentamiento de la fuente lineal + 845 ms de barrido: 128
+  promedios × 3 canales × (1,1 + 1,1) ms). Es a propósito: 128 promedios es lo que hace que una
+  lectura de 4-20 mA sea estable. **Durante esa ventana el micro puede dormir en Stop 2 sin problema**
+  —el INA convierte solo y el riel es un GPIO, que sobrevive al Stop—, así que este driver **no toma
+  ningún candado de energía propio**: el único es el `pwrLOCK_I2C` de cada transacción.
+- **El signo importa, y FWDLGX lo perdía.** El registro de shunt es complemento a dos de 13 bits
+  alineado en `[15:3]`; `ainputs.c` hacía `>> 3` sobre un `uint16_t`, así que una medida negativa
+  —lazo abierto, sensor al revés— salía como un número enorme y positivo. Acá el corrimiento va con
+  extensión de signo. Con 4-20 mA sanos no se nota nunca; con un sensor desconectado, sí.
+- **El fondo de escala está justo.** 20 mA sobre 7,32 Ω son 146 mV contra los ±163,8 mV que admite el
+  chip: una corriente de falla por encima de ~22 mA **satura** en vez de leerse alta.
+
+**Qué canal es qué entrada no lo decide el driver.** Habla de `inaCH1..inaCH3`, que son los del chip.
+FWDLGX mapeaba al revés (entrada 0 → CH3, 1 → CH2, 2 → CH1) y usaba el *bus voltage* de CH1 para la
+batería; ese mapeo depende del cableado y es de la capa de aplicación.
+
+⏳ **Pendiente menor:** con 0 mA aplicados se leyeron **−0,098 mA** (18 cuentas), que quedan fuera de
+la recta de arriba por 0,1 mA — mucho más que el offset típico del chip. Falta saber si ese punto era
+0,000 mA inyectados o el lazo desconectado; si es lo segundo, sirve para **distinguir una entrada sin
+sensor de una en 4 mA**, que es información de campo útil.
+
+### ⚠ `printf` con `%f`: hay que habilitarlo, y el síntoma de que falta es que no imprime NADA
+
+El proyecto linkea con `--specs=nano.specs`, y el `printf` de newlib-nano **no trae soporte de punto
+flotante salvo que se pida explícitamente**. Sin el flag, un `%.02f` no imprime un número equivocado:
+deja el campo **vacío**, en medio de una línea que por lo demás sale bien. Es de los síntomas que
+hacen buscar el error en el driver durante una tarde.
+
+Se habilita en *Project → Properties → C/C++ Build → Settings → Tool Settings*, en el **nodo raíz
+`MCU/MPU Settings`**: ☑ `Use float with printf from newlib-nano (-u _printf_float)`. **Con el combo
+`Configuration` en `[ All configurations ]`** — misma trampa que los include paths de `Application/`:
+tildado sólo en Debug, anda en banco y falla en Release meses después. Cuesta 7-10 KB de flash, que
+con 47 KB usados de 1024 KB no aprieta. Habilitado por Pablo el **2026-08-14**.
+
+**Cómo verificar que quedó**, y ojo que el flag se llama distinto en cada archivo:
+
+```bash
+grep -c 'nanoprintffloat' .cproject      # 2 = las DOS configuraciones, Debug y Release
+grep -c '_printf_float'   Debug/makefile # 1 = llegó a la línea de link
+```
+
+Si el primero da **1**, se tildó en una sola configuración y hay que rehacerlo con
+`[ All configurations ]`.
+
+Dos consecuencias: el `printf` con float **usa 100-200 bytes más de stack** por llamada (revisar los
+*high water mark* cuando se empiecen a imprimir magnitudes), y **el comando `ina` sigue formateando a
+mano** a propósito, para que un comando de diagnóstico no dependa de una opción del `.cproject` que
+una reconfiguración del proyecto puede perder.
 
 ### Portar FWDLGX a ARM: el checklist
 

@@ -89,6 +89,8 @@ void Error_Handler(void);
 #define RS485_TX_GPIO_Port GPIOB
 #define RS485_RX_Pin GPIO_PIN_11
 #define RS485_RX_GPIO_Port GPIOB
+#define EN_PWR_SENS420_Pin GPIO_PIN_12
+#define EN_PWR_SENS420_GPIO_Port GPIOB
 #define EN_PWR_CPRES_Pin GPIO_PIN_15
 #define EN_PWR_CPRES_GPIO_Port GPIOB
 #define EN_PWR_RS485_Pin GPIO_PIN_6

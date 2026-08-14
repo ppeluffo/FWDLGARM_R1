@@ -12,6 +12,7 @@
 #include "drv_eeprom.h"
 #include "drv_rtc79410.h"
 #include "drv_rs485.h"
+#include "drv_ina3221.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -279,6 +280,7 @@ static void cmdI2c( void );
 static void cmdEe( void );
 static void cmdRtc( void );
 static void cmdRs485( void );
+static void cmdIna( void );
 static void cmdKeys( void );
 static void cmdReset( void );
 static void cmdReboot( void );
@@ -288,6 +290,7 @@ static void prvI2cUso  ( void );
 static void prvEeUso   ( void );
 static void prvRtcUso  ( void );
 static void prvRs485Uso( void );
+static void prvInaUso  ( void );
 
 /*
  * Causa del último reset, leída de RCC_CSR antes de limpiarla.
@@ -361,6 +364,13 @@ void tkCmd( void *pvParameters )
         xprintf( "\r\n[!] el RTC MCP79410 no contesta\r\n" );
     }
 
+    /* Mismo criterio: deja el riel de sensores apagado y el chip en power-down.
+       Si no está poblado, se avisa y se sigue. */
+    if( drv_ina_init() == false )
+    {
+        xprintf( "\r\n[!] el INA3221 no contesta o no se identifico\r\n" );
+    }
+
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
@@ -369,6 +379,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "ee",     cmdEe     );
     FRTOS_CMD_register( "rtc",    cmdRtc    );
     FRTOS_CMD_register( "rs485",  cmdRs485  );
+    FRTOS_CMD_register( "ina",    cmdIna    );
     FRTOS_CMD_register( "keys",   cmdKeys   );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
@@ -425,6 +436,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "ee",     "EEPROM M24M01 (128 KB): leer, escribir y test",         prvEeUso      },
     { "rtc",    "RTC externo MCP79410: hora, validez y cortes",          prvRtcUso     },
     { "rs485",  "bus RS485 y los 3 rieles de alimentacion",              prvRs485Uso   },
+    { "ina",    "INA3221: medida de los lazos de 4-20 mA",               prvInaUso     },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
     { "reboot", "reinicio tibio, sin tocar NRST (diagnostico)",          NULL          },
@@ -452,7 +464,7 @@ static void cmdHelp( void )
 
         /* El parser matchea por PREFIJO, así que 'r' y 're' caen en 'reset', que
            es el primero registrado, y 's' cae en 'status'. */
-        xprintf( "  (matchea por prefijo: 'res'/'reb', 'st'/'se', 'rt'/'rs')\r\n" );
+        xprintf( "  (matchea por prefijo: 'res'/'reb', 'st'/'se', 'rt'/'rs', 'i2'/'in')\r\n" );
         return;
     }
 
@@ -1299,6 +1311,202 @@ static void cmdRs485( void )
     }
 
     prvRs485Uso();
+}
+//------------------------------------------------------------------------------
+static void prvInaUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  ina                 estado del chip y del riel de sensores\r\n" );
+    xprintf( "  ina on|off          fuente lineal de los sensores (EN_PWR_SENS420)\r\n" );
+    xprintf( "  ina read            ciclo completo de medida (~%u ms) en mA\r\n",
+             ( unsigned ) ( DRV_INA_SETTLE_MS + DRV_INA_BARRIDO_MS ) );
+    xprintf( "  ina raw             los 3 canales crudos: cuentas, uV y bus\r\n" );
+    xprintf( "  ina wake|sleep      enciende / duerme el INA a mano\r\n" );
+    xprintf( "  ina reg <rr>        lee el registro rr (hexa)\r\n" );
+    xprintf( "  ina reg <rr> <vvvv> lo escribe\r\n" );
+}
+
+/*
+ * Imprime un valor en mA con tres decimales.
+ *
+ * A mano y no con "%.03f" porque el proyecto linkea con --specs=nano.specs y SIN
+ * '-u _printf_float': el printf de newlib-nano no trae el soporte de punto
+ * flotante, así que un %f no imprime un número mal, no imprime NADA. El síntoma
+ * —un campo vacío en medio de una línea que por lo demás sale bien— es de los que
+ * hacen perder una tarde buscando el error en el driver.
+ *
+ * La cuenta en sí se hace en float, que para eso está la FPU; lo único que se
+ * evita es el formateo.
+ */
+static void prvImprimirMa( float fMa )
+{
+    int32_t  lMicroA = ( int32_t ) ( fMa * 1000.0f );
+    uint32_t ulAbs   = ( uint32_t ) ( ( lMicroA < 0 ) ? -lMicroA : lMicroA );
+
+    xprintf( "%s%lu.%03lu mA",
+             ( lMicroA < 0 ) ? "-" : "",
+             ( unsigned long ) ( ulAbs / 1000UL ),
+             ( unsigned long ) ( ulAbs % 1000UL ) );
+}
+
+static void prvInaEstado( void )
+{
+    uint16_t usMfid = 0U, usDieid = 0U, usConf = 0U;
+
+    xprintf( "  chip        : %s\r\n",
+             drv_ina_presente() ? "INA3221 identificado" : "NO CONTESTA" );
+
+    if( drv_ina_reg_leer( DRV_INA_REG_MFID,  &usMfid  ) &&
+        drv_ina_reg_leer( DRV_INA_REG_DIEID, &usDieid ) &&
+        drv_ina_reg_leer( DRV_INA_REG_CONF,  &usConf  ) )
+    {
+        xprintf( "  MFID / DIEID: 0x%04X / 0x%04X  (esperados 0x%04X / 0x%04X)\r\n",
+                 ( unsigned ) usMfid, ( unsigned ) usDieid,
+                 ( unsigned ) DRV_INA_MFID_ESPERADO, ( unsigned ) DRV_INA_DIEID_ESPERADO );
+
+        /* Los bits [2:0] de la configuración son el modo: 000 es power-down. */
+        xprintf( "  config      : 0x%04X  (%s)\r\n", ( unsigned ) usConf,
+                 ( ( usConf & 0x0007U ) == 0U ) ? "power-down, ~2 uA" : "midiendo, ~350 uA" );
+    }
+
+    xprintf( "  riel 4-20mA : %s\r\n",
+             drv_ina_pwr_sensores_estado() ? "ENCENDIDO" : "apagado" );
+    xprintf( "  shunt       : %u.%02u ohm\r\n",
+             ( unsigned ) DRV_INA_RSHUNT_OHM,
+             ( unsigned ) ( ( DRV_INA_RSHUNT_OHM - ( float ) ( unsigned ) DRV_INA_RSHUNT_OHM )
+                            * 100.0f + 0.5f ) );
+}
+
+/*
+ * Los tres canales crudos, sin ciclo de encendido: lo que digan los registros
+ * AHORA. Sirve para ver si el chip está convirtiendo y para mirar el signo, que
+ * es lo que delata un lazo abierto o un shunt al revés.
+ */
+static void prvInaCrudo( void )
+{
+    xprintf( "  canal   cuentas      shunt        corriente        bus\r\n" );
+
+    for( uint32_t i = 0U; i < ( uint32_t ) inaCH_COUNT; i++ )
+    {
+        int16_t sRaw    = 0;
+        int32_t lMicroV = 0;
+        int32_t lMiliV  = 0;
+        float   fMa     = 0.0f;
+
+        if( ( drv_ina_shunt_raw( ( ina_canal_t ) i, &sRaw    ) == false ) ||
+            ( drv_ina_shunt_uv ( ( ina_canal_t ) i, &lMicroV ) == false ) ||
+            ( drv_ina_leer_ma  ( ( ina_canal_t ) i, &fMa     ) == false ) ||
+            ( drv_ina_bus_mv   ( ( ina_canal_t ) i, &lMiliV  ) == false ) )
+        {
+            xprintf( "  CH%lu     ERROR de I2C\r\n", ( unsigned long ) ( i + 1U ) );
+            continue;
+        }
+
+        xprintf( "  CH%lu     %6d   %8ld uV     ",
+                 ( unsigned long ) ( i + 1U ), ( int ) sRaw, ( long ) lMicroV );
+        prvImprimirMa( fMa );
+        xprintf( "     %ld mV\r\n", ( long ) lMiliV );
+    }
+}
+
+static void cmdIna( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        prvInaEstado();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "on" ) == 0 )
+    {
+        drv_ina_pwr_sensores( true );
+        xprintf( "riel de sensores ENCENDIDO. Esperar %u ms antes de creerle a una medida.\r\n",
+                 ( unsigned ) DRV_INA_SETTLE_MS );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "off" ) == 0 )
+    {
+        drv_ina_pwr_sensores( false );
+        xprintf( "riel de sensores apagado\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "wake" ) == 0 )
+    {
+        xprintf( "%s\r\n", drv_ina_awake() ? "INA midiendo (~350 uA)" : "ERROR de I2C" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "sleep" ) == 0 )
+    {
+        xprintf( "%s\r\n", drv_ina_sleep() ? "INA en power-down (~2 uA)" : "ERROR de I2C" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "raw" ) == 0 )
+    {
+        prvInaCrudo();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "read" ) == 0 )
+    {
+        float pfMa[ inaCH_COUNT ] = { 0.0f };
+
+        xprintf( "midiendo: riel + %u ms de asentamiento + %u ms de barrido...\r\n",
+                 ( unsigned ) DRV_INA_SETTLE_MS, ( unsigned ) DRV_INA_BARRIDO_MS );
+
+        /* Se deja el riel encendido al salir: en banco lo normal es medir varias
+           veces seguidas, y así la segunda no vuelve a pagar el asentamiento. Se
+           apaga con 'ina off'. */
+        bool bOk = drv_ina_medir( pfMa, true );
+
+        for( uint32_t i = 0U; i < ( uint32_t ) inaCH_COUNT; i++ )
+        {
+            xprintf( "  CH%lu = ", ( unsigned long ) ( i + 1U ) );
+            prvImprimirMa( pfMa[ i ] );
+            xprintf( "\r\n" );
+        }
+
+        if( bOk == false )
+        {
+            xprintf( "  [!] la medida NO se completo (I2C o timeout de conversion)\r\n" );
+        }
+
+        xprintf( "  el riel quedo ENCENDIDO ('ina off' para apagarlo)\r\n" );
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "reg" ) == 0 ) && ( ucArgs >= 2U ) )
+    {
+        uint8_t ucReg = ( uint8_t ) strtoul( argv[ 2 ], NULL, 16 );
+
+        if( ( ucArgs >= 3U ) && ( argv[ 3 ] != NULL ) )
+        {
+            uint16_t usVal = ( uint16_t ) strtoul( argv[ 3 ], NULL, 16 );
+
+            xprintf( "%s\r\n", drv_ina_reg_escribir( ucReg, usVal ) ?
+                     "escrito" : "ERROR de I2C" );
+            return;
+        }
+
+        uint16_t usVal = 0U;
+
+        if( drv_ina_reg_leer( ucReg, &usVal ) )
+        {
+            xprintf( "reg 0x%02X = 0x%04X\r\n", ( unsigned ) ucReg, ( unsigned ) usVal );
+        }
+        else
+        {
+            xprintf( "ERROR de I2C\r\n" );
+        }
+        return;
+    }
+
+    prvInaUso();
 }
 //------------------------------------------------------------------------------
 /*

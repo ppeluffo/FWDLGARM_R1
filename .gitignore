@@ -6,5 +6,9 @@
 /.metadata/
 *.launch
 
+# Preferencias locales del editor (formato de doxygen y demás). No afectan al
+# build: eso vive en .cproject, que SÍ se versiona.
+/.settings/
+
 # Backups de CubeMX
 *.ioc.bak

@@ -581,7 +581,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(LED2_GPIO_Port, LED2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, EN_PWR_CPRES_Pin|LED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, EN_PWR_SENS420_Pin|EN_PWR_CPRES_Pin|LED_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, EN_PWR_RS485_Pin|EN_PWR_QMBUS_Pin, GPIO_PIN_RESET);
@@ -593,8 +593,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED2_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : EN_PWR_CPRES_Pin LED_Pin */
-  GPIO_InitStruct.Pin = EN_PWR_CPRES_Pin|LED_Pin;
+  /*Configure GPIO pins : EN_PWR_SENS420_Pin EN_PWR_CPRES_Pin LED_Pin */
+  GPIO_InitStruct.Pin = EN_PWR_SENS420_Pin|EN_PWR_CPRES_Pin|LED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
