@@ -898,10 +898,18 @@ escondería donde nadie lo va a buscar el día que cambie una placa.
 FWDLGX mapeaba al revés (entrada 0 → CH3, 1 → CH2, 2 → CH1) y usaba el *bus voltage* de CH1 para la
 batería; ese mapeo depende del cableado y es de la capa de aplicación.
 
-⏳ **Pendiente menor:** con 0 mA aplicados se leyeron **−0,098 mA** (18 cuentas), que quedan fuera de
-la recta de arriba por 0,1 mA — mucho más que el offset típico del chip. Falta saber si ese punto era
-0,000 mA inyectados o el lazo desconectado; si es lo segundo, sirve para **distinguir una entrada sin
-sensor de una en 4 mA**, que es información de campo útil.
+**No hay offset que corregir, y conviene saber por qué se llegó a pensar que sí.** La primera tanda
+de medidas mostró **−0,098 mA** (18 cuentas) en el punto de "0 mA", fuera de la recta de arriba por
+0,1 mA — mucho más que el offset típico del chip. Resultó que ese punto era **el lazo desconectado**,
+no 0 mA inyectados: repetido con el calibrador dando 0,000 mA de verdad, la lectura es correcta
+(2026-08-14).
+
+⚠ **Ojo con la tentación de usar ese −0,098 como detector de sensor ausente.** Con el lazo abierto la
+entrada del INA queda flotando, así que ese número no es una especificación sino lo que se leyó una
+vez: puede cambiar con la temperatura, la humedad o la placa. **El criterio correcto para "sensor
+desconectado" es el del propio lazo de 4-20 mA**: por debajo de ~3,5 mA no hay transmisor sano
+—NAMUR NE43 pone el umbral de falla en 3,6 mA—, y eso vale igual si la entrada lee −0,098, 0,000 o
++0,3. Es de la capa de aplicación, junto con la calibración.
 
 ### ⚠ `printf` con `%f`: hay que habilitarlo, y el síntoma de que falta es que no imprime NADA
 
