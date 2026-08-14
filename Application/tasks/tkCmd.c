@@ -13,6 +13,7 @@
 #include "drv_rtc79410.h"
 #include "drv_rs485.h"
 #include "drv_ina3221.h"
+#include "drv_sd.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -281,6 +282,7 @@ static void cmdEe( void );
 static void cmdRtc( void );
 static void cmdRs485( void );
 static void cmdIna( void );
+static void cmdSd( void );
 static void cmdKeys( void );
 static void cmdReset( void );
 static void cmdReboot( void );
@@ -291,6 +293,7 @@ static void prvEeUso   ( void );
 static void prvRtcUso  ( void );
 static void prvRs485Uso( void );
 static void prvInaUso  ( void );
+static void prvSdUso   ( void );
 
 /*
  * Causa del último reset, leída de RCC_CSR antes de limpiarla.
@@ -371,6 +374,10 @@ void tkCmd( void *pvParameters )
         xprintf( "\r\n[!] el INA3221 no contesta o no se identifico\r\n" );
     }
 
+    /* No toca la tarjeta: sólo deja el riel apagado y los pines del SPI en alta
+       impedancia, que es el estado de reposo. */
+    ( void ) drv_sd_init();
+
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
@@ -380,6 +387,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "rtc",    cmdRtc    );
     FRTOS_CMD_register( "rs485",  cmdRs485  );
     FRTOS_CMD_register( "ina",    cmdIna    );
+    FRTOS_CMD_register( "sd",     cmdSd     );
     FRTOS_CMD_register( "keys",   cmdKeys   );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
@@ -437,6 +445,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "rtc",    "RTC externo MCP79410: hora, validez y cortes",          prvRtcUso     },
     { "rs485",  "bus RS485 y los 3 rieles de alimentacion",              prvRs485Uso   },
     { "ina",    "INA3221: medida de los lazos de 4-20 mA",               prvInaUso     },
+    { "sd",     "tarjeta microSD: energia, arranque y sectores",         prvSdUso      },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
     { "reboot", "reinicio tibio, sin tocar NRST (diagnostico)",          NULL          },
@@ -1507,6 +1516,251 @@ static void cmdIna( void )
     }
 
     prvInaUso();
+}
+//------------------------------------------------------------------------------
+static void prvSdUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  sd                  estado: presencia, riel, tipo y capacidad\r\n" );
+    xprintf( "  sd on|off           energia de la tarjeta (EN_PWR_SD, PB3)\r\n" );
+    xprintf( "  sd init             prende e inicializa la tarjeta\r\n" );
+    xprintf( "  sd info             CID y CSD crudos\r\n" );
+    xprintf( "  sd read <sector>    vuelca un sector en hexa\r\n" );
+    xprintf( "  sd test <sector>    escribe un patron y lo relee\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  ATENCION: 'sd test' PISA el sector que se le indique.\r\n" );
+    xprintf( "  El 0 es el MBR: usar un sector alto en una tarjeta con datos.\r\n" );
+}
+
+/* Un sector no entra en el stack de tkCmd (2 KB), así que va estático. */
+static uint8_t pucSector[ DRV_SD_SECTOR_BYTES ];
+
+static void prvSdEstado( void )
+{
+    xprintf( "  ranura      : %s\r\n",
+             drv_sd_presente() ? "TARJETA PRESENTE" : "vacia" );
+    xprintf( "  riel        : %s\r\n",
+             drv_sd_power_estado() ? "ENCENDIDO" : "apagado" );
+    xprintf( "  tarjeta     : %s\r\n", drv_sd_tipo_texto() );
+
+    if( drv_sd_tipo() != sdTIPO_NINGUNA )
+    {
+        uint32_t ulSectores = drv_sd_sectores();
+
+        /* En MB para que el número sea legible; con 512 bytes por sector, cada
+           2048 sectores es 1 MB. */
+        xprintf( "  capacidad   : %lu sectores (%lu MB)\r\n",
+                 ( unsigned long ) ulSectores,
+                 ( unsigned long ) ( ulSectores / 2048UL ) );
+    }
+
+    xprintf( "  pwr locks   : 0x%08lX %s\r\n",
+             ( unsigned long ) pwr_lock_estado(),
+             pwr_deep_sleep_permitido() ? "(Stop 2 habilitado)" : "(solo Sleep)" );
+}
+
+static void prvSdVolcar( const uint8_t *pucDatos, uint32_t ulLargo )
+{
+    for( uint32_t i = 0U; i < ulLargo; i += 16U )
+    {
+        xprintf( "  %04lX: ", ( unsigned long ) i );
+
+        for( uint32_t j = 0U; j < 16U; j++ )
+        {
+            xprintf( "%02X ", ( unsigned ) pucDatos[ i + j ] );
+        }
+
+        xprintf( " |" );
+
+        for( uint32_t j = 0U; j < 16U; j++ )
+        {
+            char c = ( char ) pucDatos[ i + j ];
+            xputChar( ( ( c >= 0x20 ) && ( c < 0x7F ) ) ? c : '.' );
+        }
+
+        xprintf( "|\r\n" );
+    }
+}
+
+/*
+ * Prende e inicializa. Se usa desde 'sd init' y desde los comandos que necesitan
+ * la tarjeta lista: al cortarle la energía pierde todo su estado, así que esto
+ * hay que rehacerlo en cada ciclo.
+ */
+static bool prvSdListo( void )
+{
+    if( drv_sd_presente() == false )
+    {
+        xprintf( "no hay tarjeta en la ranura\r\n" );
+        return false;
+    }
+
+    if( drv_sd_tipo() != sdTIPO_NINGUNA )
+    {
+        return true;                    /* ya inicializada */
+    }
+
+    if( drv_sd_power_estado() == false )
+    {
+        drv_sd_power( true );
+    }
+
+    if( drv_sd_arrancar() == false )
+    {
+        xprintf( "ERROR: la tarjeta no inicializo\r\n" );
+        return false;
+    }
+
+    return true;
+}
+
+static void cmdSd( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        prvSdEstado();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "on" ) == 0 )
+    {
+        drv_sd_power( true );
+        xprintf( "riel de la microSD ENCENDIDO (sin inicializar: 'sd init')\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "off" ) == 0 )
+    {
+        drv_sd_power( false );
+        xprintf( "riel de la microSD apagado\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "init" ) == 0 )
+    {
+        if( prvSdListo() )
+        {
+            xprintf( "tarjeta inicializada\r\n" );
+            prvSdEstado();
+        }
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "info" ) == 0 )
+    {
+        uint8_t pucReg[ 16 ];
+
+        if( prvSdListo() == false )
+        {
+            return;
+        }
+
+        if( drv_sd_cid( pucReg ) )
+        {
+            xprintf( "CID:\r\n" );
+            prvSdVolcar( pucReg, 16U );
+
+            /* Los campos legibles del CID: el nombre del producto son 5
+               caracteres ASCII, y sirven para saber que se está leyendo bien. */
+            xprintf( "  fabricante 0x%02X, producto '%c%c%c%c%c'\r\n",
+                     ( unsigned ) pucReg[ 0 ],
+                     pucReg[ 3 ], pucReg[ 4 ], pucReg[ 5 ], pucReg[ 6 ], pucReg[ 7 ] );
+        }
+        else
+        {
+            xprintf( "ERROR leyendo el CID\r\n" );
+        }
+
+        if( drv_sd_csd( pucReg ) )
+        {
+            xprintf( "CSD (version %u):\r\n", ( unsigned ) ( pucReg[ 0 ] >> 6 ) + 1U );
+            prvSdVolcar( pucReg, 16U );
+        }
+        else
+        {
+            xprintf( "ERROR leyendo el CSD\r\n" );
+        }
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "read" ) == 0 ) && ( ucArgs >= 2U ) )
+    {
+        uint32_t ulSector = ( uint32_t ) strtoul( argv[ 2 ], NULL, 0 );
+
+        if( prvSdListo() == false )
+        {
+            return;
+        }
+
+        if( drv_sd_leer_sector( ulSector, pucSector ) == false )
+        {
+            xprintf( "ERROR leyendo el sector %lu\r\n", ( unsigned long ) ulSector );
+            return;
+        }
+
+        xprintf( "sector %lu:\r\n", ( unsigned long ) ulSector );
+        prvSdVolcar( pucSector, DRV_SD_SECTOR_BYTES );
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "test" ) == 0 ) && ( ucArgs >= 2U ) )
+    {
+        uint32_t ulSector = ( uint32_t ) strtoul( argv[ 2 ], NULL, 0 );
+
+        if( prvSdListo() == false )
+        {
+            return;
+        }
+
+        /*
+         * El patrón es i*7+sector y no un valor fijo: así un sector que quedó de
+         * una prueba anterior no se confunde con uno recién escrito, y si el
+         * driver leyera un sector equivocado el contenido lo delata.
+         */
+        for( uint32_t i = 0U; i < DRV_SD_SECTOR_BYTES; i++ )
+        {
+            pucSector[ i ] = ( uint8_t ) ( ( i * 7U ) + ulSector );
+        }
+
+        xprintf( "escribiendo el sector %lu...\r\n", ( unsigned long ) ulSector );
+
+        if( drv_sd_escribir_sector( ulSector, pucSector ) == false )
+        {
+            xprintf( "ERROR: la escritura fallo\r\n" );
+            return;
+        }
+
+        /* Se borra el buffer antes de releer: si no, una lectura que no hiciera
+           nada dejaría los datos viejos en RAM y el test pasaría igual. Ese
+           falso positivo es el que hay que evitar. */
+        memset( pucSector, 0, DRV_SD_SECTOR_BYTES );
+
+        if( drv_sd_leer_sector( ulSector, pucSector ) == false )
+        {
+            xprintf( "ERROR: la relectura fallo\r\n" );
+            return;
+        }
+
+        for( uint32_t i = 0U; i < DRV_SD_SECTOR_BYTES; i++ )
+        {
+            if( pucSector[ i ] != ( uint8_t ) ( ( i * 7U ) + ulSector ) )
+            {
+                xprintf( "ERROR en el byte %lu: esperaba 0x%02X, leyo 0x%02X\r\n",
+                         ( unsigned long ) i,
+                         ( unsigned ) ( uint8_t ) ( ( i * 7U ) + ulSector ),
+                         ( unsigned ) pucSector[ i ] );
+                return;
+            }
+        }
+
+        xprintf( "sector %lu: escritura y relectura OK, los 512 bytes\r\n",
+                 ( unsigned long ) ulSector );
+        return;
+    }
+
+    prvSdUso();
 }
 //------------------------------------------------------------------------------
 /*
