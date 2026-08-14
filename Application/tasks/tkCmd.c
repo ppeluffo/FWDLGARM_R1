@@ -1537,8 +1537,12 @@ static uint8_t pucSector[ DRV_SD_SECTOR_BYTES ];
 
 static void prvSdEstado( void )
 {
+    /* Con el riel apagado la detección no dice nada, y decir "vacia" sería
+       inventar: el pin está en alta impedancia justamente para no gastar los
+       82 µA del pull-up. Ver drv_sd.h. */
     xprintf( "  ranura      : %s\r\n",
-             drv_sd_presente() ? "TARJETA PRESENTE" : "vacia" );
+             ( drv_sd_power_estado() == false ) ? "sin saber (riel apagado)" :
+             ( drv_sd_presente() ? "TARJETA PRESENTE" : "vacia" ) );
     xprintf( "  riel        : %s\r\n",
              drv_sd_power_estado() ? "ENCENDIDO" : "apagado" );
     xprintf( "  tarjeta     : %s\r\n", drv_sd_tipo_texto() );
@@ -1589,20 +1593,23 @@ static void prvSdVolcar( const uint8_t *pucDatos, uint32_t ulLargo )
  */
 static bool prvSdListo( void )
 {
-    if( drv_sd_presente() == false )
-    {
-        xprintf( "no hay tarjeta en la ranura\r\n" );
-        return false;
-    }
-
     if( drv_sd_tipo() != sdTIPO_NINGUNA )
     {
         return true;                    /* ya inicializada */
     }
 
+    /* PRIMERO prender, DESPUÉS preguntar si hay tarjeta: con el riel apagado el
+       pin de detección está en alta impedancia y no dice nada. Ver drv_sd.h. */
     if( drv_sd_power_estado() == false )
     {
         drv_sd_power( true );
+    }
+
+    if( drv_sd_presente() == false )
+    {
+        xprintf( "no hay tarjeta en la ranura\r\n" );
+        drv_sd_power( false );
+        return false;
     }
 
     if( drv_sd_arrancar() == false )

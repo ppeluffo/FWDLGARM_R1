@@ -39,13 +39,14 @@ batería que duerme casi todo el tiempo.
 PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal** (PB6/PB7 más
 `TERM_SENSE` en PB5), el **bus I2C2** (PB13/PB14, pull-up de 10 kΩ) con la **EEPROM M24M01**, el
 **RTC MCP79410 con su pila** y el **INA3221** que mide los lazos de 4-20 mA, el **RS485** con su
-transceiver **SP3485** y los tres rieles conmutados, y la **fuente lineal de los sensores 4-20 mA**
-(`EN_PWR_SENS420`, PB12). Nada más: no hay modem LTE ni microSD.
+transceiver **SP3485** y los tres rieles conmutados, la **fuente lineal de los sensores 4-20 mA**
+(`EN_PWR_SENS420`, PB12) y la **microSD** con su alimentación conmutada. Falta poblar: modem LTE,
+contador de pulsos, las analógicas de 3,3 y 12 V, y la electroválvula.
 
 Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola, el
-bus I2C, el RS485 y la medida de 4-20 mA**. El resto del mapa de pines de `interfases_pines.csv` es
-el diseño completo de R001, no hardware presente — no tiene sentido escribir drivers contra
-periféricos que todavía no están montados.
+bus I2C, el RS485, la medida de 4-20 mA y la microSD**. El resto del mapa de pines de
+`interfases_pines.csv` es el diseño completo de R001, no hardware presente — no tiene sentido
+escribir drivers contra periféricos que todavía no están montados.
 
 El proyecto **se borró y se rehízo de cero el 2026-08-10** (ver control de versiones), y desde
 entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
@@ -61,6 +62,7 @@ entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
 | `v0.0.7` | **Bus I2C2, EEPROM M24M01 y RTC MCP79410** — los tres validados con datos reales |
 | `v0.0.8` | **RS485 (SP3485) con DE por hardware** y los 3 rieles conmutados. De paso, el tickless dejó de comerse bytes |
 | `v0.0.9` | **INA3221: medida de 4-20 mA** y el riel de la fuente lineal de sensores. Validado contra un calibrador de 0 a 20 mA |
+| `v0.0.10` | **microSD por SPI3, etapa 1** (la tarjeta, sin FatFs): energía conmutada, sectores leídos y escritos, y el reposo intacto |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
   `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
@@ -309,25 +311,28 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    Modbus RTU. Falta la capa **Modbus** y los mapas de registros de los módulos.
 8. ✅ **Entradas de 4-20 mA** (`v0.0.9`) — **INA3221** en el I2C2 (dirección 7 bits `41`) y la fuente
    lineal de los sensores en `EN_PWR_SENS420` (PB12). Validado contra un calibrador: ver abajo.
-9. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
+9. ✅ **microSD, etapa 1: la tarjeta** (`v0.0.10`) — SPI3 con el CS por software, energía conmutada
+   por `EN_PWR_SD` y presencia por `SD_DET`. Protocolo SD-SPI completo hasta leer y escribir
+   sectores. **Falta la etapa 2, FatFs encima**: ver *microSD + FatFs*, donde queda una sola
+   decisión abierta (¿primaria o exportación?).
+10. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
    suelda; de cada uno hay que pedirle los pines, y de algunos algo más:
 
    | Módulo | Qué hay que preguntar cuando toque |
    |---|---|
-   | **microSD** (SPI3) | Sobre todo: **¿la placa le corta la alimentación?** Ver *microSD + FatFs*, que ya tiene el relevamiento y tres decisiones pendientes |
-   | **Contador de pulsos** (PA12, EXTI) | Tipo de sensor y si tiene antirrebote por hardware; frecuencia máxima esperada |
+   | **Contador de pulsos** (PA12, EXTI) | Tipo de sensor y si tiene antirrebote por hardware; frecuencia máxima esperada. ⚠ Y si el contacto queda cerrado en reposo: un pull-up interno contra un contacto cerrado son 82 µA — ver la lección de `SD_DET` |
    | **Modem LTE** (UART4) | Modelo, baudios, y qué pines de control tiene además del TX/RX (power key, reset, status) |
    | **Medidas analógicas de 3,3 V y 12 V** | Los divisores resistivos y a qué pines van (el CSV sugiere PC5 y PB0 → ADC1). Estas sí son del ADC del micro, no del INA |
    | **Electroválvula** | **Si es biestable (latch, dos bobinas con pulsos) o continua**, y con qué la maneja: puente H, driver, o un GPIO. Cambia el driver por completo |
 
-10. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
+11. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
    hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
-11. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
+12. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
    que conviene hacer una sola vez, al final, en vez de rehacerlas cada vez que entra un periférico:
    la **sincronización del RTC interno desde el MCP79410**, el período definitivo de `tkCtl` junto
    con el watchdog y el poleo de `TERM_SENSE` (los tres comparten la misma vuelta), el
    comportamiento del parser de comandos, y `BOR_LEV`.
-12. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+13. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
 **Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
 (`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
@@ -690,7 +695,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | Rieles conmutados (TPS22819, EN=1 prende, pull-down de 100 K) | PC6 `EN_PWR_RS485`, PC7 `EN_PWR_QMBUS`, PB15 `EN_PWR_CPRES` |
 | Fuente lineal de los sensores 4-20 mA | **PB12 `EN_PWR_SENS420`** (EN=1 prende) |
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
-| SPI (microSD) | PA15 NSS, PC10 SCK, PC11 MISO, PC12 MOSI |
+| microSD | PA15 `SD_SS`, PC10 `SD_SCK`, PC11 `SD_MISO`, PC12 `SD_MOSI` → **SPI3** (NSS por software), **PD2 `SD_DET`** (a GND con tarjeta, pull-up interno), **PB3 `EN_PWR_SD`** ⚠ **0 = prende** (SI2301 canal P, pull-up de 100 K) |
 | Contador de pulsos CNT0 | PA12 (EXTI) |
 | Analógicas | PC5, PB0 |
 | LED, LED2 | PB9, PA2 (en el `.ioc`; no figuran en el CSV) |
@@ -730,6 +735,7 @@ Application/
 │               drv_rtc79410.{h,c}      RTC externo MCP79410 (BCD, pila, PWRFAIL)
 │               drv_rs485.{h,c}         rieles conmutados y pines del SP3485
 │               drv_ina3221.{h,c}       medida de 4-20 mA + riel de la fuente lineal
+│               drv_sd.{h,c}            tarjeta microSD por SPI (sectores, sin FatFs)
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
@@ -920,6 +926,68 @@ desconectado" es el del propio lazo de 4-20 mA**: por debajo de ~3,5 mA no hay t
 —NAMUR NE43 pone el umbral de falla en 3,6 mA—, y eso vale igual si la entrada lee −0,098, 0,000 o
 +0,3. Es de la capa de aplicación, junto con la calibración.
 
+### ✅ La microSD, etapa 1: la tarjeta (`v0.0.10`)
+
+SPI3 con el **CS por software** (PA15), energía conmutada por **`EN_PWR_SD` (PB3)** y presencia por
+**`SD_DET` (PD2)**. Driver en `Application/drivers/drv_sd.{h,c}`, comando `sd` en la consola.
+**Todavía sin FatFs**: esto mueve sectores de 512 bytes, y la etapa 2 va encima.
+
+Validado el **2026-08-14** con una SDHC de 4 GB: inicializa, el `C_SIZE` de la CSD da 7 610 368
+sectores —verificado a mano contra lo que informó el firmware—, el CID sale en ASCII legible, el
+sector 0 es un MBR con una partición FAT32 (tipo `0x0B`) **que empieza en el sector 8192**, y un
+sector escrito y releído coincide en los 512 bytes.
+
+**⚠ `EN_PWR_SD` es de lógica INVERTIDA, al revés que los rieles del RS485.** Maneja el gate de un
+**SI2301, MOSFET de canal P**, con un pull-up de 100 kΩ: **`0` prende, `1` o Hi-Z apaga**. El pull-up
+es lo que garantiza que la tarjeta arranque apagada, antes de que el firmware llegue a configurar
+nada. En CubeMX eso obliga a poner el *Output Level* en **High**, porque el default es Low y acá Low
+significa prender.
+
+**El reloj va en dos tiempos:** 234 kHz para inicializar, como exige la norma (100-400 kHz), y
+7,5 MHz después. Si alguna vez una tarjeta inicializa bien pero lee de forma errática, **bajar ese
+segundo prescaler es lo primero que hay que probar**.
+
+#### ⚠ La lección que costó los 89 µA: un pull-up interno contra un contacto cerrado
+
+Vale para **cualquier entrada digital que venga después**, empezando por el contador de pulsos.
+
+`SD_DET` es un contacto que va a GND cuando hay tarjeta, y el hardware no trae pull-up externo. Se
+puso el interno del STM32 — que **son de 30 a 50 kΩ**. Con la tarjeta insertada el contacto cierra y
+ese pull-up queda drenando para siempre:
+
+```
+3,3 V / 40 kΩ ~= 82 µA, las 24 horas, sólo por tener la tarjeta puesta
+```
+
+Medido: el reposo pasaba de **6 µA a 95 µA con sólo insertar la tarjeta**, sin encenderla. Contra los
+~5 µA del micro dormido eso multiplica por quince el consumo del equipo.
+
+**Lo que hace que esto sea peligroso es que funcionalmente todo andaba perfecto.** El pull-up era
+necesario —sin él el pin flotaba y la detección mentía— y no había ningún síntoma salvo la corriente.
+En campo se habría visto como "la batería dura menos de lo previsto", meses después, sin nada que
+apunte al culpable.
+
+**La solución la propuso Pablo, y además simplificó el driver:** la detección **sólo sirve justo
+antes de usar la tarjeta, y para usarla hay que prenderla igual**. Así que el pull-up vive y muere
+con el riel, dentro de `prvPinesBus()`, junto con los pines del SPI. Mientras la tarjeta está
+encendida esos 82 µA son ruido al lado de los 0,2-1 mA que consume ella. El orden correcto queda:
+
+```
+drv_sd_power( true )  ->  drv_sd_presente()  ->  drv_sd_arrancar()
+```
+
+Y `drv_sd_presente()` **devuelve false con el riel apagado**, porque ahí el pin está en alta
+impedancia y cualquier otra respuesta sería inventada. Por eso el comando `sd` dice
+`sin saber (riel apagado)` en vez de `vacia`.
+
+Dos cosas generales que quedan de acá:
+
+- **La medición de consumo es parte del criterio de aceptación de cada etapa**, no un chequeo final.
+  Este bug no se encuentra de ninguna otra forma.
+- **Antes de habilitar un pull-up interno, preguntarse qué pasa cuando el contacto está cerrado.**
+  Si va a estarlo la mayor parte del tiempo, las opciones son conmutarlo con el periférico —como
+  acá—, o pedir uno externo de 1 MΩ, que costaría 3 µA.
+
 ### ⚠ `printf` con `%f`: hay que habilitarlo, y el síntoma de que falta es que no imprime NADA
 
 El proyecto linkea con `--specs=nano.specs`, y el `printf` de newlib-nano **no trae soporte de punto
@@ -1015,22 +1083,19 @@ poleo** — ver el checklist de portación).
 
 #### ⏳ Lo que hay que decidir — y por qué importa más que todo lo anterior
 
-**1. ¿R001 corta la alimentación de la microSD?** Un load switch o un P-MOS por GPIO. Una microSD
-consume **0,2 a 1 mA en idle** y **50 a 100 mA en pico de escritura**: contra los ~5 µA del micro
-dormido son tres órdenes de magnitud, así que **la tarjeta domina el balance energético y anula el
-tickless si queda alimentada**. Peor: una tarjeta "quieta" puede seguir haciendo garbage collection
-interno cientos de ms después de un write. **Verificar contra el esquemático `Hardware/R001/`.**
+**1. ✅ RESUELTA: sí, R001 le corta la alimentación** (`EN_PWR_SD`, PB3, un SI2301 de canal P).
+Confirmado y validado en banco el 2026-08-14: con la tarjeta puesta y el riel apagado el equipo
+consume lo mismo que sin ella. Ver la sección de la etapa 1 más arriba.
 
-Si el corte existe, arrastra tres consecuencias:
+Eso arrastra tres consecuencias, y las tres siguen valiendo para la etapa de FatFs:
 
 - Hay que **desmontar y remontar** en cada ciclo (`f_mount(NULL, …)` + re-init), porque al cortar la
   tarjeta pierde estado. El re-init —74 clocks, CMD0, ACMD41 hasta salir de idle— cuesta de decenas
-  a cientos de ms.
+  a cientos de ms. `drv_sd_arrancar()` ya lo hace.
 - Por eso la política **no puede ser "escribir cada muestra"**: hay que acumular en RAM y volcar de a
   bloques. Cuántas muestras se toleran perder define el tamaño del buffer.
-- Al cortar, los pines de SPI3 tienen que quedar **bajos o en Hi-Z**. Si quedan altos **alimentan la
-  tarjeta por los diodos de protección** y el corte no corta nada. Clásico, y cuesta verlo con el
-  tester.
+- Al cortar, **todos** los pines que van a la tarjeta quedan en alta impedancia. Ya está resuelto en
+  `prvPinesBus()`, y por dos motivos distintos: el back-powering del SPI y el pull-up de `SD_DET`.
 
 **2. ¿La microSD es el almacenamiento primario o es exportación/respaldo?** FAT es frágil ante corte
 de alimentación a mitad de un write: no se pierde el último registro, se puede perder **la FAT

@@ -124,9 +124,25 @@ static void prvVelocidad( uint32_t ulPrescaler )
 }
 //------------------------------------------------------------------------------
 /*
- * Estado de los pines del bus. Ver la explicación del back-powering en el header:
- * con la tarjeta sin alimentar, un pin en alto la alimenta por los diodos de
- * protección y el corte de energía deja de cortar.
+ * Estado de TODOS los pines que van a la tarjeta, incluido el de detección.
+ *
+ * Dos razones distintas para dejarlos en analógico cuando la tarjeta está
+ * apagada, y las dos cuestan energía:
+ *
+ * 1. **Back-powering** (SCK, MOSI, CS): con la tarjeta sin alimentar, un pin en
+ *    alto le inyecta corriente por los diodos de protección y la alimenta por las
+ *    patas. El corte de energía deja de cortar y el tester muestra 0 V en el riel
+ *    igual.
+ * 2. **El pull-up de SD_DET**: el contacto cierra a GND con la tarjeta puesta, y
+ *    el pull-up interno del STM32L4 son 30-50 kΩ. Medido el 2026-08-14, con el
+ *    pull-up fijo el consumo de reposo pasaba de **6 µA a 95 µA con sólo insertar
+ *    la tarjeta**, sin encenderla siquiera: 3,3 V / 40 kΩ ~= 82 µA permanentes.
+ *    Contra los ~5 µA del micro dormido, multiplicaba por quince el reposo del
+ *    equipo — y en campo la tarjeta está puesta siempre.
+ *
+ * Mientras la tarjeta está encendida esos 82 µA no importan: la propia tarjeta
+ * consume de 0,2 a 1 mA. Por eso el pull-up vive y muere con el riel, en un solo
+ * lugar, en vez de conmutarse en cada lectura.
  */
 static void prvPinesBus( bool bActivos )
 {
@@ -134,6 +150,12 @@ static void prvPinesBus( bool bActivos )
 
     if( bActivos )
     {
+        /* Detección: entrada con pull-up. El hardware no trae uno externo. */
+        xGpio.Pin  = SD_DET_Pin;
+        xGpio.Mode = GPIO_MODE_INPUT;
+        xGpio.Pull = GPIO_PULLUP;
+        HAL_GPIO_Init( SD_DET_GPIO_Port, &xGpio );
+
         xGpio.Pin       = BUS_C_PINS;
         xGpio.Mode      = GPIO_MODE_AF_PP;
         xGpio.Pull      = GPIO_NOPULL;
@@ -159,6 +181,10 @@ static void prvPinesBus( bool bActivos )
 
         xGpio.Pin = SD_SS_Pin;
         HAL_GPIO_Init( SD_SS_GPIO_Port, &xGpio );
+
+        /* Y el de detección, que es el que costaba 82 µA. */
+        xGpio.Pin = SD_DET_Pin;
+        HAL_GPIO_Init( SD_DET_GPIO_Port, &xGpio );
     }
 }
 
@@ -320,6 +346,9 @@ bool drv_sd_init( void )
 {
     /* Explícito, aunque el pull-up de 100 K ya la deja apagada: el firmware no
        debe depender de una resistencia para un estado que le corresponde. */
+    /* Deja el riel apagado y TODOS los pines —los del SPI y el de detección— en
+       alta impedancia. CubeMX arranca el de detección con el pull-up puesto, y
+       eso son 82 µA con la tarjeta insertada: ver prvPinesBus(). */
     drv_sd_power( false );
 
     return true;
@@ -368,6 +397,16 @@ bool drv_sd_power_estado( void )
 //------------------------------------------------------------------------------
 bool drv_sd_presente( void )
 {
+    /*
+     * Sólo tiene sentido con el riel encendido: ver el header. Con el riel
+     * apagado el pin está en analógico y leerlo no dice nada, así que se contesta
+     * "no" en vez de devolver un nivel inventado.
+     */
+    if( bRielOn == false )
+    {
+        return false;
+    }
+
     /* El contacto va a GND con la tarjeta puesta: pin en 0 = presente. */
     return ( HAL_GPIO_ReadPin( SD_DET_GPIO_Port, SD_DET_Pin ) == GPIO_PIN_RESET );
 }

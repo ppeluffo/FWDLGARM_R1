@@ -106,8 +106,24 @@ bool drv_sd_init( void );
 void drv_sd_power( bool bOn );
 bool drv_sd_power_estado( void );
 
-/* Lee `SD_DET`. El contacto va a GND con la tarjeta puesta y el pull-up es
-   interno, así que el pin en 0 significa PRESENTE. */
+/*
+ * ¿Hay tarjeta en la ranura? El contacto va a GND cuando la hay.
+ *
+ * ⚠ **SÓLO VALE CON EL RIEL ENCENDIDO. Con el riel apagado devuelve false.**
+ *
+ * No es una limitación, es la decisión de diseño: el pull-up del pin de detección
+ * vive y muere con el riel, porque dejarlo fijo costaba **89 µA medidos con sólo
+ * insertar la tarjeta**, sin encenderla siquiera (ver `prvPinesBus()` en el `.c`).
+ *
+ * Y no se pierde nada, porque **saber si hay tarjeta sólo sirve justo antes de
+ * usarla, y para usarla hay que prenderla igual**. El orden correcto es siempre:
+ *
+ *      drv_sd_power( true );  ->  drv_sd_presente();  ->  drv_sd_arrancar();
+ *
+ * Preguntar con el riel apagado no habilita ninguna decisión que el equipo pueda
+ * tomar: es el mismo criterio por el que `TERM_SENSE` se polea en vez de ir por
+ * EXTI.
+ */
 bool drv_sd_presente( void );
 
 /*------------------------------------------------------------------------------
