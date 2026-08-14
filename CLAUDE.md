@@ -309,16 +309,25 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    Modbus RTU. Falta la capa **Modbus** y los mapas de registros de los módulos.
 8. ✅ **Entradas de 4-20 mA** (`v0.0.9`) — **INA3221** en el I2C2 (dirección 7 bits `41`) y la fuente
    lineal de los sensores en `EN_PWR_SENS420` (PB12). Validado contra un calibrador: ver abajo.
-   Después: **microSD/SPI** → contador de pulsos → modem LTE. La microSD ya tiene relevamiento y
-   decisiones pendientes anotadas: ver *microSD + FatFs: diseño pendiente*.
-9. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
+9. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
+   suelda; de cada uno hay que pedirle los pines, y de algunos algo más:
+
+   | Módulo | Qué hay que preguntar cuando toque |
+   |---|---|
+   | **microSD** (SPI3) | Sobre todo: **¿la placa le corta la alimentación?** Ver *microSD + FatFs*, que ya tiene el relevamiento y tres decisiones pendientes |
+   | **Contador de pulsos** (PA12, EXTI) | Tipo de sensor y si tiene antirrebote por hardware; frecuencia máxima esperada |
+   | **Modem LTE** (UART4) | Modelo, baudios, y qué pines de control tiene además del TX/RX (power key, reset, status) |
+   | **Medidas analógicas de 3,3 V y 12 V** | Los divisores resistivos y a qué pines van (el CSV sugiere PC5 y PB0 → ADC1). Estas sí son del ADC del micro, no del INA |
+   | **Electroválvula** | **Si es biestable (latch, dos bobinas con pulsos) o continua**, y con qué la maneja: puente H, driver, o un GPIO. Cambia el driver por completo |
+
+10. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
    hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
-10. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
+11. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
    que conviene hacer una sola vez, al final, en vez de rehacerlas cada vez que entra un periférico:
    la **sincronización del RTC interno desde el MCP79410**, el período definitivo de `tkCtl` junto
    con el watchdog y el poleo de `TERM_SENSE` (los tres comparten la misma vuelta), el
    comportamiento del parser de comandos, y `BOR_LEV`.
-11. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+12. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
 **Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
 (`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
