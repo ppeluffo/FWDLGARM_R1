@@ -14,6 +14,7 @@
 #include "drv_rs485.h"
 #include "drv_ina3221.h"
 #include "drv_sd.h"
+#include "drv_adc.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -283,6 +284,7 @@ static void cmdRtc( void );
 static void cmdRs485( void );
 static void cmdIna( void );
 static void cmdSd( void );
+static void cmdVin( void );
 static void cmdKeys( void );
 static void cmdReset( void );
 static void cmdReboot( void );
@@ -294,6 +296,7 @@ static void prvRtcUso  ( void );
 static void prvRs485Uso( void );
 static void prvInaUso  ( void );
 static void prvSdUso   ( void );
+static void prvVinUso  ( void );
 
 /*
  * Causa del último reset, leída de RCC_CSR antes de limpiarla.
@@ -378,6 +381,12 @@ void tkCmd( void *pvParameters )
        impedancia, que es el estado de reposo. */
     ( void ) drv_sd_init();
 
+    /* Calibra el ADC y deja los dos load switches apagados. */
+    if( drv_adc_init() == false )
+    {
+        xprintf( "\r\n[!] fallo la calibracion del ADC1\r\n" );
+    }
+
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
@@ -388,6 +397,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "rs485",  cmdRs485  );
     FRTOS_CMD_register( "ina",    cmdIna    );
     FRTOS_CMD_register( "sd",     cmdSd     );
+    FRTOS_CMD_register( "vin",    cmdVin    );
     FRTOS_CMD_register( "keys",   cmdKeys   );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
@@ -446,6 +456,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "rs485",  "bus RS485 y los 3 rieles de alimentacion",              prvRs485Uso   },
     { "ina",    "INA3221: medida de los lazos de 4-20 mA",               prvInaUso     },
     { "sd",     "tarjeta microSD: energia, arranque y sectores",         prvSdUso      },
+    { "vin",    "tension de los rieles: 12 V y VDDA (3V3)",              prvVinUso     },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
     { "reboot", "reinicio tibio, sin tocar NRST (diagnostico)",          NULL          },
@@ -1768,6 +1779,127 @@ static void cmdSd( void )
     }
 
     prvSdUso();
+}
+//------------------------------------------------------------------------------
+static void prvVinUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  vin              mide los dos rieles\r\n" );
+    xprintf( "  vin raw          cuentas crudas del ADC, sin convertir\r\n" );
+    xprintf( "  vin on|off       load switch del divisor de 12 V (EN_SENS12V)\r\n" );
+    xprintf( "  vin 3v3 on|off   load switch del circuito de 3,3 V\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  El circuito de 3,3 V NO se usa: un ADC referenciado al propio\r\n" );
+    xprintf( "  riel da 2047 siempre. El riel sale de VREFINT, sin hardware.\r\n" );
+}
+
+/* Imprime milivolts como V con tres decimales. A mano y no con %f: ver la nota
+   en prvImprimirMa(). */
+static void prvImprimirVolts( uint32_t ulMiliV )
+{
+    xprintf( "%lu.%03lu V",
+             ( unsigned long ) ( ulMiliV / 1000UL ),
+             ( unsigned long ) ( ulMiliV % 1000UL ) );
+}
+
+static void cmdVin( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs >= 1U ) && ( argv[ 1 ] != NULL ) )
+    {
+        if( strcmp( argv[ 1 ], "on" ) == 0 )
+        {
+            drv_adc_pwr_12v( true );
+            xprintf( "divisor de 12 V conectado (consume %lu uA mientras este asi)\r\n",
+                     ( unsigned long ) ( 12000UL / 66UL ) );
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "off" ) == 0 )
+        {
+            drv_adc_pwr_12v( false );
+            xprintf( "divisor de 12 V desconectado\r\n" );
+            return;
+        }
+
+        if( ( strcmp( argv[ 1 ], "3v3" ) == 0 ) && ( ucArgs >= 2U ) )
+        {
+            bool bOn = ( strcmp( argv[ 2 ], "on" ) == 0 );
+
+            drv_adc_pwr_3v3( bOn );
+            xprintf( "circuito de 3,3 V %s (no se usa para medir)\r\n",
+                     bOn ? "CONECTADO" : "desconectado" );
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "raw" ) == 0 )
+        {
+            uint16_t usVref = 0U;
+            uint16_t us12   = 0U;
+
+            /* Se prende el riel para que la cuenta del divisor signifique algo:
+               con el load switch abierto la entrada del seguidor queda al aire. */
+            bool bYaEstaba = drv_adc_pwr_12v_estado();
+
+            if( bYaEstaba == false )
+            {
+                drv_adc_pwr_12v( true );
+                vTaskDelay( pdMS_TO_TICKS( DRV_ADC_SETTLE_MS ) );
+            }
+
+            bool bOk = drv_adc_raw_vrefint( &usVref ) && drv_adc_raw_12v( &us12 );
+
+            if( bYaEstaba == false )
+            {
+                drv_adc_pwr_12v( false );
+            }
+
+            if( bOk == false )
+            {
+                xprintf( "ERROR: la conversion fallo\r\n" );
+                return;
+            }
+
+            xprintf( "  VREFINT : %5u cuentas\r\n", ( unsigned ) usVref );
+            xprintf( "  IN15    : %5u cuentas  (12 V, divisor 56K/10K)\r\n",
+                     ( unsigned ) us12 );
+            return;
+        }
+
+        prvVinUso();
+        return;
+    }
+
+    /* ---- 'vin' pelado: la medida ---- */
+    uint32_t ulVdda = 0UL;
+    uint32_t ulV12  = 0UL;
+
+    if( drv_adc_vdda_mv( &ulVdda ) )
+    {
+        xprintf( "  VDDA / 3V3 : " );
+        prvImprimirVolts( ulVdda );
+        xprintf( "   (por VREFINT, sin hardware externo)\r\n" );
+    }
+    else
+    {
+        xprintf( "  VDDA / 3V3 : ERROR de conversion\r\n" );
+    }
+
+    if( drv_adc_v12_mv( &ulV12, false ) )
+    {
+        xprintf( "  riel 12 V  : " );
+        prvImprimirVolts( ulV12 );
+        xprintf( "\r\n" );
+    }
+    else
+    {
+        xprintf( "  riel 12 V  : ERROR de conversion\r\n" );
+    }
+
+    xprintf( "  switches   : 12V %s / 3V3 %s\r\n",
+             drv_adc_pwr_12v_estado() ? "ON" : "off",
+             drv_adc_pwr_3v3_estado() ? "ON" : "off" );
 }
 //------------------------------------------------------------------------------
 /*

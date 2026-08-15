@@ -316,24 +316,29 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    sectores. ⏸ **La etapa 2 —FatFs encima— la difirió Pablo el 2026-08-14 a las capas de
    aplicación**, junto con Modbus y el registro de muestras. El hardware de la SD está cerrado; lo
    que falta es política de datos, no bring-up. **No adelantarla.**
-10. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
+10. 🔨 **Medida de los rieles por ADC1** — ⚠ **escrito y compilando, PENDIENTE DE VALIDAR EN BANCO**
+   (al 2026-08-15). `Application/drivers/drv_adc.{h,c}` y el comando `vin`. El riel de **12 V** va por
+   PB0 (`ADC1_IN15`) con divisor 56K/10K y load switch en PC4; el de **3,3 V sale de `VREFINT`**,
+   sin hardware — su circuito existe en la placa pero **no se usa**, por lo explicado más abajo.
+   Falta contrastar contra el tester y **remedir el reposo**: el driver deja el ADC en deep
+   power-down y eso sólo se comprueba midiendo.
+11. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
    suelda; de cada uno hay que pedirle los pines, y de algunos algo más:
 
    | Módulo | Qué hay que preguntar cuando toque |
    |---|---|
    | **Contador de pulsos** (PA12, EXTI) | Tipo de sensor y si tiene antirrebote por hardware; frecuencia máxima esperada. ⚠ Y si el contacto queda cerrado en reposo: un pull-up interno contra un contacto cerrado son 82 µA — ver la lección de `SD_DET` |
    | **Modem LTE** (UART4) | Modelo, baudios, y qué pines de control tiene además del TX/RX (power key, reset, status) |
-   | **Medidas analógicas de 3,3 V y 12 V** | Los divisores resistivos y a qué pines van (el CSV sugiere PC5 y PB0 → ADC1). Estas sí son del ADC del micro, no del INA |
    | **Electroválvula** | **Si es biestable (latch, dos bobinas con pulsos) o continua**, y con qué la maneja: puente H, driver, o un GPIO. Cambia el driver por completo |
 
-11. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
+12. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
    hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
-12. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
+13. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
    que conviene hacer una sola vez, al final, en vez de rehacerlas cada vez que entra un periférico:
    la **sincronización del RTC interno desde el MCP79410**, el período definitivo de `tkCtl` junto
    con el watchdog y el poleo de `TERM_SENSE` (los tres comparten la misma vuelta), el
    comportamiento del parser de comandos, y `BOR_LEV`.
-13. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+14. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
 **Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
 (`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
@@ -695,6 +700,8 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | RS485 (modbus) | PB10 TX, PB11 RX, **PB1 `USART3_RTS_DE`** → **USART3**, 9600 8N1, transceiver **SP3485** |
 | Rieles conmutados (TPS22819, EN=1 prende, pull-down de 100 K) | PC6 `EN_PWR_RS485`, PC7 `EN_PWR_QMBUS`, PB15 `EN_PWR_CPRES` |
 | Fuente lineal de los sensores 4-20 mA | **PB12 `EN_PWR_SENS420`** (EN=1 prende) |
+| Medida del riel de 12 V (TPS22810, EN=1 prende, pull-down) | **PC4 `EN_SENS12V`**, divisor 56K/10K → seguidor TLV8802 → **PB0 `ADC1_IN15`** |
+| Medida del riel de 3,3 V | **existe pero NO se usa** (`EN_SENS3V3` PB2, divisor 56K/56K, PC5): el riel sale de `VREFINT` |
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | microSD | PA15 `SD_SS`, PC10 `SD_SCK`, PC11 `SD_MISO`, PC12 `SD_MOSI` → **SPI3** (NSS por software), **PD2 `SD_DET`** (a GND con tarjeta, pull-up interno), **PB3 `EN_PWR_SD`** ⚠ **0 = prende** (SI2301 canal P, pull-up de 100 K) |
 | Contador de pulsos CNT0 | PA12 (EXTI) |
@@ -737,6 +744,7 @@ Application/
 │               drv_rs485.{h,c}         rieles conmutados y pines del SP3485
 │               drv_ina3221.{h,c}       medida de 4-20 mA + riel de la fuente lineal
 │               drv_sd.{h,c}            tarjeta microSD por SPI (sectores, sin FatFs)
+│               drv_adc.{h,c}           rieles de 12 V (divisor) y 3,3 V (VREFINT)
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
@@ -988,6 +996,82 @@ Dos cosas generales que quedan de acá:
 - **Antes de habilitar un pull-up interno, preguntarse qué pasa cuando el contacto está cerrado.**
   Si va a estarlo la mayor parte del tiempo, las opciones son conmutarlo con el periférico —como
   acá—, o pedir uno externo de 1 MΩ, que costaría 3 µA.
+
+### 🔨 Los rieles por ADC1 — pendiente de validar en banco (2026-08-15)
+
+`Application/drivers/drv_adc.{h,c}`, comando `vin`. Compila en Debug y Release; **falta probarlo**.
+
+**⚠ El riel de 3,3 V NO se puede medir con un ADC referenciado a él mismo.** R001 trae el circuito
+—divisor 56K/56K, load switch en PB2, seguidor TLV8802, PC5— pero la cuenta se cancela sola:
+
+```
+ADC = (V3V3 / 2) / VREF+ x 4095 = (V3V3 / 2) / V3V3 x 4095 = 2047, SIEMPRE
+```
+
+Da 2047 con el riel en 3,3 V, en 3,0 o en 3,6: **la medida no contiene información sobre lo que se
+quiere medir**. La solución es `VREFINT`, la referencia interna de ~1,212 V, que es un valor absoluto
+**calibrado de fábrica por chip** (`VREFINT_CAL`, medida a VDDA = 3,0 V):
+
+```
+VDDA_real = 3000 mV x VREFINT_CAL / VREFINT_leído
+```
+
+Y sale **mejor** que el circuito: el divisor acumula la tolerancia de dos resistencias más el offset
+del operacional; `VREFINT` sólo tiene deriva térmica. Vale porque **en R001 VDDA del micro ES el riel
+de 3,3 V** (confirmado por Pablo el 2026-08-14). Pablo evaluó sacar el circuito de la placa; como ya
+estaba soldado, se dejó con **`EN_SENS3V3` (PB2) configurado y apagado a propósito**, y PC5 sin
+asignar en CubeMX —los pines no configurados quedan en analógico tras el reset, que es el de menor
+fuga—.
+
+**Sin `VREFINT` la medida de 12 V también estaría mal**, y de forma menos evidente porque devuelve un
+número plausible: convertir contra un 3,3 V nominal supuesto traslada directo cualquier desvío del
+riel. Por eso `drv_adc_v12_mv()` lee **siempre los dos canales**, VREFINT primero.
+
+**Dos cosas del hardware que condicionan el driver:**
+
+- **El TLV8802 es un operacional *nanopower*:** ~320 nA y apenas ~6 kHz de ancho de banda. Eso le deja
+  impedancia de salida alta a la frecuencia con la que el ADC carga su capacitor de muestreo, así que
+  el muestreo va en **640,5 ciclos** (~43 µs a 15 MHz) y el riel necesita **10 ms de asentamiento**
+  antes de creerle a una medida.
+- **El divisor de 12 V consume 182 µA** (12 V / 66 kΩ) mientras está conectado, y el de 3,3 unos
+  29 µA. Por eso existen los load switches y por eso el driver los deja apagados salvo durante la
+  ventana de medición. ⚠ Los **TPS22810 son activo ALTO**, al revés que el SI2301 de la microSD: los
+  dos criterios conviven en la misma placa.
+
+**El ADC no queda habilitado entre medidas:** reposa en *deep power-down* con su regulador apagado.
+Al despertar hay que reponer el regulador, esperar sus 20 µs y **restaurar el factor de calibración**,
+que ese modo no conserva — sin lo último la medida sale igual, pero con el error que la calibración
+venía a corregir. Es un bug callado y por eso está explícito en `prvAdcDespertar()`.
+
+#### La trampa de CubeMX: el "ADC Clock Mux" queda en `PLLSAI1R` y está bien
+
+Costó un rato el 2026-08-15. CubeMX marca error en *Clock Configuration* y ofrece resolverlo solo:
+**no hay que dejarlo**, porque lo que hace es **encender PLLSAI1**. Eso son un PLL más consumiendo y
+—peor— un PLL más que arrancar **en cada despertada del tickless**, porque el Stop 2 los apaga y
+`vPortSuppressTicksAndSleep()` rellama a `SystemClock_Config()`.
+
+El ADC del STM32L4 tiene **dos caminos de reloj en el silicio**, y sólo uno está en juego:
+
+| Camino | Lo controla | Fuente |
+|---|---|---|
+| Asíncrono | `RCC_CCIPR.ADCSEL` ← el *"ADC Clock Mux"* del árbol | PLLSAI1R / PLLSAI2R / SYSCLK |
+| **Síncrono** | `ADC_CCR.CKMODE` ← el *"Clock Prescaler"* del ADC | **HCLK** |
+
+Con `CKMODE` distinto de cero el hardware **ignora `ADCSEL` por completo**. Por eso el mux queda gris
+y mostrando `PLLSAI1R`: es un residuo visual, no está en el camino. La configuración correcta es
+`Clock Prescaler = Synchronous clock mode divided by 4` → HCLK/4 = 15 MHz.
+
+**Cómo se verifica de verdad** (los campos del `.ioc` pueden mentir; el `.c` generado no):
+
+```bash
+grep -c 'PLLSAI1' Core/Src/main.c        # 0 = el PLL no se enciende
+grep 'ClockPrescaler' Core/Src/main.c    # ADC_CLOCK_SYNC_PCLK_DIV4
+```
+
+Y que **no** haya ninguna llamada a `HAL_RCCEx_PeriphCLKConfig()` con `RCC_PERIPHCLK_ADC`: eso
+confirma que `ADCSEL` ni se toca. Si el error de la GUI impide generar, subir el `N` de PLLSAI1 a 16
+—con MSI a 4 MHz da un VCO de 64 MHz, el mínimo válido— alcanza para acallar la validación sin
+encender nada.
 
 ### ⚠ `printf` con `%f`: hay que habilitarlo, y el síntoma de que falta es que no imprime NADA
 
