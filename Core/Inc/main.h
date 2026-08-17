@@ -101,6 +101,9 @@ void Error_Handler(void);
 #define EN_PWR_RS485_GPIO_Port GPIOC
 #define EN_PWR_QMBUS_Pin GPIO_PIN_7
 #define EN_PWR_QMBUS_GPIO_Port GPIOC
+#define CNT0_Pin GPIO_PIN_12
+#define CNT0_GPIO_Port GPIOA
+#define CNT0_EXTI_IRQn EXTI15_10_IRQn
 #define SD_SS_Pin GPIO_PIN_15
 #define SD_SS_GPIO_Port GPIOA
 #define SD_SCK_Pin GPIO_PIN_10

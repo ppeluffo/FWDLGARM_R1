@@ -15,6 +15,7 @@
 #include "drv_ina3221.h"
 #include "drv_sd.h"
 #include "drv_adc.h"
+#include "drv_pulsos.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -285,6 +286,7 @@ static void cmdRs485( void );
 static void cmdIna( void );
 static void cmdSd( void );
 static void cmdVin( void );
+static void cmdCnt( void );
 static void cmdKeys( void );
 static void cmdReset( void );
 static void cmdReboot( void );
@@ -297,6 +299,7 @@ static void prvRs485Uso( void );
 static void prvInaUso  ( void );
 static void prvSdUso   ( void );
 static void prvVinUso  ( void );
+static void prvCntUso  ( void );
 
 /*
  * Causa del último reset, leída de RCC_CSR antes de limpiarla.
@@ -387,6 +390,10 @@ void tkCmd( void *pvParameters )
         xprintf( "\r\n[!] fallo la calibracion del ADC1\r\n" );
     }
 
+    /* Pone los contadores en cero. El pin y la EXTI ya los configuró CubeMX, así
+       que desde acá en adelante los pulsos se cuentan solos. */
+    drv_pulsos_init();
+
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
@@ -398,6 +405,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "ina",    cmdIna    );
     FRTOS_CMD_register( "sd",     cmdSd     );
     FRTOS_CMD_register( "vin",    cmdVin    );
+    FRTOS_CMD_register( "cnt",    cmdCnt    );
     FRTOS_CMD_register( "keys",   cmdKeys   );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
@@ -457,6 +465,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "ina",    "INA3221: medida de los lazos de 4-20 mA",               prvInaUso     },
     { "sd",     "tarjeta microSD: energia, arranque y sectores",         prvSdUso      },
     { "vin",    "tension de los rieles: 12 V y VDDA (3V3)",              prvVinUso     },
+    { "cnt",    "contador de pulsos CNT0 (PA12): cuenta y estado",       prvCntUso     },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
     { "reboot", "reinicio tibio, sin tocar NRST (diagnostico)",          NULL          },
@@ -1900,6 +1909,97 @@ static void cmdVin( void )
     xprintf( "  switches   : 12V %s / 3V3 %s\r\n",
              drv_adc_pwr_12v_estado() ? "ON" : "off",
              drv_adc_pwr_3v3_estado() ? "ON" : "off" );
+}
+//------------------------------------------------------------------------------
+static void prvCntUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  cnt              cuenta acumulada y estado del pin\r\n" );
+    xprintf( "  cnt watch [seg]  cuenta durante N segundos (10 por omision)\r\n" );
+    xprintf( "  cnt tomar        devuelve los pulsos pendientes y los descuenta\r\n" );
+    xprintf( "  cnt reset        pone los dos contadores en cero\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  El pulso se cuenta en el flanco de BAJADA, que es el cierre del\r\n" );
+    xprintf( "  contacto. En reposo el contacto esta abierto y el pin en alto.\r\n" );
+    xprintf( "  El antirrebote es de hardware (RC de 4K7/1uF + Schmitt): admite\r\n" );
+    xprintf( "  hasta unos 30 Hz y filtra todo lo que dure menos de ~5 ms.\r\n" );
+}
+
+static void cmdCnt( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs >= 1U ) && ( argv[ 1 ] != NULL ) )
+    {
+        if( strcmp( argv[ 1 ], "reset" ) == 0 )
+        {
+            drv_pulsos_reset();
+            xprintf( "contadores en cero\r\n" );
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "tomar" ) == 0 )
+        {
+            xprintf( "tomados %lu pulsos (quedan 0 pendientes)\r\n",
+                     ( unsigned long ) drv_pulsos_tomar() );
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "watch" ) == 0 )
+        {
+            uint32_t ulSeg = 10UL;
+
+            if( ( ucArgs >= 2U ) && ( argv[ 2 ] != NULL ) )
+            {
+                ulSeg = ( uint32_t ) atoi( argv[ 2 ] );
+            }
+
+            if( ( ulSeg == 0UL ) || ( ulSeg > 600UL ) )
+            {
+                xprintf( "ERROR: la ventana va de 1 a 600 segundos\r\n" );
+                return;
+            }
+
+            uint32_t ulIni = drv_pulsos_total();
+
+            xprintf( "contando %lu s...\r\n", ( unsigned long ) ulSeg );
+            vTaskDelay( pdMS_TO_TICKS( ulSeg * 1000UL ) );
+
+            uint32_t ulN = drv_pulsos_total() - ulIni;
+
+            /* La frecuencia en mHz, con enteros: nada de %f para un comando de
+               diagnóstico. Ver la nota en prvImprimirMa(). */
+            uint32_t ulMiliHz = ( ulN * 1000UL ) / ulSeg;
+
+            xprintf( "  %lu pulsos en %lu s  ->  %lu.%03lu Hz\r\n",
+                     ( unsigned long ) ulN, ( unsigned long ) ulSeg,
+                     ( unsigned long ) ( ulMiliHz / 1000UL ),
+                     ( unsigned long ) ( ulMiliHz % 1000UL ) );
+            return;
+        }
+
+        prvCntUso();
+        return;
+    }
+
+    /* ---- 'cnt' pelado ---- */
+    drv_pulsos_cfg_t xCfg = { 0 };
+
+    drv_pulsos_config( &xCfg );
+
+    xprintf( "  total      : %lu pulsos desde el arranque\r\n",
+             ( unsigned long ) drv_pulsos_total() );
+    xprintf( "  pendientes : %lu (los que se llevaria 'cnt tomar')\r\n",
+             ( unsigned long ) drv_pulsos_pendientes() );
+    xprintf( "  pin PA12   : %s  ->  contacto %s\r\n",
+             drv_pulsos_nivel_pin() ? "alto" : "BAJO",
+             drv_pulsos_nivel_pin() ? "abierto (reposo)" : "CERRADO" );
+
+    /* El pull tiene que decir 'flotante'. Un pull-down acá cuesta 82 uA las 24
+       horas, y es lo que una regeneración de CubeMX podría meter sin avisar. */
+    xprintf( "  config     : modo %lu (0=entrada), pull %lu (%s)\r\n",
+             ( unsigned long ) xCfg.ulModer, ( unsigned long ) xCfg.ulPupdr,
+             ( xCfg.ulPupdr == 0UL ) ? "flotante, CORRECTO" : "OJO: NO deberia tener pull" );
 }
 //------------------------------------------------------------------------------
 /*

@@ -41,8 +41,8 @@ PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal**
 **RTC MCP79410 con su pila** y el **INA3221** que mide los lazos de 4-20 mA, el **RS485** con su
 transceiver **SP3485** y los tres rieles conmutados, la **fuente lineal de los sensores 4-20 mA**
 (`EN_PWR_SENS420`, PB12), la **microSD** con su alimentación conmutada y la **medida de los rieles**
-(los dos load switches con sus divisores y sus seguidores TLV8802). Falta poblar: modem LTE,
-contador de pulsos y la electroválvula.
+(los dos load switches con sus divisores y sus seguidores TLV8802) y el **contador de pulsos** (opto,
+filtro RC y 74AUP1G17). Falta poblar: modem LTE y la electroválvula.
 
 Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola, el
 bus I2C, el RS485, la medida de 4-20 mA, la microSD y los rieles por ADC**. El resto del mapa de pines de
@@ -323,23 +323,25 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    **3,3 V sale de `VREFINT`**, sin hardware — su circuito existe en la placa pero **no se usa**, por
    lo explicado más abajo. Validado en banco el **2026-08-17**: las dos medidas coinciden con el
    tester y **el reposo no se movió**, que era lo que confirmaba que el ADC queda en deep power-down.
-11. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
+11. 🔨 **Contador de pulsos CNT0** — ⚠ **escrito y compilando, PENDIENTE DE VALIDAR EN BANCO**
+   (al 2026-08-17). `Application/drivers/drv_pulsos.{h,c}` y el comando `cnt`. EXTI por flanco de
+   bajada en PA12; **todo el antirrebote lo hace el hardware**. Ver la sección propia más abajo.
+12. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
    suelda; de cada uno hay que pedirle los pines, y de algunos algo más:
 
    | Módulo | Qué hay que preguntar cuando toque |
    |---|---|
-   | **Contador de pulsos** (PA12, EXTI) | Tipo de sensor y si tiene antirrebote por hardware; frecuencia máxima esperada. ⚠ Y si el contacto queda cerrado en reposo: un pull-up interno contra un contacto cerrado son 82 µA — ver la lección de `SD_DET` |
    | **Modem LTE** (UART4) | Modelo, baudios, y qué pines de control tiene además del TX/RX (power key, reset, status) |
    | **Electroválvula** | **Si es biestable (latch, dos bobinas con pulsos) o continua**, y con qué la maneja: puente H, driver, o un GPIO. Cambia el driver por completo |
 
-12. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
+13. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
    hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
-13. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
+14. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
    que conviene hacer una sola vez, al final, en vez de rehacerlas cada vez que entra un periférico:
    la **sincronización del RTC interno desde el MCP79410**, el período definitivo de `tkCtl` junto
    con el watchdog y el poleo de `TERM_SENSE` (los tres comparten la misma vuelta), el
    comportamiento del parser de comandos, y `BOR_LEV`.
-14. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+15. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
 **Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
 (`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
@@ -705,7 +707,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | Medida del riel de 3,3 V | **existe pero NO se usa** (`EN_SENS3V3` PB2, divisor 56K/56K, PC5): el riel sale de `VREFINT` |
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | microSD | PA15 `SD_SS`, PC10 `SD_SCK`, PC11 `SD_MISO`, PC12 `SD_MOSI` → **SPI3** (NSS por software), **PD2 `SD_DET`** (a GND con tarjeta, pull-up interno), **PB3 `EN_PWR_SD`** ⚠ **0 = prende** (SI2301 canal P, pull-up de 100 K) |
-| Contador de pulsos CNT0 | PA12 (EXTI) |
+| Contador de pulsos CNT0 | **PA12 `CNT0`**, EXTI por flanco de **bajada**, **sin pull interno**. Contacto seco → opto (open-collector con pull-up de 10K a 3V3) → RC de 4K7 / 1 µF → **74AUP1G17** (Schmitt, no inversor) |
 | Analógicas | PC5, PB0 |
 | LED, LED2 | PB9, PA2 (en el `.ioc`; no figuran en el CSV) |
 
@@ -746,6 +748,7 @@ Application/
 │               drv_ina3221.{h,c}       medida de 4-20 mA + riel de la fuente lineal
 │               drv_sd.{h,c}            tarjeta microSD por SPI (sectores, sin FatFs)
 │               drv_adc.{h,c}           rieles de 12 V (divisor) y 3,3 V (VREFINT)
+│               drv_pulsos.{h,c}        contador de pulsos CNT0 por EXTI
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
@@ -1096,6 +1099,102 @@ Y que **no** haya ninguna llamada a `HAL_RCCEx_PeriphCLKConfig()` con `RCC_PERIP
 confirma que `ADCSEL` ni se toca. Si el error de la GUI impide generar, subir el `N` de PLLSAI1 a 16
 —con MSI a 4 MHz da un VCO de 64 MHz, el mínimo válido— alcanza para acallar la validación sin
 encender nada.
+
+### 🔨 El contador de pulsos CNT0 — pendiente de validar en banco (2026-08-17)
+
+`Application/drivers/drv_pulsos.{h,c}`, comando `cnt`. Compila en Debug y Release; **falta probarlo**.
+
+**Toda la parte difícil de contar pulsos está resuelta en el hardware**, y por eso el driver es corto.
+El esquemático es `Circuito del contador de pulsos.png` ("CAUDALIMETRO PULSOS"):
+
+```
+12VRAIL --R39 2K2--\                        3V3RAIL
+                    JP13 --+--- R41 10K ---+   |
+3V3RAIL --R38 330--/       |               |  R40 10K
+                           |  U14          |   |
+                        ánodo |\   colector +---+--- R42 4K7 --+--- U13 --> CNT0 (PA12)
+                              | \                              |   74AUP1G17
+   JP12 (contacto) -----------+cátodo   emisor --> GND        C17 1uF     (Schmitt,
+                           |                                   |           NO inversor)
+                        C18 10pF                              GND
+                           |
+                          GND
+```
+
+**`JP13` elige de qué riel se alimenta el LED del opto**, y es la decisión de energía del circuito
+(ver más abajo). `R41` es el pull-up del contacto: mantiene el cátodo al mismo potencial que el ánodo
+mientras el contacto está abierto, así el LED queda apagado y el nodo definido. `C18` de 10 pF es
+filtro de RF/ESD en el borne de entrada, **no** antirrebote: con 10K da 0,1 µs.
+
+**Polaridad:** contacto cerrado → conduce el opto → el nodo cae → el 1G17 **no invierte**, así que
+**PA12 queda en BAJO mientras el contacto está cerrado**. Se cuenta el **flanco de bajada**, que es el
+cierre.
+
+**El filtro no es simétrico**, y eso fija el techo de frecuencia: descarga por 4K7 (τ = 4,7 ms) y carga
+por 10K + 4K7 (τ = 14,7 ms). Con los umbrales del 74AUP1G17 a 3,3 V (VT+ ≈ 1,8 V, VT− ≈ 1,2 V):
+
+| | |
+|---|---|
+| Cierre más corto que se detecta | ~4,8 ms |
+| Apertura más corta que se detecta | ~11,6 ms |
+| Período mínimo | ~16 ms → **techo absoluto ~60 Hz** |
+
+O sea **antirrebote de hardware de 5 a 12 ms** —de sobra para un reed, que rebota menos de 2 ms— y
+**hasta unos 30 Hz con margen**, que es lo que da un caudalímetro (confirmado por Pablo el
+2026-08-17). Por encima de eso el filtro se come pulsos y no hay firmware que lo arregle. **No agregar
+antirrebote por software:** sólo daría otra forma de perder pulsos.
+
+**Tres cosas que conviene no tener que volver a averiguar:**
+
+- **El pin va sin pull interno.** La salida del 1G17 es CMOS push-pull. Un pull interno pelearía
+  contra él y costaría 82 µA cada vez que el driver empuja al lado contrario: un **pull-up** mientras
+  el contacto está cerrado, y un **pull-down las 24 horas**, porque el reposo es el nivel alto. Por eso
+  el comando `cnt` imprime `PUPDR` — para cazar una regeneración de CubeMX que lo meta de vuelta.
+  Lo que sí consume, y es de hardware, son los **330 µA** de `R40` mientras el contacto está cerrado;
+  como en reposo está abierto, eso se paga sólo durante el pulso. **Pero el LED del opto consume mucho
+  más — ver abajo.**
+- **EXTI y no un timer, y no por comodidad.** Los LPTIM son los únicos que siguen contando en Stop 2,
+  pero **PA12 no es entrada de ningún LPTIM**. PA12 sí es `TIM1_ETR`, pero TIM1 cuelga de APB2, que en
+  Stop 2 no tiene reloj. Así que cada pulso despierta al micro; a la frecuencia de un caudalímetro es
+  despreciable.
+- **Ningún pulso se pierde en el `__disable_irq()` del tickless**, a diferencia de lo que le pasaba a
+  los bytes del USART: la EXTI **latchea** el flanco, así que la interrupción queda demorada, no
+  perdida. Se perdería sólo si llegaran dos pulsos dentro de esa ventana de ~100 µs.
+
+**⚠ `JP13` es una decisión de energía, y el costo por cierre es de milliamperes, no de microamperes.**
+Con el contacto **cerrado** el LED del opto conduce, y la corriente la fija la resistencia de la rama
+elegida:
+
+| `JP13` | Corriente del LED | Potencia del cierre | Equivalente en el riel de 3,3 V |
+|---|---|---|---|
+| **12 V** (`R39` 2K2) | (12 − 1,2)/2K2 = **4,9 mA** | 59 mW | **~18 mA** si el riel de 12 V sale de un elevador |
+| **3,3 V** (`R38` 330) | (3,3 − 1,2)/330 = **6,4 mA** | 21 mW | 6,4 mA |
+
+O sea que la posición de 3,3 V cuesta **un tercio de la energía** aunque su corriente sea mayor. A
+cambio, la de 12 V le da al contacto seco una tensión de mojado mucho mejor, que es lo que rompe la
+película de óxido de un reed y hace que el contacto sea confiable después de meses parado. **La
+elección es de Pablo y es de campo, no de firmware** — el driver anda igual en las dos posiciones,
+porque el tiempo lo fijan `R40`, `R42` y `C17`, del otro lado del opto.
+
+Lo que sí hay que hacer es la cuenta con el ciclo de trabajo real del caudalímetro: si el reed queda
+cerrado el 5 % del tiempo, la rama de 12 V son **~900 µA de promedio**, contra los ~5 µA del micro
+dormido. Si la cuenta apretara, la palanca es subir `R39`: un opto con CTR ≥ 50 % satura de sobra con
+1 mA, porque del otro lado sólo tiene que hundir los 330 µA de `R40`.
+
+**⚠ Y una que sí queda anotada como pendiente: cada despertada prematura atrasa el tick.** El port del
+tickless descarta el resto de la división al convertir cuentas del LPTIM en ticks —está dicho en
+`port_lptim_tick.c`— y son hasta 0,98 ms por despertada, ~0,49 ms en promedio. Con el LPTIM
+despertando solo eso no ocurre nunca; **con el contador de pulsos ocurre en cada pulso**:
+
+| Frecuencia de pulsos | Atraso del tick |
+|---|---|
+| 1 Hz | 0,05 % |
+| 30 Hz | **~1,5 %** |
+
+No rompe nada —los timestamps los estampa el RTC, no el tick— pero estira todos los `vTaskDelay()` en
+esa proporción. **El arreglo es arrastrar el resto de una despertada a la siguiente**, unas pocas
+líneas en `vPortSuppressTicksAndSleep()`. Va aparte, en su propio commit: toca el port, que está
+validado desde `v0.0.5`, y acá se cambia una variable por vez.
 
 ### ⚠ `printf` con `%f`: hay que habilitarlo, y el síntoma de que falta es que no imprime NADA
 
