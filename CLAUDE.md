@@ -40,11 +40,12 @@ PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal**
 `TERM_SENSE` en PB5), el **bus I2C2** (PB13/PB14, pull-up de 10 kΩ) con la **EEPROM M24M01**, el
 **RTC MCP79410 con su pila** y el **INA3221** que mide los lazos de 4-20 mA, el **RS485** con su
 transceiver **SP3485** y los tres rieles conmutados, la **fuente lineal de los sensores 4-20 mA**
-(`EN_PWR_SENS420`, PB12) y la **microSD** con su alimentación conmutada. Falta poblar: modem LTE,
-contador de pulsos, las analógicas de 3,3 y 12 V, y la electroválvula.
+(`EN_PWR_SENS420`, PB12), la **microSD** con su alimentación conmutada y la **medida de los rieles**
+(los dos load switches con sus divisores y sus seguidores TLV8802). Falta poblar: modem LTE,
+contador de pulsos y la electroválvula.
 
 Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola, el
-bus I2C, el RS485, la medida de 4-20 mA y la microSD**. El resto del mapa de pines de
+bus I2C, el RS485, la medida de 4-20 mA, la microSD y los rieles por ADC**. El resto del mapa de pines de
 `interfases_pines.csv` es el diseño completo de R001, no hardware presente — no tiene sentido
 escribir drivers contra periféricos que todavía no están montados.
 
@@ -63,6 +64,7 @@ entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
 | `v0.0.8` | **RS485 (SP3485) con DE por hardware** y los 3 rieles conmutados. De paso, el tickless dejó de comerse bytes |
 | `v0.0.9` | **INA3221: medida de 4-20 mA** y el riel de la fuente lineal de sensores. Validado contra un calibrador de 0 a 20 mA |
 | `v0.0.10` | **microSD por SPI3, etapa 1** (la tarjeta, sin FatFs): energía conmutada, sectores leídos y escritos, y el reposo intacto |
+| `v0.0.11` | **Medida de los rieles por ADC1** — 12 V por divisor y 3,3 V por `VREFINT`. Validado contra el tester, y el reposo sin moverse |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
   `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
@@ -316,12 +318,11 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    sectores. ⏸ **La etapa 2 —FatFs encima— la difirió Pablo el 2026-08-14 a las capas de
    aplicación**, junto con Modbus y el registro de muestras. El hardware de la SD está cerrado; lo
    que falta es política de datos, no bring-up. **No adelantarla.**
-10. 🔨 **Medida de los rieles por ADC1** — ⚠ **escrito y compilando, PENDIENTE DE VALIDAR EN BANCO**
-   (al 2026-08-15). `Application/drivers/drv_adc.{h,c}` y el comando `vin`. El riel de **12 V** va por
-   PB0 (`ADC1_IN15`) con divisor 56K/10K y load switch en PC4; el de **3,3 V sale de `VREFINT`**,
-   sin hardware — su circuito existe en la placa pero **no se usa**, por lo explicado más abajo.
-   Falta contrastar contra el tester y **remedir el reposo**: el driver deja el ADC en deep
-   power-down y eso sólo se comprueba midiendo.
+10. ✅ **Medida de los rieles por ADC1** (`v0.0.11`) — `Application/drivers/drv_adc.{h,c}` y el comando
+   `vin`. El riel de **12 V** va por PB0 (`ADC1_IN15`) con divisor 56K/10K y load switch en PC4; el de
+   **3,3 V sale de `VREFINT`**, sin hardware — su circuito existe en la placa pero **no se usa**, por
+   lo explicado más abajo. Validado en banco el **2026-08-17**: las dos medidas coinciden con el
+   tester y **el reposo no se movió**, que era lo que confirmaba que el ADC queda en deep power-down.
 11. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
    suelda; de cada uno hay que pedirle los pines, y de algunos algo más:
 
@@ -997,9 +998,11 @@ Dos cosas generales que quedan de acá:
   Si va a estarlo la mayor parte del tiempo, las opciones son conmutarlo con el periférico —como
   acá—, o pedir uno externo de 1 MΩ, que costaría 3 µA.
 
-### 🔨 Los rieles por ADC1 — pendiente de validar en banco (2026-08-15)
+### ✅ Los rieles por ADC1 (`v0.0.11`)
 
-`Application/drivers/drv_adc.{h,c}`, comando `vin`. Compila en Debug y Release; **falta probarlo**.
+`Application/drivers/drv_adc.{h,c}`, comando `vin`. **Validado en banco el 2026-08-17**: las dos
+medidas coinciden con el tester y el reposo quedó igual que antes, que es lo único que confirma que el
+ADC vuelve a *deep power-down* entre medidas.
 
 **⚠ El riel de 3,3 V NO se puede medir con un ADC referenciado a él mismo.** R001 trae el circuito
 —divisor 56K/56K, load switch en PB2, seguidor TLV8802, PC5— pero la cuenta se cancela sola:
@@ -1042,6 +1045,27 @@ riel. Por eso `drv_adc_v12_mv()` lee **siempre los dos canales**, VREFINT primer
 Al despertar hay que reponer el regulador, esperar sus 20 µs y **restaurar el factor de calibración**,
 que ese modo no conserva — sin lo último la medida sale igual, pero con el error que la calibración
 venía a corregir. Es un bug callado y por eso está explícito en `prvAdcDespertar()`.
+
+#### ⚠ Medir el nodo del divisor con el tester: qué significa un "riel + 0,6 V"
+
+Anotado el **2026-08-17**, midiendo el punto medio del divisor de 12 V con el tester: dio **3,7 V**,
+cuando con 56K/10K y 12,2 V de entrada **tiene** que dar `12,2 x 10 / 66 = 1,85 V`.
+
+**3,7 V no es un número cualquiera: es 3,1 + 0,6, un diodo por encima del riel que alimenta al
+TLV8802.** Esa es la firma de un **diodo de protección de entrada del operacional conduciendo hacia su
+propio VDD**: el nodo no está ahí porque el divisor lo ponga, está *clavado* ahí porque el clamp no lo
+deja subir más. Para que pase, el divisor tendría que estar entregando bastante más que eso — con 56K
+arriba, la de abajo tendría que ser de ≥24K; el error típico es tenerlas invertidas.
+
+Y no sería sólo una lectura mala: mete corriente desde los 12 V hacia el riel de 3,3 V a través del
+operacional, y le pone al TLV8802 una entrada por encima de su máximo absoluto.
+
+**Cómo se descarta en un segundo, y por qué acá no era eso:** si el nodo estuviera realmente en 3,7 V
+durante la conversión, el seguidor saturaría contra su riel y **`vin` informaría ~20 V, no 12,2**.
+Como la medida sale bien, en el instante en que el ADC convierte el nodo está en 1,85 V. Los 3,7 V
+salieron de otra condición —el nodo queda flotando con `EN_SENS12V` apagado, y ahí el tester lee
+cualquier cosa—. La verificación definitiva, si alguna vez vuelve a aparecer, es con la placa **sin
+alimentación** y el óhmetro: 10K a GND y 56K contra la salida del TPS22810.
 
 #### La trampa de CubeMX: el "ADC Clock Mux" queda en `PLLSAI1R` y está bien
 
