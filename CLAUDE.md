@@ -509,12 +509,30 @@ los que corresponden.
 #### ⚠ Con el tickless andando, el SWD se pone difícil
 
 El micro pasa **más del 98 % del tiempo en Stop 2, donde el SWD está muerto.** Un intento de conectar
-en `Hot plug` va a fallar con "no target found" **aunque el firmware esté perfecto**. No es la placa.
+en `Normal` o en `Hot plug` va a fallar con **`Error: No STM32 target found`** aunque el firmware esté
+perfecto. No es la placa.
 
-Hay que tomar el micro en el reset: en CubeProgrammer, *Reset mode* → **`Hardware reset`** o
-**`Core reset`** (no `Hot plug`); por CLI, `mode=UR`. La launch config de CubeIDE ya usa
-`connect_under_reset`, así que desde el IDE anda sola. Ver también la sección del programador: si
-además queda NRST trabado, el síntoma se parece pero la causa es otra.
+**⚠ El síntoma que confunde: se VE el reset y aun así falla.** Le pasó a Pablo el **2026-08-18**. En
+`Normal`, CubeProgrammer **pulsa NRST** —de ahí el reset que se ve— y recién después intenta
+conectarse; para entonces el firmware ya arrancó, llegó al scheduler y se durmió. La carrera está
+perdida antes de empezar.
+
+**El campo que lo arregla es `Mode`, no `Reset mode`,** y es fácil confundirlos porque están uno al
+lado del otro en el panel del ST-LINK:
+
+| Campo | Qué dice | Cuál va |
+|---|---|---|
+| **`Mode`** | **cuándo** se conecta | **`Under reset`** — mantiene NRST asertado mientras establece la conexión, así que toma al micro antes de que ejecute una sola instrucción |
+| `Reset mode` | qué tipo de reset | `Hardware reset` |
+| `Frequency` | — | `950 kHz`, nunca `Auto` (ver el punto 4 de la sección del programador) |
+
+Por CLI es `mode=UR`. La launch config de CubeIDE ya usa `connect_under_reset`, así que **desde el IDE
+esto no se ve nunca**. Ver también la sección del programador: si además queda NRST trabado, el
+síntoma se parece pero la causa es otra.
+
+De yapa, al conectar CubeProgrammer informa `Debug in Low Power mode enabled`: pone los bits de
+`DBGMCU_CR` para que el debug sobreviva a los modos de bajo consumo. O sea que **el problema es sólo
+el primer enganche** — una vez adentro, ya no se le escapa aunque el firmware duerma.
 
 #### FreeRTOS desde CubeMX: lo que ya se aprendió (paso 2)
 
