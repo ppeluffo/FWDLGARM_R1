@@ -52,7 +52,7 @@ electroválvula**. El resto del mapa de pines de
 escribir drivers contra periféricos que todavía no están montados.
 
 El proyecto **se borró y se rehízo de cero el 2026-08-10** (ver control de versiones), y desde
-entonces avanzó en doce etapas, todas validadas en banco y etiquetadas en git:
+entonces avanzó en trece etapas, todas validadas en banco y etiquetadas en git:
 
 | Tag | Estado |
 |---|---|
@@ -68,6 +68,7 @@ entonces avanzó en doce etapas, todas validadas en banco y etiquetadas en git:
 | `v0.0.10` | **microSD por SPI3, etapa 1** (la tarjeta, sin FatFs): energía conmutada, sectores leídos y escritos, y el reposo intacto |
 | `v0.0.11` | **Medida de los rieles por ADC1** — 12 V por divisor y 3,3 V por `VREFINT`. Validado contra el tester, y el reposo sin moverse |
 | `v0.0.12` | **Contador de pulsos CNT0 por EXTI** — el antirrebote lo hace todo el hardware. La falla que costó el bring-up era del optoacoplador, no del firmware |
+| `v0.0.13` | **Electroválvula TOYI** — el servo abre y cierra, y el reposo quedó en los mismos 6 µA. Con esto **todo el hardware poblado tiene driver** |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
   `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
@@ -330,10 +331,10 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    `cnt`. EXTI por flanco de bajada en PA12; **todo el antirrebote lo hace el hardware**. Validado en
    banco el **2026-08-18**, después de que Pablo corrigiera el optoacoplador: durante el bring-up el
    colector no bajaba de 2,53 V y el firmware no tenía nada que ver. Ver la sección propia más abajo.
-12. 🔨 **Electroválvula TOYI** — ⚠ **escrita y compilando, PENDIENTE DE VALIDAR EN BANCO**
-   (al 2026-08-18). `Application/drivers/drv_valvula.{h,c}` y el comando `ev`. Es un **servo**, no una
-   biestable: `EN_EV_TOYI` (PA6) la alimenta y `CTL_EV_TOYI` (PA7) elige el sentido. Ver la sección
-   propia más abajo.
+12. ✅ **Electroválvula TOYI** (`v0.0.13`) — `Application/drivers/drv_valvula.{h,c}` y el comando `ev`.
+   Es un **servo**, no una biestable: `EN_EV_TOYI` (PA6) la alimenta y `CTL_EV_TOYI` (PA7) elige el
+   sentido. Validada en banco el **2026-08-18**: abre, cierra, y **el reposo quedó en los mismos
+   6 µA**. Ver la sección propia más abajo.
 13. **Lo que falta poblar.** Queda uno solo:
 
    | Módulo | Qué hay que preguntar cuando toque |
@@ -1231,9 +1232,15 @@ esa proporción. **El arreglo es arrastrar el resto de una despertada a la sigui
 líneas en `vPortSuppressTicksAndSleep()`. Va aparte, en su propio commit: toca el port, que está
 validado desde `v0.0.5`, y acá se cambia una variable por vez.
 
-### 🔨 La electroválvula TOYI — pendiente de validar en banco (2026-08-18)
+### ✅ La electroválvula TOYI (`v0.0.13`)
 
-`Application/drivers/drv_valvula.{h,c}`, comando `ev`. Compila en Debug y Release; **falta probarla**.
+`Application/drivers/drv_valvula.{h,c}`, comando `ev`. **Validada en banco el 2026-08-18**: el servo
+abre y cierra con la secuencia de abajo, y **el reposo quedó en los mismos 6 µA** de antes, que era lo
+único que podía delatar un load switch a medio apagar o un pin en el estado equivocado.
+
+⏳ **Lo que falta medir es la corriente del movimiento**: la de arranque, la de régimen y —la que
+importa— la de **atascamiento**. Es la que decide de qué riel puede comer el servo (ver el jumper más
+abajo) y va a ser el consumo más grande del equipo. No es bring-up: es un dato para el dimensionado.
 
 **No es una biestable: es un servo**, un motor eléctrico con dos señales y **ninguna realimentación de
 posición** (datos de Pablo, 2026-08-18):
