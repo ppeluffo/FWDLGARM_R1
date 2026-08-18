@@ -32,7 +32,7 @@ propia **R001**. Linaje: firmware AVR `FWDLGX 3.0.0` (AVR128DA64) → port a ATS
 → **STM32L4**. El criterio de diseño permanente es **ultra bajo consumo**: es un datalogger a
 batería que duerme casi todo el tiempo.
 
-### Estado actual (2026-08-14)
+### Estado actual (2026-08-18)
 
 **La placa está poblada sólo parcialmente.** Hoy hay montados: la **fuente**, el **micro**, la
 **interfaz de programación SWD** (PA13/PA14), **LEDs en PB9 y PA2**, el **cristal de 32.768 kHz en
@@ -45,12 +45,13 @@ transceiver **SP3485** y los tres rieles conmutados, la **fuente lineal de los s
 filtro RC y 74AUP1G17). Falta poblar: modem LTE y la electroválvula.
 
 Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola, el
-bus I2C, el RS485, la medida de 4-20 mA, la microSD y los rieles por ADC**. El resto del mapa de pines de
+bus I2C, el RS485, la medida de 4-20 mA, la microSD, los rieles por ADC y el contador de pulsos**. El
+resto del mapa de pines de
 `interfases_pines.csv` es el diseño completo de R001, no hardware presente — no tiene sentido
 escribir drivers contra periféricos que todavía no están montados.
 
 El proyecto **se borró y se rehízo de cero el 2026-08-10** (ver control de versiones), y desde
-entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
+entonces avanzó en doce etapas, todas validadas en banco y etiquetadas en git:
 
 | Tag | Estado |
 |---|---|
@@ -65,6 +66,7 @@ entonces avanzó en seis etapas, todas validadas en banco y etiquetadas en git:
 | `v0.0.9` | **INA3221: medida de 4-20 mA** y el riel de la fuente lineal de sensores. Validado contra un calibrador de 0 a 20 mA |
 | `v0.0.10` | **microSD por SPI3, etapa 1** (la tarjeta, sin FatFs): energía conmutada, sectores leídos y escritos, y el reposo intacto |
 | `v0.0.11` | **Medida de los rieles por ADC1** — 12 V por divisor y 3,3 V por `VREFINT`. Validado contra el tester, y el reposo sin moverse |
+| `v0.0.12` | **Contador de pulsos CNT0 por EXTI** — el antirrebote lo hace todo el hardware. La falla que costó el bring-up era del optoacoplador, no del firmware |
 
 - `SystemClock_Config()`: **MSI (range 6 = 4 MHz) → PLL `PLLM=1`, `PLLN=30`, `/2` → 60 MHz**,
   `FLASH_LATENCY_3`, voltage scale 1, AHB/APB1/APB2 sin divisor. El **SYSCLK sigue viniendo del MSI**;
@@ -323,9 +325,10 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    **3,3 V sale de `VREFINT`**, sin hardware — su circuito existe en la placa pero **no se usa**, por
    lo explicado más abajo. Validado en banco el **2026-08-17**: las dos medidas coinciden con el
    tester y **el reposo no se movió**, que era lo que confirmaba que el ADC queda en deep power-down.
-11. 🔨 **Contador de pulsos CNT0** — ⚠ **escrito y compilando, PENDIENTE DE VALIDAR EN BANCO**
-   (al 2026-08-17). `Application/drivers/drv_pulsos.{h,c}` y el comando `cnt`. EXTI por flanco de
-   bajada en PA12; **todo el antirrebote lo hace el hardware**. Ver la sección propia más abajo.
+11. ✅ **Contador de pulsos CNT0** (`v0.0.12`) — `Application/drivers/drv_pulsos.{h,c}` y el comando
+   `cnt`. EXTI por flanco de bajada en PA12; **todo el antirrebote lo hace el hardware**. Validado en
+   banco el **2026-08-18**, después de que Pablo corrigiera el optoacoplador: durante el bring-up el
+   colector no bajaba de 2,53 V y el firmware no tenía nada que ver. Ver la sección propia más abajo.
 12. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
    suelda; de cada uno hay que pedirle los pines, y de algunos algo más:
 
@@ -1100,9 +1103,11 @@ confirma que `ADCSEL` ni se toca. Si el error de la GUI impide generar, subir el
 —con MSI a 4 MHz da un VCO de 64 MHz, el mínimo válido— alcanza para acallar la validación sin
 encender nada.
 
-### 🔨 El contador de pulsos CNT0 — pendiente de validar en banco (2026-08-17)
+### ✅ El contador de pulsos CNT0 (`v0.0.12`)
 
-`Application/drivers/drv_pulsos.{h,c}`, comando `cnt`. Compila en Debug y Release; **falta probarlo**.
+`Application/drivers/drv_pulsos.{h,c}`, comando `cnt`. **Validado en banco el 2026-08-18.** El
+firmware quedó como se había escrito: no hubo un solo cambio entre "no anda" y "anda", porque lo que
+fallaba era el optoacoplador (ver más abajo).
 
 **Toda la parte difícil de contar pulsos está resuelta en el hardware**, y por eso el driver es corto.
 El esquemático es `Circuito del contador de pulsos.png` ("CAUDALIMETRO PULSOS"):
@@ -1180,6 +1185,30 @@ Lo que sí hay que hacer es la cuenta con el ciclo de trabajo real del caudalím
 cerrado el 5 % del tiempo, la rama de 12 V son **~900 µA de promedio**, contra los ~5 µA del micro
 dormido. Si la cuenta apretara, la palanca es subir `R39`: un opto con CTR ≥ 50 % satura de sobra con
 1 mA, porque del otro lado sólo tiene que hundir los 330 µA de `R40`.
+
+#### ⚠ El opto no saturaba, y la cuenta que lo dice en dos renglones
+
+Durante el bring-up (2026-08-17) el contador no contaba nada, y el síntoma parecía de firmware: con el
+contacto cerrado el colector del opto **bajaba de 3,25 V a 2,53 V y ahí se quedaba**. El 74AUP1G17
+hacía lo correcto —2,53 V es un ALTO perfectamente válido contra su `VT−` de ~1,2 V—, así que en PA12
+no había flanco y no había nada que el driver pudiera hacer.
+
+**Lo que cierra el diagnóstico es el CTR**, y se saca con dos lecturas de tester:
+
+```
+I_LED      = (12 - 1,15) / 2K2 = 4,93 mA     <- el ánodo en 1,15 V prueba que el LED conduce
+I_colector = (3,25 - 2,53) / 10K = 72 µA     <- lo que realmente entrega el fototransistor
+CTR        = 72 µA / 4,93 mA ~= 1,5 %        <- un opto sano da entre 20 % y 600 %
+```
+
+Para hundir el nodo por debajo de 0,4 V harían falta ~285 µA. O sea que **el lado de entrada estaba
+bien y el que fallaba era el propio opto**: 1,5 % es el orden del **beta inverso** de un transistor,
+que es del 1 al 10 % del directo — la firma de un fototransistor trabajando al revés. **Pablo lo
+corrigió en la placa el 2026-08-18 y el circuito quedó andando sin tocar una línea de firmware.**
+
+La lección general, que vale para cualquier señal digital que entre por un opto: **medir el ánodo y el
+colector y sacar el CTR** separa en un minuto "el contacto no cierra" de "el opto no satura" de "el
+firmware no cuenta". Sin esa cuenta los tres se parecen.
 
 **⚠ Y una que sí queda anotada como pendiente: cada despertada prematura atrasa el tick.** El port del
 tickless descarta el resto de la división al convertir cuentas del LPTIM en ticks —está dicho en
