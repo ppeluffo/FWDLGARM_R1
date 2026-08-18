@@ -335,11 +335,11 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    Es un **servo**, no una biestable: `EN_EV_TOYI` (PA6) la alimenta y `CTL_EV_TOYI` (PA7) elige el
    sentido. Validada en banco el **2026-08-18**: abre, cierra, y **el reposo quedó en los mismos
    6 µA**. Ver la sección propia más abajo.
-13. **Lo que falta poblar.** Queda uno solo:
-
-   | Módulo | Qué hay que preguntar cuando toque |
-   |---|---|
-   | **Modem LTE** (UART4) | Modelo, baudios, y qué pines de control tiene además del TX/RX (power key, reset, status) |
+13. 🔨 **Modem LTE, etapa 1: las fuentes** — ⚠ **escrita y compilando, PENDIENTE DE VALIDAR EN BANCO**
+   (al 2026-08-18). `Application/drivers/drv_lte.{h,c}` y el comando `lte`. Sólo pone y saca niveles
+   en tres pines: `EN_LTE_DCIN` (PC13), `EN_LTE_3V8` (PA4) y `LTE_PWR` (PA5). **La etapa 2 —UART4 y
+   el ritual de encendido— viene después**, por decisión de Pablo: primero las fuentes. Ver la
+   sección propia más abajo.
 
 14. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
    hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
@@ -706,7 +706,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 |---|---|
 | SWD | PA13 SWDIO, PA14 SWCLK |
 | TERM (consola) | PB6 TX, PB7 RX → **USART1** |
-| LTE (modem) | PA0 TX, PA1 RX → **UART4** |
+| LTE (modem) | PA0 TX, PA1 RX → **UART4**. Fuentes: **PC13 `EN_LTE_DCIN`** (TPS22810, los 12 V) y **PA4 `EN_LTE_3V8`** (TPS62130), las dos EN=1 prende. **PA5 `LTE_PWR`** → transistor → `PWRKEY` (⚠ invertido: PA5=1 aprieta) |
 | RS485 (modbus) | PB10 TX, PB11 RX, **PB1 `USART3_RTS_DE`** → **USART3**, 9600 8N1, transceiver **SP3485** |
 | Rieles conmutados (TPS22819, EN=1 prende, pull-down de 100 K) | PC6 `EN_PWR_RS485`, PC7 `EN_PWR_QMBUS`, PB15 `EN_PWR_CPRES` |
 | Fuente lineal de los sensores 4-20 mA | **PB12 `EN_PWR_SENS420`** (EN=1 prende) |
@@ -759,6 +759,7 @@ Application/
 │               drv_adc.{h,c}           rieles de 12 V (divisor) y 3,3 V (VREFINT)
 │               drv_pulsos.{h,c}        contador de pulsos CNT0 por EXTI
 │               drv_valvula.{h,c}       electroválvula TOYI (servo, sin realimentación)
+│               drv_lte.{h,c}           modem LTE, etapa 1: los dos rieles y el PWRKEY
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
@@ -1311,6 +1312,78 @@ que cambió:
 - aparece el **mutex**: dos movimientos solapados serían `CTL` cambiando con el motor energizado, o
   sea el servo invirtiendo el sentido a mitad de camino. El segundo en llegar recibe `false` en vez de
   encolarse, porque encolar movimientos de una válvula no significa nada.
+
+### 🔨 El modem LTE, etapa 1: las fuentes — pendiente de validar en banco (2026-08-18)
+
+`Application/drivers/drv_lte.{h,c}`, comando `lte`. Compila en Debug y Release; **falta probarlo**.
+
+**Acá no hay comunicación con el modem**: no se manda un AT, no se lee una respuesta, no se genera el
+pulso de `PWRKEY`. Esta etapa pone y saca niveles en tres pines, que es lo que hay que validar antes
+de confiar en nada de lo que venga después. Lo pidió así Pablo: *"primero las fuentes y luego las
+líneas de datos"*.
+
+| Pin | Señal | Qué maneja |
+|---|---|---|
+| **PC13** | `EN_LTE_DCIN` | TPS22810, **EN=1 prende**: los 12 V del modem |
+| **PA4** | `EN_LTE_3V8` | TPS62130 (step-down), **EN=1 prende**: el riel de 3,8 V |
+| **PA5** | `LTE_PWR` | base de un transistor cuyo colector, con pull-up, va al `PWRKEY` |
+
+**⚠ `LTE_PWR` está invertido por el transistor.** PA5 en 1 lo hace conducir y hunde el colector: el
+`PWRKEY` del módulo ve un **BAJO**, que es su nivel activo. El reposo es **PA5 = 0**, y no sólo por el
+nivel lógico — con PA5 en 1 el transistor drena permanentemente la corriente del pull-up. Por eso el
+driver expone `drv_lte_pwrkey( bApretado )` y no "poner PA5 en alto": si algún día cambia el circuito,
+lo que hay que corregir es una línea y no todos los llamadores.
+
+⏳ **El pulso de encendido NO se genera acá** (Pablo, 2026-08-18): cuánto dura y cuándo se manda
+depende del módulo y de la política de sesiones, y eso es de la aplicación. `lte key on|off` deja
+poner el nivel a mano para poder cronometrarlo en banco.
+
+#### Una topología que el banco va a contestar sola
+
+**Un step-down no puede sacar 3,8 V de un riel de 3,3 V**, así que el TPS62130 come necesariamente de
+los 12 V. Lo que no está confirmado es si su entrada cuelga de **DCIN conmutado** o del **riel de 12 V
+crudo**, y cambia dos cosas:
+
+- si cuelga de DCIN, prender el 3V8 con DCIN apagado **no hace nada**;
+- si cuelga del riel crudo, el TPS62130 sigue consumiendo su corriente de shutdown —unos µA— aunque
+  DCIN esté cortado, y **eso se va a ver en el reposo**.
+
+Se contesta con `lte 3v8 on` con DCIN apagado y el tester en el riel de 3,8 V. Mientras tanto el orden
+que usa `drv_lte_rieles()` —**DCIN primero, 3V8 después, y al apagar al revés**— es correcto en las
+dos topologías, así que no hay que esperar la respuesta para avanzar.
+
+#### ⚠ PC13 no es un GPIO cualquiera
+
+Está en el dominio de backup, alimentado a través del power switch. El **DS11585** es explícito:
+
+> *PC13, PC14 and PC15 are supplied through the power switch. Since the switch only sinks a limited
+> amount of current (3 mA), the use of GPIOs PC13 to PC15 in output mode is limited: the speed should
+> not exceed 2 MHz with a maximum load of 30 pF. These GPIOs must not be used as current sources.*
+
+Para el `EN` de un TPS22810 está perfecto —entrada de alta impedancia, ~1 µA, señal continua— pero **el
+día que alguien quiera colgar otra cosa de PC13, la respuesta puede ser distinta**.
+
+Y hay un segundo detalle, bastante menos obvio:
+
+> *After a Backup domain power-up, PC13, PC14 and PC15 operate as GPIOs. Their function then depends
+> on the content of the RTC registers, **which are not reset by the system reset**.*
+
+O sea que si alguna vez se habilita la salida del RTC —`RTC_OUT`, la calibración, `TAMP1`, `WKUP2`—
+**PC13 deja de ser GPIO y pasa a manejarlo el RTC**, y esa configuración **sobrevive al reset del
+sistema**. El síntoma sería un modem que se prende o se apaga solo sin que ninguna línea de código lo
+toque, y no habría forma de encontrarlo mirando el firmware. Hoy está limpio
+(`hrtc.Init.OutPut = RTC_OUTPUT_DISABLE`, `main.c:529`); **no tocarlo al reconfigurar el RTC.**
+
+#### Qué hay que medir
+
+El modem va a ser **el consumidor más grande del equipo**, con picos de transmisión que ningún otro
+periférico de esta placa se acerca a pedir. Pero de esta etapa lo que importa es lo contrario: **el
+reposo tiene que seguir en los 6 µA**. Si subió, los dos sospechosos son el TPS62130 alimentado desde
+el riel crudo y un pin que quedó donde no debía.
+
+El driver **no toma candado de energía** —son tres GPIO y su estado sobrevive al Stop 2—. El
+`pwrLOCK_WAN` ya está reservado en `pwr_lock.h` esperando a la etapa 2, cuando haya una UART
+transmitiendo.
 
 ### ⚠ `printf` con `%f`: hay que habilitarlo, y el síntoma de que falta es que no imprime NADA
 

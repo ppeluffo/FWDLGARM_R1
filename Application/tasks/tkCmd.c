@@ -17,6 +17,7 @@
 #include "drv_adc.h"
 #include "drv_pulsos.h"
 #include "drv_valvula.h"
+#include "drv_lte.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -289,6 +290,7 @@ static void cmdSd( void );
 static void cmdVin( void );
 static void cmdCnt( void );
 static void cmdEv( void );
+static void cmdLte( void );
 static void cmdKeys( void );
 static void cmdReset( void );
 static void cmdReboot( void );
@@ -303,6 +305,7 @@ static void prvSdUso   ( void );
 static void prvVinUso  ( void );
 static void prvCntUso  ( void );
 static void prvEvUso   ( void );
+static void prvLteUso  ( void );
 
 /*
  * Causa del último reset, leída de RCC_CSR antes de limpiarla.
@@ -401,6 +404,9 @@ void tkCmd( void *pvParameters )
        cierre de arranque va más abajo, cuando ya hay consola para contarlo. */
     drv_valvula_init();
 
+    /* Deja los dos rieles del modem cortados y el PWRKEY suelto. */
+    drv_lte_init();
+
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
@@ -414,6 +420,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "vin",    cmdVin    );
     FRTOS_CMD_register( "cnt",    cmdCnt    );
     FRTOS_CMD_register( "ev",     cmdEv     );
+    FRTOS_CMD_register( "lte",    cmdLte    );
     FRTOS_CMD_register( "keys",   cmdKeys   );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
@@ -491,6 +498,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "vin",    "tension de los rieles: 12 V y VDDA (3V3)",              prvVinUso     },
     { "cnt",    "contador de pulsos CNT0 (PA12): cuenta y estado",       prvCntUso     },
     { "ev",     "electrovalvula TOYI: abrir, cerrar y estado",           prvEvUso      },
+    { "lte",    "modem LTE, etapa 1: los dos rieles y el PWRKEY",        prvLteUso     },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
     { "reboot", "reinicio tibio, sin tocar NRST (diagnostico)",          NULL          },
@@ -2108,6 +2116,80 @@ static void cmdEv( void )
              drv_valvula_pin_pwr_estado() ? "1 - servo ALIMENTADO" : "0 - apagado (reposo)" );
     xprintf( "  PA7 ctl    : %s\r\n",
              drv_valvula_pin_ctl_estado() ? "1 - abrir" : "0 - cerrar (reposo)" );
+}
+//------------------------------------------------------------------------------
+static void prvLteUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  lte                estado de los tres pines\r\n" );
+    xprintf( "  lte on | off       los DOS rieles en orden (no toca el PWRKEY)\r\n" );
+    xprintf( "  lte dcin on|off    SOLO EN_LTE_DCIN (PC13): los 12 V del modem\r\n" );
+    xprintf( "  lte 3v8 on|off     SOLO EN_LTE_3V8 (PA4): el TPS62130\r\n" );
+    xprintf( "  lte key on|off     SOLO LTE_PWR (PA5). on = PWRKEY apretado\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  Etapa 1: esto pone y saca niveles, nada mas. No manda ningun AT ni\r\n" );
+    xprintf( "  genera el pulso de encendido: 'key on' lo deja apretado hasta que\r\n" );
+    xprintf( "  alguien haga 'key off'.\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  El orden es DCIN primero y 3V8 despues; al apagar, al reves.\r\n" );
+    xprintf( "  Prueba pendiente: 'lte 3v8 on' con DCIN apagado dice si el TPS62130\r\n" );
+    xprintf( "  cuelga de DCIN conmutado o del riel de 12 V crudo.\r\n" );
+}
+
+static void cmdLte( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs >= 1U ) && ( argv[ 1 ] != NULL ) )
+    {
+        if( ( strcmp( argv[ 1 ], "on" ) == 0 ) || ( strcmp( argv[ 1 ], "off" ) == 0 ) )
+        {
+            bool bOn = ( argv[ 1 ][ 1 ] == 'n' );
+
+            drv_lte_rieles( bOn );
+            xprintf( "rieles del modem %s (PWRKEY sin tocar)\r\n",
+                     bOn ? "ENCENDIDOS: DCIN y despues 3V8" : "apagados: 3V8 y despues DCIN" );
+            return;
+        }
+
+        if( ( ucArgs >= 2U ) && ( argv[ 2 ] != NULL ) )
+        {
+            bool bOn = ( strcmp( argv[ 2 ], "on" ) == 0 );
+
+            if( strcmp( argv[ 1 ], "dcin" ) == 0 )
+            {
+                drv_lte_dcin( bOn );
+                xprintf( "EN_LTE_DCIN (PC13) = %u\r\n", bOn ? 1U : 0U );
+                return;
+            }
+
+            if( strcmp( argv[ 1 ], "3v8" ) == 0 )
+            {
+                drv_lte_3v8( bOn );
+                xprintf( "EN_LTE_3V8 (PA4) = %u\r\n", bOn ? 1U : 0U );
+                return;
+            }
+
+            if( strcmp( argv[ 1 ], "key" ) == 0 )
+            {
+                drv_lte_pwrkey( bOn );
+                xprintf( "LTE_PWR (PA5) = %u  ->  PWRKEY %s\r\n", bOn ? 1U : 0U,
+                         bOn ? "APRETADO (nivel bajo en el modulo)" : "suelto" );
+                return;
+            }
+        }
+
+        prvLteUso();
+        return;
+    }
+
+    /* ---- 'lte' pelado ---- */
+    xprintf( "  DCIN  PC13 : %s\r\n",
+             drv_lte_dcin_estado() ? "1 - los 12 V del modem PRENDIDOS" : "0 - cortados (reposo)" );
+    xprintf( "  3V8   PA4  : %s\r\n",
+             drv_lte_3v8_estado() ? "1 - TPS62130 habilitado" : "0 - en shutdown (reposo)" );
+    xprintf( "  PWRKEY PA5 : %s\r\n",
+             drv_lte_pwrkey_estado() ? "1 - APRETADO (el transistor conduce)" : "0 - suelto (reposo)" );
 }
 //------------------------------------------------------------------------------
 /*

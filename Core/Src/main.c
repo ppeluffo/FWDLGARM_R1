@@ -694,10 +694,11 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LED2_Pin|EN_EV_TOYI_Pin|CTL_EV_TOYI_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, EN_LTE_DCIN_Pin|EN_SENS12V_Pin|EN_PWR_RS485_Pin|EN_PWR_QMBUS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, EN_SENS12V_Pin|EN_PWR_RS485_Pin|EN_PWR_QMBUS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LED2_Pin|EN_LTE_3V8_Pin|LTE_PWR_Pin|EN_EV_TOYI_Pin
+                          |CTL_EV_TOYI_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, EN_SENS3V3_Pin|EN_PWR_SENS420_Pin|EN_PWR_CPRES_Pin|LED_Pin, GPIO_PIN_RESET);
@@ -708,19 +709,21 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(EN_PWR_SD_GPIO_Port, EN_PWR_SD_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pins : LED2_Pin EN_EV_TOYI_Pin CTL_EV_TOYI_Pin SD_SS_Pin */
-  GPIO_InitStruct.Pin = LED2_Pin|EN_EV_TOYI_Pin|CTL_EV_TOYI_Pin|SD_SS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : EN_SENS12V_Pin EN_PWR_RS485_Pin EN_PWR_QMBUS_Pin */
-  GPIO_InitStruct.Pin = EN_SENS12V_Pin|EN_PWR_RS485_Pin|EN_PWR_QMBUS_Pin;
+  /*Configure GPIO pins : EN_LTE_DCIN_Pin EN_SENS12V_Pin EN_PWR_RS485_Pin EN_PWR_QMBUS_Pin */
+  GPIO_InitStruct.Pin = EN_LTE_DCIN_Pin|EN_SENS12V_Pin|EN_PWR_RS485_Pin|EN_PWR_QMBUS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : LED2_Pin EN_LTE_3V8_Pin LTE_PWR_Pin EN_EV_TOYI_Pin
+                           CTL_EV_TOYI_Pin SD_SS_Pin */
+  GPIO_InitStruct.Pin = LED2_Pin|EN_LTE_3V8_Pin|LTE_PWR_Pin|EN_EV_TOYI_Pin
+                          |CTL_EV_TOYI_Pin|SD_SS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : EN_SENS3V3_Pin EN_PWR_SENS420_Pin EN_PWR_CPRES_Pin EN_PWR_SD_Pin
                            LED_Pin */

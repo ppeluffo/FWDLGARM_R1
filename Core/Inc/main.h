@@ -81,8 +81,14 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define EN_LTE_DCIN_Pin GPIO_PIN_13
+#define EN_LTE_DCIN_GPIO_Port GPIOC
 #define LED2_Pin GPIO_PIN_2
 #define LED2_GPIO_Port GPIOA
+#define EN_LTE_3V8_Pin GPIO_PIN_4
+#define EN_LTE_3V8_GPIO_Port GPIOA
+#define LTE_PWR_Pin GPIO_PIN_5
+#define LTE_PWR_GPIO_Port GPIOA
 #define EN_EV_TOYI_Pin GPIO_PIN_6
 #define EN_EV_TOYI_GPIO_Port GPIOA
 #define CTL_EV_TOYI_Pin GPIO_PIN_7
