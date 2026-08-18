@@ -426,22 +426,20 @@ void tkCmd( void *pvParameters )
     prvImprimirCausaReset();
 
     /*
-     * Cierre de arranque. La válvula no tiene realimentación, así que al arrancar
-     * se ASUME abierta y se la manda a cerrar: es la única forma de salir de un
-     * estado desconocido, y asumir el estado peligroso es lo correcto (ver
-     * drv_valvula.h).
+     * ⚠ Acá NO se mueve la válvula, y es a propósito (decidido por Pablo el
+     * 2026-08-18).
      *
-     * Va acá, después del banner, para que se vea que el equipo está haciendo
-     * algo durante esos 5 segundos y no parezca colgado. Bloquea a tkCmd, no al
-     * resto del sistema.
+     * La política de arranque —asumir ABIERTA y mandar un cierre— es correcta,
+     * pero es de la capa de APLICACIÓN: depende de en qué condiciones conviene
+     * mover una válvula al energizar el equipo, y eso todavía no está definido.
+     * Ponerla acá significaría 5 segundos de motor en cada reset, incluidos los
+     * diez seguidos de una sesión de flasheo y los espurios que pueda meter el
+     * watchdog cuando exista.
      *
-     * ⚠ Ojo en el banco: esto energiza el servo en CADA reset.
+     * Mientras tanto el driver arranca con el estado en "ABIERTA asumida", que
+     * `drv_valvula_estado_asumido()` deja ver, y la válvula se mueve sólo cuando
+     * alguien lo pide.
      */
-    xprintf( "valvula: cierre de arranque (%u s)...\r\n",
-             ( unsigned ) ( DRV_VALVULA_MS_RECORRIDO / 1000U ) );
-    ( void ) drv_valvula_cerrar();
-    xprintf( "valvula: cerrada\r\n" );
-
     xprintf( "cmd>" );
 
     for( ;; )

@@ -42,12 +42,12 @@ PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal**
 transceiver **SP3485** y los tres rieles conmutados, la **fuente lineal de los sensores 4-20 mA**
 (`EN_PWR_SENS420`, PB12), la **microSD** con su alimentación conmutada y la **medida de los rieles**
 (los dos load switches con sus divisores y sus seguidores TLV8802) y el **contador de pulsos** (opto,
-filtro RC y 74AUP1G17). **Falta poblar: el modem LTE.** La **electroválvula TOYI** tiene sus pines
-definidos y su driver escrito (2026-08-18), a la espera de la validación en banco.
+filtro RC y 74AUP1G17) y la **electroválvula TOYI** con su load switch (soldada, confirmado por Pablo
+el 2026-08-18). **Falta poblar un solo módulo: el modem LTE.**
 
 Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola, el
-bus I2C, el RS485, la medida de 4-20 mA, la microSD, los rieles por ADC y el contador de pulsos**. El
-resto del mapa de pines de
+bus I2C, el RS485, la medida de 4-20 mA, la microSD, los rieles por ADC, el contador de pulsos y la
+electroválvula**. El resto del mapa de pines de
 `interfases_pines.csv` es el diseño completo de R001, no hardware presente — no tiene sentido
 escribir drivers contra periféricos que todavía no están montados.
 
@@ -714,7 +714,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | microSD | PA15 `SD_SS`, PC10 `SD_SCK`, PC11 `SD_MISO`, PC12 `SD_MOSI` → **SPI3** (NSS por software), **PD2 `SD_DET`** (a GND con tarjeta, pull-up interno), **PB3 `EN_PWR_SD`** ⚠ **0 = prende** (SI2301 canal P, pull-up de 100 K) |
 | Contador de pulsos CNT0 | **PA12 `CNT0`**, EXTI por flanco de **bajada**, **sin pull interno**. Contacto seco → opto (open-collector con pull-up de 10K a 3V3) → RC de 4K7 / 1 µF → **74AUP1G17** (Schmitt, no inversor) |
-| Electroválvula TOYI (servo) | **PA6 `EN_EV_TOYI`** (TPS22810, EN=1 alimenta al servo), **PA7 `CTL_EV_TOYI`** (1 = abrir, 0 = cerrar). Sin realimentación de posición |
+| Electroválvula TOYI (servo) | **PA6 `EN_EV_TOYI`** (TPS22810, EN=1 alimenta al servo), **PA7 `CTL_EV_TOYI`** (1 = abrir, 0 = cerrar). Sin realimentación de posición; el riel del servo lo elige un jumper: 12 V o 3,3 V |
 | Analógicas | PC5, PB0 |
 | LED, LED2 | PB9, PA2 (en el `.ioc`; no figuran en el CSV) |
 
@@ -1262,22 +1262,35 @@ que `CTL = 0` es además el estado de "cerrar", que es el seguro.
 
 **⚠ El estado es una creencia, no una medición.** Nada en la placa dice si la válvula quedó abierta o
 cerrada: lo que informa el driver es **el último comando que ejecutó**. Al arrancar la incógnita es
-total, y la política de Pablo es **asumir ABIERTA y mandar un cierre**. Asumir el estado peligroso y
-corregirlo es lo correcto: si de verdad estaba abierta se cierra, y si ya estaba cerrada el comando es
-inofensivo porque el motor empuja contra el tope. Al revés —asumir cerrada— dejaría una válvula
-abierta que el firmware cree cerrada, que es el único desenlace realmente malo.
-`drv_valvula_estado_asumido()` distingue las dos situaciones, igual que la firma del MCP79410
-distingue una hora confiable de una inventada.
+total, y el driver **asume ABIERTA** —el estado peligroso— para que la corrección tenga sentido: si de
+verdad estaba abierta se cierra, y si ya estaba cerrada el comando es inofensivo porque el motor
+empuja contra el tope. Al revés —asumir cerrada— dejaría una válvula abierta que el firmware cree
+cerrada, que es el único desenlace realmente malo. `drv_valvula_estado_asumido()` distingue las dos
+situaciones, igual que la firma del MCP79410 distingue una hora confiable de una inventada.
 
-⚠ **El cierre de arranque lo manda `tkCmd` después del banner, así que el servo se energiza en CADA
-reset.** Es lo pedido, pero en banco conviene tenerlo presente cuando se reflashea diez veces
-seguidas, y en campo hay que mirarlo junto con el watchdog: un reset espurio son 5 s de motor.
+⏳ **Pero el movimiento de arranque NO lo manda el firmware de hoy** (decidido por Pablo el
+2026-08-18). Estuvo escrito en `tkCmd` un rato y se sacó: **en qué condiciones conviene mover una
+válvula al energizar el equipo es política de la capa de aplicación**, junto con el registro de
+muestras y el watchdog. Mientras eso no esté definido, un cierre automático significaría 5 s de motor
+en cada reset —incluidos los diez seguidos de una sesión de flasheo y los espurios que meta el
+watchdog cuando exista—. La válvula se mueve sólo cuando alguien lo pide. **No adelantarlo.**
 
 **Energía.** En reposo no consume nada: el load switch cortado deja al servo sin alimentar y los dos
 pines quedan en 0 contra sus pull-down. Lo que se paga son los 5 s de motor, que van a ser **la
 corriente más grande del equipo** y hay que medirlos. Durante esa ventana **el micro duerme en
 Stop 2** —los GPIO conservan su estado—, así que el driver **no toma ningún candado de energía**, por
 el mismo razonamiento que el INA3221 con su ventana de 1,4 s.
+
+**⚠ Un jumper elige de qué riel come el servo: 12 V o 3,3 V.** El firmware anda igual en las dos
+posiciones —lo único que ve es el `EN` del TPS22810— pero **cambia el modo de falla**:
+
+| Jumper | Qué implica |
+|---|---|
+| **3,3 V** | El motor comparte el riel con el micro. El pico de arranque, y sobre todo un **atascamiento** del servo, se le descuentan a la misma fuente que alimenta al STM32; si la caída alcanza, lo resetea **a mitad de movimiento**, que es justo el estado indefinido que el driver no puede detectar |
+| **12 V** | El motor queda aguas arriba del regulador, que absorbe el pico |
+
+Es la misma clase de decisión que `JP13` en el contador de pulsos: no la resuelve el firmware. Lo que
+hay que medir en banco es **la corriente de arranque y la de atascamiento**, no sólo la de régimen.
 
 **Qué se portó de FWDLGX** (`ULIBS/toyi_valves.{c,h}`): la secuencia, que era correcta, y poco más. Lo
 que cambió:

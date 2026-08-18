@@ -38,15 +38,20 @@
  * devuelve es **el último comando que ejecutó**, y eso vale mientras nada externo
  * la mueva y mientras el motor haya llegado al tope.
  *
- * Al arrancar el firmware la incógnita es total, y la política —definida por
- * Pablo— es **asumir ABIERTA y mandar a cerrar**. Asumir el estado peligroso y
- * corregirlo es lo correcto: si de verdad estaba abierta, el cierre la cierra; si
- * ya estaba cerrada, el comando es inofensivo porque el servo empuja contra el
- * tope y ahí se queda. Al revés —asumir cerrada— dejaría una válvula abierta que
- * el firmware cree cerrada, que es el único desenlace realmente malo.
+ * Al arrancar el firmware la incógnita es total. El driver **asume ABIERTA**, que
+ * es el estado peligroso, para que la corrección tenga sentido: si de verdad
+ * estaba abierta hay que cerrarla, y si ya estaba cerrada el comando de cierre es
+ * inofensivo porque el servo empuja contra el tope y ahí se queda. Al revés
+ * —asumir cerrada— dejaría una válvula abierta que el firmware cree cerrada, que
+ * es el único desenlace realmente malo.
  *
- * `drv_valvula_estado_asumido()` distingue las dos situaciones: es `true` hasta
- * que el driver ejecuta su primer movimiento de verdad. La capa de aplicación
+ * ⏳ **Pero el cierre de arranque NO lo manda este driver ni la tarea de consola**
+ * (decidido por Pablo el 2026-08-18): en qué condiciones conviene mover la válvula
+ * al energizar el equipo es política de la **capa de aplicación**, y todavía no
+ * está definida. Mientras tanto la válvula se mueve sólo cuando alguien lo pide.
+ *
+ * `drv_valvula_estado_asumido()` es lo que hace visible la diferencia: es `true`
+ * hasta que el driver ejecuta su primer movimiento de verdad. La aplicación
  * debería tratar un estado asumido con la misma desconfianza con la que trata una
  * hora de RTC sin firma válida.
  *
@@ -57,6 +62,21 @@
  * alimentación, y los dos pines quedan en 0 contra sus pull-down. Lo que se paga
  * son los 5 segundos del movimiento, con el motor girando — es la corriente más
  * grande que consume el equipo y hay que medirla en banco.
+ *
+ * ⚠ **De qué riel come el servo lo elige un jumper: 12 V o 3,3 V.** El firmware
+ * anda igual en las dos posiciones —lo único que ve es el `EN` del TPS22810— pero
+ * NO son equivalentes:
+ *
+ *   - En **3,3 V** el motor comparte el riel con el micro. El pico de arranque y
+ *     un eventual atascamiento del servo se le descuentan a la misma fuente que
+ *     alimenta al STM32, y una caída suficiente lo resetea. Peor: el reset ocurre
+ *     **a mitad de movimiento**, que es exactamente el estado indefinido que este
+ *     driver no puede detectar.
+ *   - En **12 V** el motor está aguas arriba del regulador, que absorbe el pico.
+ *
+ * O sea que la posición del jumper no cambia una línea de código pero sí cambia el
+ * modo de falla. La elección es de Pablo y es de campo; lo que hay que medir en
+ * banco es la corriente de arranque y la de atascamiento, no sólo la de régimen.
  *
  * **Durante esos 5 segundos el micro puede dormir en Stop 2 sin problema**, así
  * que este driver **no toma ningún candado de energía**: los dos pines son GPIO y
@@ -118,9 +138,9 @@ typedef enum {
  * Arranque. Deja los dos pines en 0 —servo sin alimentar, dirección en "cerrar"—
  * y el estado en **ABIERTA asumida**, que es la incógnita del arranque.
  *
- * **No mueve la válvula**: no puede, porque bloquearía 5 segundos y esto corre
- * antes de que haya consola. El cierre de arranque lo manda la tarea, llamando a
- * `drv_valvula_cerrar()` apenas puede bloquear.
+ * **No mueve la válvula**, ni acá ni en ningún otro lado del firmware de hoy: el
+ * movimiento de arranque es política de la aplicación. Ver la advertencia de
+ * arriba.
  *----------------------------------------------------------------------------*/
 void drv_valvula_init( void );
 
