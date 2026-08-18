@@ -42,7 +42,8 @@ PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal**
 transceiver **SP3485** y los tres rieles conmutados, la **fuente lineal de los sensores 4-20 mA**
 (`EN_PWR_SENS420`, PB12), la **microSD** con su alimentación conmutada y la **medida de los rieles**
 (los dos load switches con sus divisores y sus seguidores TLV8802) y el **contador de pulsos** (opto,
-filtro RC y 74AUP1G17). Falta poblar: modem LTE y la electroválvula.
+filtro RC y 74AUP1G17). **Falta poblar: el modem LTE.** La **electroválvula TOYI** tiene sus pines
+definidos y su driver escrito (2026-08-18), a la espera de la validación en banco.
 
 Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola, el
 bus I2C, el RS485, la medida de 4-20 mA, la microSD, los rieles por ADC y el contador de pulsos**. El
@@ -329,22 +330,24 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    `cnt`. EXTI por flanco de bajada en PA12; **todo el antirrebote lo hace el hardware**. Validado en
    banco el **2026-08-18**, después de que Pablo corrigiera el optoacoplador: durante el bring-up el
    colector no bajaba de 2,53 V y el firmware no tenía nada que ver. Ver la sección propia más abajo.
-12. **Lo que falta poblar** (lista dada por Pablo el **2026-08-14**). El orden lo fija él a medida que
-   suelda; de cada uno hay que pedirle los pines, y de algunos algo más:
+12. 🔨 **Electroválvula TOYI** — ⚠ **escrita y compilando, PENDIENTE DE VALIDAR EN BANCO**
+   (al 2026-08-18). `Application/drivers/drv_valvula.{h,c}` y el comando `ev`. Es un **servo**, no una
+   biestable: `EN_EV_TOYI` (PA6) la alimenta y `CTL_EV_TOYI` (PA7) elige el sentido. Ver la sección
+   propia más abajo.
+13. **Lo que falta poblar.** Queda uno solo:
 
    | Módulo | Qué hay que preguntar cuando toque |
    |---|---|
    | **Modem LTE** (UART4) | Modelo, baudios, y qué pines de control tiene además del TX/RX (power key, reset, status) |
-   | **Electroválvula** | **Si es biestable (latch, dos bobinas con pulsos) o continua**, y con qué la maneja: puente H, driver, o un GPIO. Cambia el driver por completo |
 
-13. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
+14. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
    hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
-14. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
+15. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
    que conviene hacer una sola vez, al final, en vez de rehacerlas cada vez que entra un periférico:
    la **sincronización del RTC interno desde el MCP79410**, el período definitivo de `tkCtl` junto
    con el watchdog y el poleo de `TERM_SENSE` (los tres comparten la misma vuelta), el
    comportamiento del parser de comandos, y `BOR_LEV`.
-15. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+16. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
 **Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
 (`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
@@ -711,6 +714,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | microSD | PA15 `SD_SS`, PC10 `SD_SCK`, PC11 `SD_MISO`, PC12 `SD_MOSI` → **SPI3** (NSS por software), **PD2 `SD_DET`** (a GND con tarjeta, pull-up interno), **PB3 `EN_PWR_SD`** ⚠ **0 = prende** (SI2301 canal P, pull-up de 100 K) |
 | Contador de pulsos CNT0 | **PA12 `CNT0`**, EXTI por flanco de **bajada**, **sin pull interno**. Contacto seco → opto (open-collector con pull-up de 10K a 3V3) → RC de 4K7 / 1 µF → **74AUP1G17** (Schmitt, no inversor) |
+| Electroválvula TOYI (servo) | **PA6 `EN_EV_TOYI`** (TPS22810, EN=1 alimenta al servo), **PA7 `CTL_EV_TOYI`** (1 = abrir, 0 = cerrar). Sin realimentación de posición |
 | Analógicas | PC5, PB0 |
 | LED, LED2 | PB9, PA2 (en el `.ioc`; no figuran en el CSV) |
 
@@ -720,8 +724,9 @@ Puntos a resolver contra el esquemático `Hardware/R001/` y el datasheet **DS115
 - **PB13/PB14 son `I2C2`**, no `I2C1`; **PC10–PC12 + PA15 son `SPI3`**, no `SPI2`. El CSV nombra la
   interfaz genéricamente; la instancia del periférico queda determinada por el pin. (Derivado del
   mapa de AF — confirmar en el datasheet.)
-- El CSV lista **`PA7 = NRST`**. En LQFP64 el reset es un pin dedicado; verificar qué señal es
-  realmente PA7 en el esquemático.
+- ✅ **Resuelto (2026-08-18): el CSV lista `PA7 = NRST` y es un error del CSV.** En LQFP64 el reset es
+  un pin dedicado, y Pablo confirmó que PA7 es **`CTL_EV_TOYI`**, la dirección de la electroválvula.
+  Un recordatorio más de que la fuente de verdad de los pines es Pablo, no el CSV.
 - **`PA12 = "EXTINT0"`** es el nombre lógico del contador 0; la línea EXTI física es **EXTI12**.
 - PB0 y PC5 como entradas de ADC1: confirmar los canales exactos y la referencia.
 
@@ -752,6 +757,7 @@ Application/
 │               drv_sd.{h,c}            tarjeta microSD por SPI (sectores, sin FatFs)
 │               drv_adc.{h,c}           rieles de 12 V (divisor) y 3,3 V (VREFINT)
 │               drv_pulsos.{h,c}        contador de pulsos CNT0 por EXTI
+│               drv_valvula.{h,c}       electroválvula TOYI (servo, sin realimentación)
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
@@ -1224,6 +1230,67 @@ No rompe nada —los timestamps los estampa el RTC, no el tick— pero estira to
 esa proporción. **El arreglo es arrastrar el resto de una despertada a la siguiente**, unas pocas
 líneas en `vPortSuppressTicksAndSleep()`. Va aparte, en su propio commit: toca el port, que está
 validado desde `v0.0.5`, y acá se cambia una variable por vez.
+
+### 🔨 La electroválvula TOYI — pendiente de validar en banco (2026-08-18)
+
+`Application/drivers/drv_valvula.{h,c}`, comando `ev`. Compila en Debug y Release; **falta probarla**.
+
+**No es una biestable: es un servo**, un motor eléctrico con dos señales y **ninguna realimentación de
+posición** (datos de Pablo, 2026-08-18):
+
+| Pin | Señal | Qué hace |
+|---|---|---|
+| **PA6** | `EN_EV_TOYI` | TPS22810, **EN=1 alimenta** al servo. Es *el* interruptor de energía |
+| **PA7** | `CTL_EV_TOYI` | dirección: **1 = abrir, 0 = cerrar** |
+
+Mientras está alimentado el servo se mueve hacia donde diga `CTL` y al llegar al tope se queda ahí. El
+firmware sólo le da tiempo —**5 s**— y después le corta la energía:
+
+```
+1. CTL a la dirección deseada        <- PRIMERO la dirección
+2. EN = 1                            <- recién ahí se energiza
+3. esperar 5 s                       <- el recorrido, con la tarea BLOQUEADA
+4. EN = 0
+5. CTL = 0                           <- DESPUÉS de cortar
+```
+
+**El orden de 1 y 2 no es cosmético.** Energizar antes de fijar la dirección arranca el motor hacia
+donde hubiera quedado `CTL` la vez anterior, y recién después lo hace corregir: un arranque en falso
+por movimiento. Y el paso 5 va después del 4 por lo de siempre —dejar una señal en alto contra un
+integrado sin alimentar es back-powering, la misma trampa del SPI de la microSD— con la ventaja de
+que `CTL = 0` es además el estado de "cerrar", que es el seguro.
+
+**⚠ El estado es una creencia, no una medición.** Nada en la placa dice si la válvula quedó abierta o
+cerrada: lo que informa el driver es **el último comando que ejecutó**. Al arrancar la incógnita es
+total, y la política de Pablo es **asumir ABIERTA y mandar un cierre**. Asumir el estado peligroso y
+corregirlo es lo correcto: si de verdad estaba abierta se cierra, y si ya estaba cerrada el comando es
+inofensivo porque el motor empuja contra el tope. Al revés —asumir cerrada— dejaría una válvula
+abierta que el firmware cree cerrada, que es el único desenlace realmente malo.
+`drv_valvula_estado_asumido()` distingue las dos situaciones, igual que la firma del MCP79410
+distingue una hora confiable de una inventada.
+
+⚠ **El cierre de arranque lo manda `tkCmd` después del banner, así que el servo se energiza en CADA
+reset.** Es lo pedido, pero en banco conviene tenerlo presente cuando se reflashea diez veces
+seguidas, y en campo hay que mirarlo junto con el watchdog: un reset espurio son 5 s de motor.
+
+**Energía.** En reposo no consume nada: el load switch cortado deja al servo sin alimentar y los dos
+pines quedan en 0 contra sus pull-down. Lo que se paga son los 5 s de motor, que van a ser **la
+corriente más grande del equipo** y hay que medirlos. Durante esa ventana **el micro duerme en
+Stop 2** —los GPIO conservan su estado—, así que el driver **no toma ningún candado de energía**, por
+el mismo razonamiento que el INA3221 con su ventana de 1,4 s.
+
+**Qué se portó de FWDLGX** (`ULIBS/toyi_valves.{c,h}`): la secuencia, que era correcta, y poco más. Lo
+que cambió:
+
+- el tiempo pasa de **10 s a 5 s** (dato nuevo de Pablo);
+- `vTaskDelay( 10000 / portTICK_PERIOD_MS )` → `pdMS_TO_TICKS()`, obligatorio acá (ver la sección del
+  tick);
+- los accesos a `PORTC.OUT` bajan al driver, y el `t_valve_status valve_status` que aquel header
+  **definía** —no declaraba— pasa a ser estático del `.c` con acceso por función: con `-fno-common`
+  eso daba *multiple definition* apenas el header entrara en dos `.c`;
+- aparece el **mutex**: dos movimientos solapados serían `CTL` cambiando con el motor energizado, o
+  sea el servo invirtiendo el sentido a mitad de camino. El segundo en llegar recibe `false` en vez de
+  encolarse, porque encolar movimientos de una válvula no significa nada.
 
 ### ⚠ `printf` con `%f`: hay que habilitarlo, y el síntoma de que falta es que no imprime NADA
 

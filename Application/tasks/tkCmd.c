@@ -16,6 +16,7 @@
 #include "drv_sd.h"
 #include "drv_adc.h"
 #include "drv_pulsos.h"
+#include "drv_valvula.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -287,6 +288,7 @@ static void cmdIna( void );
 static void cmdSd( void );
 static void cmdVin( void );
 static void cmdCnt( void );
+static void cmdEv( void );
 static void cmdKeys( void );
 static void cmdReset( void );
 static void cmdReboot( void );
@@ -300,6 +302,7 @@ static void prvInaUso  ( void );
 static void prvSdUso   ( void );
 static void prvVinUso  ( void );
 static void prvCntUso  ( void );
+static void prvEvUso   ( void );
 
 /*
  * Causa del último reset, leída de RCC_CSR antes de limpiarla.
@@ -394,6 +397,10 @@ void tkCmd( void *pvParameters )
        que desde acá en adelante los pulsos se cuentan solos. */
     drv_pulsos_init();
 
+    /* Deja el servo sin alimentar y la dirección en "cerrar". NO la mueve: el
+       cierre de arranque va más abajo, cuando ya hay consola para contarlo. */
+    drv_valvula_init();
+
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
@@ -406,6 +413,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "sd",     cmdSd     );
     FRTOS_CMD_register( "vin",    cmdVin    );
     FRTOS_CMD_register( "cnt",    cmdCnt    );
+    FRTOS_CMD_register( "ev",     cmdEv     );
     FRTOS_CMD_register( "keys",   cmdKeys   );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "reboot", cmdReboot );
@@ -416,6 +424,24 @@ void tkCmd( void *pvParameters )
     xprintf( "\r\n\r\n%s %s - consola TERM\r\n", FW_NOMBRE, FW_VERSION );
     xprintf( "compilado %s\r\n", FW_FECHA );
     prvImprimirCausaReset();
+
+    /*
+     * Cierre de arranque. La válvula no tiene realimentación, así que al arrancar
+     * se ASUME abierta y se la manda a cerrar: es la única forma de salir de un
+     * estado desconocido, y asumir el estado peligroso es lo correcto (ver
+     * drv_valvula.h).
+     *
+     * Va acá, después del banner, para que se vea que el equipo está haciendo
+     * algo durante esos 5 segundos y no parezca colgado. Bloquea a tkCmd, no al
+     * resto del sistema.
+     *
+     * ⚠ Ojo en el banco: esto energiza el servo en CADA reset.
+     */
+    xprintf( "valvula: cierre de arranque (%u s)...\r\n",
+             ( unsigned ) ( DRV_VALVULA_MS_RECORRIDO / 1000U ) );
+    ( void ) drv_valvula_cerrar();
+    xprintf( "valvula: cerrada\r\n" );
+
     xprintf( "cmd>" );
 
     for( ;; )
@@ -466,6 +492,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "sd",     "tarjeta microSD: energia, arranque y sectores",         prvSdUso      },
     { "vin",    "tension de los rieles: 12 V y VDDA (3V3)",              prvVinUso     },
     { "cnt",    "contador de pulsos CNT0 (PA12): cuenta y estado",       prvCntUso     },
+    { "ev",     "electrovalvula TOYI: abrir, cerrar y estado",           prvEvUso      },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
     { "reboot", "reinicio tibio, sin tocar NRST (diagnostico)",          NULL          },
@@ -2000,6 +2027,89 @@ static void cmdCnt( void )
     xprintf( "  config     : modo %lu (0=entrada), pull %lu (%s)\r\n",
              ( unsigned long ) xCfg.ulModer, ( unsigned long ) xCfg.ulPupdr,
              ( xCfg.ulPupdr == 0UL ) ? "flotante, CORRECTO" : "OJO: NO deberia tener pull" );
+}
+//------------------------------------------------------------------------------
+static void prvEvUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  ev                 estado que cree el driver y nivel de los pines\r\n" );
+    xprintf( "  ev abrir           movimiento completo de apertura (bloquea 5 s)\r\n" );
+    xprintf( "  ev cerrar          movimiento completo de cierre   (bloquea 5 s)\r\n" );
+    xprintf( "  ev pwr on|off      SOLO el load switch EN_EV_TOYI (PA6)\r\n" );
+    xprintf( "  ev ctl on|off      SOLO la direccion CTL_EV_TOYI (PA7): on=abrir\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  La valvula NO tiene realimentacion: el estado es el ultimo comando\r\n" );
+    xprintf( "  ejecutado, no una medicion. Al arrancar se asume ABIERTA y se manda\r\n" );
+    xprintf( "  un cierre.\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  'pwr' y 'ctl' saltean la secuencia y son SOLO para el banco: dejan\r\n" );
+    xprintf( "  el estado que informa el driver diciendo cualquier cosa.\r\n" );
+}
+
+static void cmdEv( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs >= 1U ) && ( argv[ 1 ] != NULL ) )
+    {
+        if( ( strcmp( argv[ 1 ], "abrir" ) == 0 ) ||
+            ( strcmp( argv[ 1 ], "cerrar" ) == 0 ) )
+        {
+            bool bAbrir = ( argv[ 1 ][ 0 ] == 'a' );
+
+            xprintf( "%s la valvula, %u s...\r\n",
+                     bAbrir ? "abriendo" : "cerrando",
+                     ( unsigned ) ( DRV_VALVULA_MS_RECORRIDO / 1000U ) );
+
+            if( bAbrir ? drv_valvula_abrir() : drv_valvula_cerrar() )
+            {
+                xprintf( "  hecho: valvula %s\r\n", bAbrir ? "ABIERTA" : "CERRADA" );
+            }
+            else
+            {
+                xprintf( "  ERROR: hay otro movimiento en curso\r\n" );
+            }
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "pwr" ) == 0 )
+        {
+            if( ( ucArgs >= 2U ) && ( argv[ 2 ] != NULL ) )
+            {
+                bool bOn = ( strcmp( argv[ 2 ], "on" ) == 0 );
+
+                drv_valvula_pin_pwr( bOn );
+                xprintf( "EN_EV_TOYI (PA6) = %s\r\n", bOn ? "1 (servo ALIMENTADO)" : "0 (apagado)" );
+                return;
+            }
+        }
+
+        if( strcmp( argv[ 1 ], "ctl" ) == 0 )
+        {
+            if( ( ucArgs >= 2U ) && ( argv[ 2 ] != NULL ) )
+            {
+                bool bOn = ( strcmp( argv[ 2 ], "on" ) == 0 );
+
+                drv_valvula_pin_ctl( bOn );
+                xprintf( "CTL_EV_TOYI (PA7) = %s\r\n", bOn ? "1 (abrir)" : "0 (cerrar)" );
+                return;
+            }
+        }
+
+        prvEvUso();
+        return;
+    }
+
+    /* ---- 'ev' pelado ---- */
+    xprintf( "  estado     : %s%s\r\n",
+             ( drv_valvula_estado() == valvulaABIERTA ) ? "ABIERTA" : "CERRADA",
+             drv_valvula_estado_asumido() ? "  (ASUMIDO: todavia no se movio)" : "" );
+    xprintf( "  movimientos: %lu desde el arranque\r\n",
+             ( unsigned long ) drv_valvula_movimientos() );
+    xprintf( "  PA6 pwr    : %s\r\n",
+             drv_valvula_pin_pwr_estado() ? "1 - servo ALIMENTADO" : "0 - apagado (reposo)" );
+    xprintf( "  PA7 ctl    : %s\r\n",
+             drv_valvula_pin_ctl_estado() ? "1 - abrir" : "0 - cerrar (reposo)" );
 }
 //------------------------------------------------------------------------------
 /*
