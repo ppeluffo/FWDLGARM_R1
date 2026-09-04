@@ -83,10 +83,12 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define EN_LTE_DCIN_Pin GPIO_PIN_13
 #define EN_LTE_DCIN_GPIO_Port GPIOC
+#define LTE_TXD_Pin GPIO_PIN_0
+#define LTE_TXD_GPIO_Port GPIOA
+#define LTE_RXD_Pin GPIO_PIN_1
+#define LTE_RXD_GPIO_Port GPIOA
 #define LED2_Pin GPIO_PIN_2
 #define LED2_GPIO_Port GPIOA
-#define EN_LTE_3V8_Pin GPIO_PIN_4
-#define EN_LTE_3V8_GPIO_Port GPIOA
 #define LTE_PWR_Pin GPIO_PIN_5
 #define LTE_PWR_GPIO_Port GPIOA
 #define EN_EV_TOYI_Pin GPIO_PIN_6

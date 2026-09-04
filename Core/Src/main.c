@@ -45,6 +45,30 @@
 #define ERR_BLINK_OFF_MS      200U
 #define ERR_PAUSE_MS         1200U
 
+/*
+ * ---------------------------------------------------------------------------
+ * PRUEBA MINIMA DE PLACA  (2026-09-02)
+ * ---------------------------------------------------------------------------
+ * En 1, main() NO llega a ninguna de las inicializaciones generadas por CubeMX
+ * ni al scheduler: se desvía a prvPruebaMinima(), que no retorna.
+ *
+ * Existe para el bring-up de una placa nueva, donde lo único que se quiere
+ * contestar es "¿la puedo programar y el micro corre?". Por eso NO usa:
+ *
+ *   - el cristal de 32.768 kHz  (el reloj sale entero del MSI interno)
+ *   - el RTC ni el LPTIM1       (los dos cuelgan del LSE)
+ *   - FreeRTOS                  (el tick del kernel también sale del LPTIM1)
+ *   - ningún periférico externo  (I2C, SPI, ADC, RS485)
+ *
+ * El .ioc queda intacto: el cristal sigue configurado, simplemente no se usa.
+ * Volver a la operación normal es poner esto en 0 y recompilar.
+ */
+#define PRUEBA_MINIMA           0
+
+#define PM_RAPIDO_MS          100U   /* etapa 1: 10 destellos rápidos, 5 Hz */
+#define PM_PAUSA_MS          1000U   /* apagón que separa las etapas         */
+#define PM_LENTO_MS           400U   /* etapa 4: latido lento, ~1,2 Hz       */
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -63,6 +87,7 @@ RTC_HandleTypeDef hrtc;
 
 SPI_HandleTypeDef hspi3;
 
+UART_HandleTypeDef huart4;
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart3;
 
@@ -88,10 +113,13 @@ static void MX_I2C2_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_SPI3_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_UART4_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-
+#if ( PRUEBA_MINIMA == 1 )
+static void prvPruebaMinima( void );
+#endif
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -167,6 +195,135 @@ static void error_delay_ms( uint32_t ms )
     }
 }
 
+#if ( PRUEBA_MINIMA == 1 )
+
+/*
+ * El mismo árbol de clocks que SystemClock_Config() pero SIN el LSE:
+ * MSI (range 6 = 4 MHz) -> PLL (M=1, N=30, /2) -> 60 MHz.
+ *
+ * Es una copia y no una llamada a la original a propósito: la original vive
+ * fuera de los bloques USER CODE y la regenera CubeMX, así que tocarla sería
+ * perder el cambio en la próxima regeneración. Acá la copia es de usar y tirar.
+ *
+ * Devuelve 0 si algo falló. NO llama a Error_Handler(): el LED tiene que
+ * destellar igual, porque lo que esta prueba contesta es "el micro corre", y
+ * eso es cierto aunque el PLL no arranque. Si falla, se sigue con el MSI a
+ * 4 MHz y se dice por la consola.
+ */
+static int prvClockSinCristal( void )
+{
+    RCC_OscInitTypeDef osc = { 0 };
+    RCC_ClkInitTypeDef clk = { 0 };
+
+    if ( HAL_PWREx_ControlVoltageScaling( PWR_REGULATOR_VOLTAGE_SCALE1 ) != HAL_OK )
+    {
+        return 0;
+    }
+
+    /* Sin RCC_OSCILLATORTYPE_LSE, sin HAL_PWR_EnableBkUpAccess() y sin
+       __HAL_RCC_LSEDRIVE_CONFIG(): el cristal no se toca ni para encenderlo. */
+    osc.OscillatorType      = RCC_OSCILLATORTYPE_MSI;
+    osc.MSIState            = RCC_MSI_ON;
+    osc.MSICalibrationValue = 0;
+    osc.MSIClockRange       = RCC_MSIRANGE_6;
+    osc.PLL.PLLState        = RCC_PLL_ON;
+    osc.PLL.PLLSource       = RCC_PLLSOURCE_MSI;
+    osc.PLL.PLLM            = 1;
+    osc.PLL.PLLN            = 30;
+    osc.PLL.PLLP            = RCC_PLLP_DIV2;
+    osc.PLL.PLLQ            = RCC_PLLQ_DIV2;
+    osc.PLL.PLLR            = RCC_PLLR_DIV2;
+
+    if ( HAL_RCC_OscConfig( &osc ) != HAL_OK )
+    {
+        return 0;
+    }
+
+    clk.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                       | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    clk.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
+    clk.AHBCLKDivider  = RCC_SYSCLK_DIV1;
+    clk.APB1CLKDivider = RCC_HCLK_DIV1;
+    clk.APB2CLKDivider = RCC_HCLK_DIV1;
+
+    if ( HAL_RCC_ClockConfig( &clk, FLASH_LATENCY_3 ) != HAL_OK )
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+/*
+ * La prueba mínima. NO retorna.
+ *
+ * Se entra desde USER CODE BEGIN Init, o sea ANTES de SystemClock_Config() y
+ * de todos los MX_*_Init(): ninguna línea generada por CubeMX llega a correr.
+ *
+ * La demora es HAL_Delay(), que anda porque el timebase de la HAL está en TIM6
+ * —no en el SysTick— y HAL_RCC_ClockConfig() rellama a HAL_InitTick() con el
+ * reloj nuevo. Si el PLL no arrancó, TIM6 se queda con el divisor de 4 MHz, que
+ * también es correcto: en los dos casos el destello sale a 2 Hz.
+ */
+static void prvPruebaMinima( void )
+{
+    uint32_t i;
+    int      iPll;
+
+    /* -----------------------------------------------------------------------
+     * ETAPA 1 - prueba de vida cruda, ANTES de tocar nada.
+     *
+     * Corre con el MSI a 4 MHz, tal cual quedó el micro después del reset, y la
+     * demora es el lazo por sondeo de error_delay_ms(): no usa TIM6, ni uwTick,
+     * ni HAL_Delay(), ni una sola interrupción. Es el mínimo absoluto que puede
+     * hacer un STM32 vivo.
+     *
+     * 10 destellos rápidos. Si NO se ven, el firmware no llegó o no corre, y no
+     * tiene sentido mirar nada de lo que sigue.
+     * --------------------------------------------------------------------- */
+    led_config();
+
+    for ( i = 0U; i < 20U; i++ )
+    {
+        HAL_GPIO_TogglePin( LED_PORT, LED_PIN );
+        error_delay_ms( PM_RAPIDO_MS );
+    }
+
+    /* Apagado largo, para que se note la frontera entre las etapas. */
+    HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_RESET );
+    error_delay_ms( PM_PAUSA_MS );
+
+    /* -----------------------------------------------------------------------
+     * ETAPA 2 - el reloj, sin el cristal. Si se colgara acá, se habrían visto
+     * los 10 destellos y después el LED queda quieto: eso ya localiza la falla.
+     * --------------------------------------------------------------------- */
+    iPll = prvClockSinCristal();
+
+    /* -----------------------------------------------------------------------
+     * ETAPA 3 - la consola. El divisor se recalcula contra el reloj que haya
+     * quedado; sin esto, si el PLL arrancó, la USART sigue con el divisor de
+     * 4 MHz y sale ilegible.
+     * --------------------------------------------------------------------- */
+    MX_USART1_UART_Init();
+
+    error_print( "\r\n\r\n=== PRUEBA MINIMA DE PLACA ===\r\n" );
+    error_print( iPll ? "reloj: MSI -> PLL, sin LSE (el cristal NO se usa)\r\n"
+                      : "reloj: [!] el PLL no arranco, sigo con MSI a 4 MHz\r\n" );
+    error_print( "LED  : PB9, latido lento de aca en mas.\r\n"
+                 "sin RTC, sin LPTIM1, sin FreeRTOS y sin perifericos externos.\r\n" );
+
+    /* -----------------------------------------------------------------------
+     * ETAPA 4 - latido permanente, con el mismo lazo por sondeo de la etapa 1.
+     * --------------------------------------------------------------------- */
+    for ( ;; )
+    {
+        HAL_GPIO_TogglePin( LED_PORT, LED_PIN );
+        error_delay_ms( PM_LENTO_MS );
+    }
+}
+
+#endif /* PRUEBA_MINIMA */
+
 /* USER CODE END 0 */
 
 /**
@@ -197,6 +354,11 @@ int main(void)
    * el divisor contra los 60 MHz.
    */
   MX_USART1_UART_Init();
+
+#if ( PRUEBA_MINIMA == 1 )
+  /* Se va acá y no vuelve. Ver el comentario del #define, arriba. */
+  prvPruebaMinima();
+#endif
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -219,6 +381,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_SPI3_Init();
   MX_ADC1_Init();
+  MX_UART4_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -606,6 +769,41 @@ static void MX_SPI3_Init(void)
 }
 
 /**
+  * @brief UART4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_UART4_Init(void)
+{
+
+  /* USER CODE BEGIN UART4_Init 0 */
+
+  /* USER CODE END UART4_Init 0 */
+
+  /* USER CODE BEGIN UART4_Init 1 */
+
+  /* USER CODE END UART4_Init 1 */
+  huart4.Instance = UART4;
+  huart4.Init.BaudRate = 115200;
+  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.StopBits = UART_STOPBITS_1;
+  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Mode = UART_MODE_TX_RX;
+  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART4_Init 2 */
+
+  /* USER CODE END UART4_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -697,8 +895,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, EN_LTE_DCIN_Pin|EN_SENS12V_Pin|EN_PWR_RS485_Pin|EN_PWR_QMBUS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LED2_Pin|EN_LTE_3V8_Pin|LTE_PWR_Pin|EN_EV_TOYI_Pin
-                          |CTL_EV_TOYI_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LED2_Pin|LTE_PWR_Pin|EN_EV_TOYI_Pin|CTL_EV_TOYI_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, EN_SENS3V3_Pin|EN_PWR_SENS420_Pin|EN_PWR_CPRES_Pin|LED_Pin, GPIO_PIN_RESET);
@@ -716,10 +913,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LED2_Pin EN_LTE_3V8_Pin LTE_PWR_Pin EN_EV_TOYI_Pin
-                           CTL_EV_TOYI_Pin SD_SS_Pin */
-  GPIO_InitStruct.Pin = LED2_Pin|EN_LTE_3V8_Pin|LTE_PWR_Pin|EN_EV_TOYI_Pin
-                          |CTL_EV_TOYI_Pin|SD_SS_Pin;
+  /*Configure GPIO pins : LED2_Pin LTE_PWR_Pin EN_EV_TOYI_Pin CTL_EV_TOYI_Pin
+                           SD_SS_Pin */
+  GPIO_InitStruct.Pin = LED2_Pin|LTE_PWR_Pin|EN_EV_TOYI_Pin|CTL_EV_TOYI_Pin
+                          |SD_SS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

@@ -32,9 +32,21 @@ propia **R001**. Linaje: firmware AVR `FWDLGX 3.0.0` (AVR128DA64) → port a ATS
 → **STM32L4**. El criterio de diseño permanente es **ultra bajo consumo**: es un datalogger a
 batería que duerme casi todo el tiempo.
 
-### Estado actual (2026-08-18)
+### Estado actual (2026-09-04)
 
-**La placa está poblada sólo parcialmente.** Hoy hay montados: la **fuente**, el **micro**, la
+> **⚠ Hay DOS placas, y hay que saber de cuál se habla.** La **placa nueva** —fabricada por Pablo,
+> estrenada el 2026-09-02— lleva la **fuente del modem rediseñada** (TPS22810 → LMR33630 en cascada),
+> y al **2026-09-04 está poblada entera**. Sobre ella se validó el firmware completo, y el riel de
+> 3,8 V del modem quedó ajustado y andando. La **placa original** (la del TPS62130 muerto) sigue en
+> el banco y sirve de instrumento de comparación — con dos placas, la sana separa "el firmware está
+> mal" de "la placa está mal" en un minuto.
+>
+> ⚠ **Lo que no cierra en la placa nueva es el reposo: 354 µA contra 40 µA de la original**, con el
+> mismo firmware. Pablo lo dejó afuera a propósito para seguir con el firmware; está anotado en la
+> sección del modem con lo que ya se sabe para acotar la búsqueda.
+
+**Lo que sigue describe el poblado de la placa ORIGINAL**, que fue el que marcó el orden del
+bring-up. Hoy hay montados: la **fuente**, el **micro**, la
 **interfaz de programación SWD** (PA13/PA14), **LEDs en PB9 y PA2**, el **cristal de 32.768 kHz en
 PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal** (PB6/PB7 más
 `TERM_SENSE` en PB5), el **bus I2C2** (PB13/PB14, pull-up de 10 kΩ) con la **EEPROM M24M01**, el
@@ -43,7 +55,8 @@ transceiver **SP3485** y los tres rieles conmutados, la **fuente lineal de los s
 (`EN_PWR_SENS420`, PB12), la **microSD** con su alimentación conmutada y la **medida de los rieles**
 (los dos load switches con sus divisores y sus seguidores TLV8802) y el **contador de pulsos** (opto,
 filtro RC y 74AUP1G17) y la **electroválvula TOYI** con su load switch (soldada, confirmado por Pablo
-el 2026-08-18). **Falta poblar un solo módulo: el modem LTE.**
+el 2026-08-18). **Falta poblar un solo módulo: el modem LTE** —que en la placa nueva ya tiene su
+fuente andando; falta el módulo en sí, un **WH-LTE-7S1-E**—.
 
 Esto define el alcance de lo que se puede validar en banco: **clock, LSE, LED, SWD, la consola, el
 bus I2C, el RS485, la medida de 4-20 mA, la microSD, los rieles por ADC, el contador de pulsos y la
@@ -200,6 +213,67 @@ Otros dos registros útiles en el mismo viaje, y cómo leerlos:
 | `FLASH_SR` | `0x40022010` | `0` = sin flags pegados (`WRPERR`, `PGSERR`, `PROGERR`) ni ocupado. Si no es 0, el controlador de flash quedó en falla. |
 | `RCC_CSR`  | `0x40021094` | Bits 31-25, las banderas de reset (son **acumulativas** hasta que se limpian con `RMVF`, así que ver varias juntas es normal). Los bits `[11:8]` son el `MSISRANGE`: acá tienen que dar `6` (4 MHz), que es lo que espera `SystemClock_Config()`. |
 
+**6. Y la causa más tonta de todas, que costó una tarde el 2026-09-02: el CONECTOR del cable a la
+placa.** Placa nueva, sin estrenar. Los síntomas fueron, en este orden: `failed to erase memory` con
+la tensión perfecta, después `Unable to get core ID` **en los tres modos de conexión**, y el LED del
+dongle parpadeando rojo/verde sin parar. Todo eso mientras `Voltage` informaba 3,24 V correctos —
+porque **`VAPP` se mide en el conector y no dice nada de si `SWDIO`/`SWCLK` llegan al micro**.
+
+Lo que hay que quedarse de acá no es "revisá el cable", es el **método**, porque los tres puntos
+anteriores mandaron a buscar en el lugar equivocado:
+
+- **Un cambio de comportamiento en el tiempo descarta el diseño.** La placa conectó bien a la mañana
+  —se le leyeron el device ID, los option bytes y 64 KB de flash dos veces— y dejó de conectar a la
+  tarde. Eso no lo hace un circuito: lo hace un contacto. Es la misma regla que cerró lo del TPS62130.
+- **Con dos placas, la sana es un instrumento.** Bajar el *mismo binario* a la placa vieja separó en
+  un minuto "el firmware está mal" de "la placa está mal". Cuando el mismo binario falla en las dos,
+  el sospechoso es el firmware o el dongle; cuando falla en una sola, es esa placa.
+- ⚠ **Subir la tensión "por las dudas" va en la dirección equivocada.** Pasó acá: el riel se llevó de
+  3,25 a 3,35 V buscando que el borrado anduviera. El máximo absoluto son **3,6 V** y el punto 1 de
+  esta misma sección dice que el problema era la tensión **alta**. El valor bueno es **3,28 V**.
+
+**7. La asimetría "leer anda, borrar no" tiene una explicación física y conviene tenerla a mano.** El
+borrado es lo único que hace correr la **bomba de carga interna** de la flash durante mucho tiempo
+seguido: es la operación más exigente eléctricamente que sabe hacer el chip. Por eso una alimentación
+marginal, o un pin `VDD`/`VDDA`/`VBAT` mal soldado, se manifiesta primero ahí y deja las lecturas
+intactas. Si en cambio **tampoco hay `core ID`**, ya no es la bomba de carga: el SWD no está llegando
+al micro y hay que ir a la continuidad de PA13/PA14 y a las patas de alimentación.
+
+### 🔧 `PRUEBA_MINIMA`: el firmware de una línea para estrenar una placa
+
+En `main.c` (bloque *Private define*, `USER CODE BEGIN PD`) vive:
+
+```c
+#define PRUEBA_MINIMA           1     /* 0 = operación normal */
+```
+
+En 1, `main()` se desvía en `USER CODE BEGIN Init` a `prvPruebaMinima()`, que **no retorna**: no llega
+a correr **ninguna** de las inicializaciones generadas por CubeMX ni el scheduler. Se escribió el
+**2026-09-02** para estrenar la placa nueva y **conviene no borrarlo**: la próxima placa lo va a
+necesitar igual.
+
+Lo que deliberadamente **no** usa: el cristal de 32.768 kHz (el reloj sale entero del MSI, con una
+copia de `SystemClock_Config()` sin las tres líneas del LSE), el RTC, el LPTIM1, FreeRTOS, y ningún
+periférico externo. **El `.ioc` queda intacto** — el cristal sigue configurado, simplemente no se usa.
+
+**El LED cuenta hasta dónde llegó**, y ésa es toda la gracia:
+
+| Lo que se ve en PB9 | Qué significa |
+|---|---|
+| 10 destellos rápidos → pausa → latido lento | Todo bien: micro, PLL y consola |
+| 10 destellos rápidos → pausa → **quieto** | El micro corre; se cuelga configurando el reloj |
+| **Nada** | No llegó el firmware, o el micro no arranca (NRST trabado, o no se programó) |
+
+⚠ **Los destellos NO usan `HAL_Delay()`**, sino el lazo por sondeo de `error_delay_ms()`: nada de
+TIM6, `uwTick` ni interrupciones. Y la etapa 1 corre **antes de tocar el reloj**, con el MSI a 4 MHz
+tal cual quedó el micro tras el reset. Es a propósito — el destello tiene que depender de lo mínimo
+posible, porque lo que contesta es "¿el micro corre?", y eso es cierto aunque el PLL no arranque. Por
+la misma razón `prvClockSinCristal()` **no llama a `Error_Handler()`**: si el PLL falla devuelve 0, el
+LED destella igual y la consola lo dice.
+
+La consola (9600 8N1) imprime un banner por poleo, así que **es de una sola vía**: no responde a lo
+que se tipee. Los comandos vienen recién con el firmware completo.
+
 ### ✅ El LSE y CubeMX: asignar los pines NO alcanza (resuelto en `v0.0.3`)
 
 **La trampa costó una vuelta entera en este proyecto, así que conviene leerla antes de configurar
@@ -335,20 +409,26 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    Es un **servo**, no una biestable: `EN_EV_TOYI` (PA6) la alimenta y `CTL_EV_TOYI` (PA7) elige el
    sentido. Validada en banco el **2026-08-18**: abre, cierra, y **el reposo quedó en los mismos
    6 µA**. Ver la sección propia más abajo.
-13. 🔨 **Modem LTE, etapa 1: las fuentes** — ⚠ **escrita y compilando, PENDIENTE DE VALIDAR EN BANCO**
-   (al 2026-08-18). `Application/drivers/drv_lte.{h,c}` y el comando `lte`. Sólo pone y saca niveles
-   en tres pines: `EN_LTE_DCIN` (PC13), `EN_LTE_3V8` (PA4) y `LTE_PWR` (PA5). **La etapa 2 —UART4 y
-   el ritual de encendido— viene después**, por decisión de Pablo: primero las fuentes. Ver la
-   sección propia más abajo.
+13. ✅ **Modem LTE, etapa 1: la fuente** — validada en banco el **2026-09-04**, riel en **3,8 V**.
+   `Application/drivers/drv_lte.{h,c}` y el comando `lte`. Es la fuente **rediseñada** (TPS22810 →
+   LMR33630 en cascada) sobre la **placa nueva**; la vieja mató dos TPS62130. Con eso `EN_LTE_3V8`
+   (PA4) quedó sin función y el driver se simplificó a `drv_lte_power()`.
+   ⚠ **El reposo NO cumplió el criterio**: 354 µA con la placa poblada entera, contra 40 µA en la
+   original. Pablo lo dejó afuera por ahora; ver la sección propia.
+14. ✅ **Modem LTE, etapa 2: la UART4** — **validada en banco el 2026-09-04**: el módulo contesta AT.
+   UART4 a **115200** por PA0/PA1, con `lte esc` / `lte at` / `lte bridge`. El módulo es un
+   **WH-LTE-7S1-E** (Cat-1, USR IOT). Ver la sección propia — sobre todo la **secuencia de escape de
+   tres tiempos**. **Con esto todo el hardware de R001 tiene driver y se termina el bring-up.**
 
-14. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
-   hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo.
-15. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
+15. ✅ **Bajo consumo** (`v0.0.6`) — cerrado por los dos lados: el firmware con el tickless y el
+   hardware con la fuente, que bajó de 210 a 60 µA de quiescent. Ver abajo. ⚠ **Reabierto en la
+   placa nueva**: 354 µA en reposo con todo poblado, ver la sección del modem.
+16. **Pulido final, con el hardware ya terminado.** Acá van las cosas que no habilitan nada nuevo y
    que conviene hacer una sola vez, al final, en vez de rehacerlas cada vez que entra un periférico:
    la **sincronización del RTC interno desde el MCP79410**, el período definitivo de `tkCtl` junto
    con el watchdog y el poleo de `TERM_SENSE` (los tres comparten la misma vuelta), el
    comportamiento del parser de comandos, y `BOR_LEV`.
-16. **Validación en Release** — obligatoria antes de campo. Ver abajo.
+17. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
 **Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
 (`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
@@ -724,7 +804,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 |---|---|
 | SWD | PA13 SWDIO, PA14 SWCLK |
 | TERM (consola) | PB6 TX, PB7 RX → **USART1** |
-| LTE (modem) | PA0 TX, PA1 RX → **UART4**. Fuentes: **PC13 `EN_LTE_DCIN`** (TPS22810, los 12 V) y **PA4 `EN_LTE_3V8`** (TPS62130), las dos EN=1 prende. **PA5 `LTE_PWR`** → transistor → `PWRKEY` (⚠ invertido: PA5=1 aprieta) |
+| LTE (modem **WH-LTE-7S1-E**) | PA0 `LTE_TXD`, PA1 `LTE_RXD` → **UART4**. Energía: **PC13 `EN_LTE_DCIN`** (TPS22810, EN=1 prende) — es el único interruptor, la fuente es en **cascada**. **PA5 `LTE_PWR`** → transistor → power switch (⚠ invertido: PA5=1 aprieta). ~~PA4 `EN_LTE_3V8`~~ quedó **sin función** con la fuente nueva |
 | RS485 (modbus) | PB10 TX, PB11 RX, **PB1 `USART3_RTS_DE`** → **USART3**, 9600 8N1, transceiver **SP3485** |
 | Rieles conmutados (TPS22819, EN=1 prende, pull-down de 100 K) | PC6 `EN_PWR_RS485`, PC7 `EN_PWR_QMBUS`, PB15 `EN_PWR_CPRES` |
 | Fuente lineal de los sensores 4-20 mA | **PB12 `EN_PWR_SENS420`** (EN=1 prende) |
@@ -777,7 +857,7 @@ Application/
 │               drv_adc.{h,c}           rieles de 12 V (divisor) y 3,3 V (VREFINT)
 │               drv_pulsos.{h,c}        contador de pulsos CNT0 por EXTI
 │               drv_valvula.{h,c}       electroválvula TOYI (servo, sin realimentación)
-│               drv_lte.{h,c}           modem LTE, etapa 1: los dos rieles y el PWRKEY
+│               drv_lte.{h,c}           modem LTE: energia, power switch y UART4
 ├── FRTOS/      port_lptim_tick.c       overrides del port: tick por LPTIM1 + tickless
 ├── FRTOS-IO/   frtos-io.{h,c}          fd table + frtos_open/read/write/ioctl + xprintf
 │               frtos_cmd.{h,c}         ciclo de comandos
@@ -811,8 +891,8 @@ Son **dos pasos independientes** y fallan distinto: sin los *Includes* no compil
 es por **tabla con vtable** en vez de un `switch` con una función por instancia
 (`frtos_write_uart0..4`). En el AVR las cinco copias eran inevitables porque los registros de cada
 USART eran constantes de compilación; acá cada UART es un `UART_HandleTypeDef`, así que alcanza una
-fila por instancia. Los fd cuyo hardware no está poblado (`fdWAN`, `fdRS485A`, `fdI2C`, `fdNVM`)
-figuran en la tabla con `NULL`: compilan y devuelven `-1`.
+fila por instancia — `fdTERM`, `fdWAN`, `fdRS485A` y `fdI2C` ya están enganchados. El único que sigue
+con `NULL` es **`fdNVM`**: compila y devuelve `-1`.
 
 **Candados de energía (`pwr_lock.h`).** Son la política de energía del equipo, definida por Pablo:
 
@@ -1331,44 +1411,289 @@ que cambió:
   sea el servo invirtiendo el sentido a mitad de camino. El segundo en llegar recibe `false` en vez de
   encolarse, porque encolar movimientos de una válvula no significa nada.
 
-### 🔨 El modem LTE, etapa 1: las fuentes — pendiente de validar en banco (2026-08-18)
+### 🔨 El modem LTE — etapa 1 ✅ validada, etapa 2 (UART4) escrita y sin probar
 
-`Application/drivers/drv_lte.{h,c}`, comando `lte`. Compila en Debug y Release; **falta probarlo**.
+`Application/drivers/drv_lte.{h,c}`, comando `lte`. **Las dos etapas quedaron validadas en banco el
+2026-09-04**: la fuente con el riel ajustado a 3,8 V, y la UART4 hablando con el módulo. La sesión
+completa que lo cerró:
 
-**Acá no hay comunicación con el modem**: no se manda un AT, no se lee una respuesta, no se genera el
-pulso de `PWRKEY`. Esta etapa pone y saca niveles en tres pines, que es lo que hay que validar antes
-de confiar en nada de lo que venga después. Lo pidió así Pablo: *"primero las fuentes y luego las
-líneas de datos"*.
+```
+cmd>lte on
+energia del modem ENCENDIDA: EN_LTE_DCIN = 1 (PWRKEY sin tocar)
+cmd>lte esc
+secuencia de escape: +++ / a / a / +ok ...
+MODO COMANDO. Ya acepta 'lte at AT+CSQ'
+cmd>lte at AT
+'AT' -> 9 bytes:
+AT
+OK
+```
+
+**Con esto todo el hardware de R001 tiene driver**, y el bring-up se termina.
+
+Dos cosas que dice esa traza y conviene no perder:
+
+- ✅ **El módulo arranca solo al recibir energía**: no se tocó `lte key` en ningún momento. O sea que
+  **el `PWRKEY` queda para APAGAR y reiniciar, no para encender**, y eso simplifica la política de
+  sesiones — una sesión abre con `drv_lte_power(true)` y nada más.
+- **El eco está activo** (`AT+E`): los 9 bytes son `AT\r` de eco más `\r\nOK\r\n`. Hay que contar con
+  él al parsear respuestas, o apagarlo.
+
+⚠ **El módulo es un WH-LTE-7S1-E**, no el SIM7080G que se venía suponiendo. Ver la sección propia.
 
 | Pin | Señal | Qué maneja |
 |---|---|---|
-| **PC13** | `EN_LTE_DCIN` | TPS22810, **EN=1 prende**: los 12 V del modem |
-| **PA4** | `EN_LTE_3V8` | TPS62130 (step-down), **EN=1 prende**: el riel de 3,8 V |
-| **PA5** | `LTE_PWR` | base de un transistor cuyo colector, con pull-up, va al `PWRKEY` |
+| **PC13** | `EN_LTE_DCIN` | TPS22810, **EN=1 prende**: **toda** la energía del modem (topología en cascada) |
+| **PA5** | `LTE_PWR` | transistor → el power switch del módulo (**invertido**) |
+| **PA0** | `LTE_TXD` | `UART4_TX` — sale del micro |
+| **PA1** | `LTE_RXD` | `UART4_RX` |
+| ~~PA4~~ | ~~`EN_LTE_3V8`~~ | **sin función**: el `EN` del LMR33630 va atado a `VIN` |
 
 **⚠ `LTE_PWR` está invertido por el transistor.** PA5 en 1 lo hace conducir y hunde el colector: el
-`PWRKEY` del módulo ve un **BAJO**, que es su nivel activo. El reposo es **PA5 = 0**, y no sólo por el
-nivel lógico — con PA5 en 1 el transistor drena permanentemente la corriente del pull-up. Por eso el
-driver expone `drv_lte_pwrkey( bApretado )` y no "poner PA5 en alto": si algún día cambia el circuito,
-lo que hay que corregir es una línea y no todos los llamadores.
+módulo ve un **BAJO**, que es su nivel activo. El reposo es **PA5 = 0**, y no sólo por el nivel
+lógico — con PA5 en 1 el transistor drena permanentemente la corriente del pull-up. Por eso el driver
+expone `drv_lte_pwrkey( bApretado )` y no "poner PA5 en alto": si algún día cambia el circuito, lo
+que hay que corregir es una línea y no todos los llamadores.
 
-⏳ **El pulso de encendido NO se genera acá** (Pablo, 2026-08-18): cuánto dura y cuándo se manda
-depende del módulo y de la política de sesiones, y eso es de la aplicación. `lte key on|off` deja
-poner el nivel a mano para poder cronometrarlo en banco.
+⏳ **La política de encendido NO vive acá** (Pablo, 2026-08-18): cuánto dura el pulso, cuántos
+reintentos y cuándo se abre una sesión son de la capa de aplicación. El driver da las dos
+herramientas para averiguar esos números en banco: `lte key on|off` pone el nivel a mano y
+`lte key <ms>` hace un pulso cronometrado.
 
-#### Una topología que el banco va a contestar sola
+#### ✅ UART4 en el `.ioc` (Pablo, 2026-09-04)
 
-**Un step-down no puede sacar 3,8 V de un riel de 3,3 V**, así que el TPS62130 come necesariamente de
-los 12 V. Lo que no está confirmado es si su entrada cuelga de **DCIN conmutado** o del **riel de 12 V
-crudo**, y cambia dos cosas:
+Quedó así, y el árbol **compila limpio, sin un warning**:
 
-- si cuelga de DCIN, prender el 3V8 con DCIN apagado **no hace nada**;
-- si cuelga del riel crudo, el TPS62130 sigue consumiendo su corriente de shutdown —unos µA— aunque
-  DCIN esté cortado, y **eso se va a ver en el reposo**.
+```
+Mcu.IP9=UART4                    NVIC.UART4_IRQn = true, prioridad 5
+PA0 -> UART4_TX, label LTE_TXD   huart4: 115200 8N1, sin control de flujo
+PA1 -> UART4_RX, label LTE_RXD   PA4 quedó SIN ASIGNAR (analógico, menor fuga)
+```
 
-Se contesta con `lte 3v8 on` con DCIN apagado y el tester en el riel de 3,8 V. Mientras tanto el orden
-que usa `drv_lte_rieles()` —**DCIN primero, 3V8 después, y al apagar al revés**— es correcto en las
-dos topologías, así que no hay que esperar la respuesta para avanzar.
+Recordar la trampa de siempre después de regenerar: **Project → Refresh (F5) y Build**, porque una
+fuente nueva no entra sola a `objects.list`.
+
+#### La etapa 2: qué hace el firmware hoy
+
+| Comando | Qué hace |
+|---|---|
+| `lte` | estado de los pines, errores de la UART4 y candados tomados |
+| `lte on \| off` | la energía. Al prender toma `pwrLOCK_WAN` y limpia el buffer de RX |
+| `lte key on\|off` | el nivel del power switch, a mano |
+| `lte key <ms>` | un pulso cronometrado — así se averigua cuánto necesita el módulo |
+| **`lte esc`** | **la secuencia de escape a modo comando** — sin esto el módulo no entiende AT |
+| `lte at <cmd>` | manda `<cmd>` + CR y muestra la respuesta, delimitada por silencio |
+| `lte tx <texto>` | manda el texto crudo, sin CR, y escucha |
+| `lte rx <ms>` | sólo escucha |
+| `lte bridge` | **puente terminal ↔ modem**, se sale con Ctrl-D |
+
+**El puente es la herramienta que hace utilizable el bring-up**: `at` y `tx` toman una sola palabra
+—el parser corta en los espacios— así que cualquier comando AT con espacios va por ahí. ⚠ Las dos
+puntas corren a velocidades distintas, así que en una ráfaga larga la consola a 9600 pierde texto;
+para leer sin perder nada están `at` y `rx`, que juntan primero y después imprimen.
+
+La UART entró **sin una línea de código nuevo en `drv_uart`**, que es para lo que existe la tabla: una
+fila con `&huart4`, su buffer de 512 bytes y su candado. `fdWAN` dejó de ser `NULL` en la tabla de
+FRTOS-IO, así que `xfprintf( fdWAN, … )` ya funciona.
+
+#### ⚠️ La topología de la placa VIEJA: las dos fuentes son INDEPENDIENTES
+
+> ⛔ **Vale sólo para la placa actual, la del TPS62130 muerto.** El rediseño cerrado el 2026-08-20 pasa
+> a **cascada** —el convertidor cuelga del load switch— y deja esta sección obsoleta. Se conserva
+> porque es la placa que hay hoy en el banco y la que describe el `drv_lte.{h,c}` de este commit.
+> Ver "El diseño nuevo" más abajo.
+
+**`DCIN` no tiene nada que ver con el 3V8.** La entrada del TPS62130 son **los 12 V crudos de la
+batería**, no el riel conmutado por el TPS22810. Son dos ramas paralelas colgadas del mismo origen:
+
+```
+bateria 12 V --+-- TPS22810 (EN_LTE_DCIN, PC13) --> DCIN del modem
+               |
+               +-- TPS62130 (EN_LTE_3V8,  PA4 ) --> riel de 3,8 V del modem
+```
+
+Tres consecuencias, y la segunda importa más de lo que parece:
+
+1. **`lte 3v8 on` levanta el riel aunque DCIN esté apagado.** Los dos comandos son ortogonales.
+2. ⚠ **El TPS62130 consume de la batería las 24 horas, aunque su `EN` esté en 0.** La hoja de datos da
+   un shutdown current de **1,5 µA típico pero 25 µA máximo**. Contra un reposo de placa de 6 µA eso
+   es entre "se nota" y "cuadruplica el consumo del equipo entero". **Hay que medirlo en esta placa**,
+   no confiar en el típico: es el único número de esta etapa que puede obligar a cambiar el hardware.
+3. El orden de `drv_lte_rieles()` —DCIN primero, 3V8 después, y al apagar al revés— **ya no es una
+   necesidad eléctrica, es una convención**. Queda así hasta que la etapa 2 diga qué orden quiere el
+   módulo entre su `VBAT` y su `DCIN`; si pide otro, se cambia sin consecuencias.
+
+#### ⛔ El riel de 3V8 se RE-DISEÑA: se murieron DOS TPS62130 (2026-08-19)
+
+**El chip no está fallando por diseño: se está muriendo.** Dos unidades en el banco. El diagnóstico
+final del segundo fue inequívoco: `FB = 0,022 V` —o sea el lazo pidiendo todo lo que el chip pueda
+dar— con `VOUT = 0`. Un regulador vivo y habilitado responde a eso subiendo la salida hasta llegar o
+hasta su clamp de 7,4 V. Ese no respondía.
+
+**Antes de eso se descartó, midiendo, todo lo demás**, y no hay que rehacerlo:
+
+- **El montaje**: pad térmico a AGND/PGND, `AVIN`↔`PVIN`, `PVIN`↔12 V y `VOS`↔salida, las cuatro en
+  0 Ω con la placa apagada. En un VQFN el pad **no es un disipador, es el retorno de masa**, y era el
+  sospechoso número uno.
+- **El divisor**: con `Vo = 1,9 / FB = 0,4` la relación daba 4,75, exactamente la posición de 3,8 V.
+- **`SS/TR`**: 4,58 V flotando, muy por encima de la referencia.
+- **La fuente de laboratorio**: sin límite de corriente.
+
+**⚠ La firma que hay que reconocer**: el chip anda en vacío y se descompone con carga, con resultados
+**distintos cada vez**. Cuando un circuito deja de ser repetible, el sospechoso ya no es el diseño.
+
+**Por qué se murieron.** El máximo absoluto de `AVIN`/`PVIN` es **20 V** sobre un riel de 12: quedan
+8 V de margen. Se evaluaron dos causas y quedó una:
+
+1. ❌ **Enchufar la fuente de laboratorio con la placa conectada.** Era la hipótesis principal —cables
+   inductivos contra un cerámico de entrada forman un tanque que repica a casi el doble— pero **se
+   debilitó al saber que `12VRAIL` ya trae 1000 µF + 22 µF en la entrada de la placa** (Pablo,
+   2026-08-20). Ese electrolítico amortigua el tanque. Aun así, **la regla de banco vale igual: no
+   conectar ni desconectar los cables de la fuente con la salida habilitada**; se prende y se apaga
+   con el interruptor.
+2. ✅ **Girar el potenciómetro con el circuito encendido — el sospechoso que queda.** Cada pérdida de
+   contacto del cursor deja `FB` abierto, y ahí *"the device clamps the output voltage at the VOS pin
+   internally to approximately 7.4 V"* — contra un **máximo absoluto de 7 V en `VOS`**. La protección
+   misma trabaja fuera de rango, y los dos chips murieron en sesiones de ajuste.
+
+⚠ **Pero la conclusión NO es "nunca un pote": es que importa en qué pata está.** En aquel circuito
+estaba **arriba** (`VOS`→`FB`), y ahí un cursor abierto manda el lazo a fondo. **Abajo** (`FB`→GND),
+un cursor abierto deja `FB` siguiendo a `VOUT` y el lazo regula a la referencia —1,0 V en el
+LMR33630—, que es inofensivo. El diseño nuevo lo tiene abajo a propósito.
+
+#### ✅ El diseño nuevo: TPS22810 → LMR33630ADDA (esquemático cerrado el 2026-08-20)
+
+Esquemático en **`Nueva fuente 3V8.png`** (la revisión previa, con los errores, quedó en
+`Fuente de 3V8.png`). **Todavía no existe la placa**: hay que fabricarla y poblarla.
+
+```
+12VRAIL --[ TPS22810, EN_LTE_DCIN PC13 ]--> 12V_LTE_RAIL --+-- JP1 --> DCIN del modem (+ C1 470 µF)
+                                                           |
+                                                           +-- LMR33630ADDA --> JP2 --> 3V8RAIL
+```
+
+⚠ **La topología deja de ser dos ramas paralelas y pasa a ser CASCADA.** Esto **invalida la sección
+"Las dos fuentes son INDEPENDIENTES"** de más arriba y su equivalente en `drv_lte.h`, que describen la
+placa vieja. Ver el impacto en firmware al final.
+
+**`JP1` y `JP2` son excluyentes**: el modem se alimenta **o** por `DCIN` a 12 V **o** por `3V8RAIL`,
+nunca por los dos. Existen para poder intercambiar módulos sin cambiar componentes.
+
+##### Las decisiones, y por qué
+
+- **`EN` del LMR33630 va DIRECTO a `VIN`**, sin pasar por el micro. La hoja de datos lo bendice
+  (*"Can be connected directly to VIN; **Do not float**"*) y resuelve dos problemas de un saque:
+  1. ⛔ **El máximo absoluto de `EN` es `VIN + 0,3 V`.** Con `EN` en PA4 (3,3 V) y `VIN` colgando del
+     load switch, `drv_lte_3v8(true)` con DCIN apagado ponía `EN` **3,3 V por encima de `VIN`** — una
+     violación que el firmware podía provocar, y que el header viejo incluso invitaba a cometer al
+     decir que los comandos eran "ortogonales".
+  2. `EN` ya no flota durante el reset del micro, cuando PA4 está en alta impedancia.
+  Se pierde el control independiente del 3V8, que con los jumpers excluyentes **no le sirve a nadie**:
+  con `JP2` siempre se quiere el convertidor prendido, y con `JP1` queda al vicio costando su `IQ` sin
+  conmutar (24 µA típico, 34 máximo) **sólo durante las sesiones**.
+- **`PG` queda al aire y `R8` sale del BOM.** Se evaluó rutearlo a PA4 para que el firmware *sepa* en
+  vez de creer, y **Pablo lo descartó con razón**: la señal no cambiaría ninguna decisión del equipo
+  —si el modem no contesta en tres intentos la sesión falla igual— y el diagnóstico lo hace un técnico
+  con un tester. Sólo compraba una línea de log más precisa.
+  ⚠ **Si algún día se retoma: el pull-up va a `3V8RAIL`, nunca a `3V3RAIL` ni a `VCC`.** `VCC` son 5 V
+  sobre un PA4 que no los tolera; y `3V3RAIL` es el único de los tres que **sobrevive a `VIN`**, así
+  que violaría la misma llamada al pie que `EN` y drenaría ~26 µA permanentes por el clamp de `PG`
+  —la trampa del pull-up de `SD_DET` otra vez—. `VOUT` y `VCC` no pueden exceder a `VIN` por
+  construcción, y por eso son los dos que nombra la hoja de datos.
+- **`L1 = 6,8 µH`** (era 22 µH). El WEBENCH devolvió 22 µH porque se le pidió un diseño de **1 A**,
+  pero la hoja de datos advierte que *"for applications with much smaller maximum load than the
+  maximum available from the device, **the maximum device current should be used**"*, y pone un
+  **máximo** de inductancia: *"the minimum inductor ripple current must be no less than about **10% of
+  the device maximum rated current**"* — con menos ripple el control por modo corriente deja de
+  medir bien. Para 12→3,8 V a 400 kHz eso da un techo de **21,6 µH**: 22 µH es margen cero, y con la
+  tolerancia del inductor (±20 %) y de `fSW` (340-460 kHz) queda afuera. La ventana es 2,7 a 21,6 µH
+  y el valor de la tabla 9-2 de TI es 6,8. **`Isat` ≥ 4,1 A (`ILIMIT` máx), ideal ≥ 5,05 A (`ISC`
+  máx)** — elegido **Bourns `SRP6540-6R8M`** (5,5 A, 49,5 mΩ, 4 mm de alto, ~US$ 0,58); alternativa
+  sin discusión, Coilcraft `XAL6060-682MEC` (9,2 A, 20,8 mΩ, pero 6,1 mm y ~US$ 2). El DCR no decide
+  acá: a 0,5 A la diferencia entre los dos son **7 mW sobre 1,9 W**.
+- **`C29 = 1 µF` cerámico en `VIN` del TPS22810.** No existía. `12VRAIL` ya trae 1000 µF + 22 µF en la
+  entrada de la placa —lo cual **sí** cumple la regla `CIN > CL` de la hoja de datos, que si no se
+  viola trae *"current flow through the body diode from VOUT to VIN"*— pero **están lejos**, y a
+  10 nH/cm de pista esa inductancia los desconecta de los transitorios rápidos. Bulk y cerámico local
+  hacen trabajos distintos.
+- **`C2` (`CT`) de 10 nF a 27 nF.** `SR = 46,62/CT`; con 10 nF la rampa es de 2,1 ms y cargar 480 µF
+  pide **2,24 A**, por encima de los 2 A del SOT23-6. Con 27 nF: 5,5 ms y **0,84 A**.
+- **`C1` (470 µF) pasa del lado de `DCIN`, después de `JP1`.** Así el componente queda siempre
+  montado —que era el objetivo, poder intercambiar modems sin tocar el BOM— pero **el load switch sólo
+  lo carga en la configuración `DCIN`**; con `JP2` carga apenas los 10 µF de `C28`. De yapa el
+  capacitor queda directamente en la pata del modem, con el jumper aguas arriba y fuera del camino de
+  los pulsos.
+- **La realimentación**: `R10 = 100 kΩ` (el valor que recomienda TI) y `R11` un **pote de 100 kΩ con
+  el cursor atado al extremo de GND** — así un cursor abierto degrada a una resistencia definida en
+  vez de a un circuito abierto intermitente. Con `VREF = 1,0 V`, `Vout = 1 + 100k/R11`; como la
+  resistencia efectiva es `R_cursor ∥ 100 k`, el recorrido útil es 0 a 50 kΩ y **los 3,8 V caen a
+  ~56 % del giro (`R11` = 35,7 kΩ), con ~12 mV por grado**.
+  ⚠ **El pote NO tiene tope hacia arriba**: girando de más `Vout` se va hacia `VIN`, y el `VBAT` del
+  SIM7080G admite 4,8 V. **Se ajusta SIEMPRE con `JP2` abierto**, midiendo en `C27`; con el modem
+  desconectado no hay nada en la placa que se pueda romper (`C27` es de 16 V y el chip admite `VOUT`
+  hasta 24 V). Se propuso una fija de 33 kΩ en serie para poner el techo en 4,03 V por construcción y
+  **Pablo la descartó**: es un prototipo, el ajuste es con `JP2` abierto, y **en producción el pote se
+  reemplaza por una fija** — que va a caer cerca de **35,7 kΩ**, que existe en E96.
+- **`C27` = 100 µF cerámico 16 V, más un 100 nF en paralelo.** El valor sobra: la ecuación 6 con
+  `ΔIOUT` = 0,5 A y `ΔVOUT` ≤ 250 mV pide ~13 µF. El 100 nF va porque TI lo pide aparte, *"reducing
+  voltage spikes on the output caused by inductor and board parasitics"*. Repartirlo en 4 × 22 µF es
+  **opcional**: el pico del modem lo absorben los 2 × 100 µF que SIMCom exige en el propio `VBAT`, del
+  otro lado de `JP2`. ⚠ Techo de TI: *"maximum total output capacitance… 10 times the design value, or
+  1000 µF, whichever is smaller"* — con los del módulo se llega a ~300 µF y ya no sobra tanto.
+  Conviene que el cable entre `JP2` y el modem sea corto: `C27`, la inductancia del cable y los 200 µF
+  del módulo forman un tanque de decenas de kHz, cerca del ancho de banda del lazo.
+- **`C28` = 10 µF y `C6` = 220 nF** en `VIN` del LMR33630 son exactamente lo que pide la hoja de datos.
+
+⏳ **Pendiente de BOM**: confirmar tensiones de los cerámicos — `C29` 50 V, `C28` **≥ 25 V, ideal
+50 V** (*"rated for at least the maximum input voltage; preferably twice"*), `C6` 50 V X7R, `C4`
+≥ 10 V. `C27` ya confirmado en 16 V.
+⏳ **Opcional, cuando se toque la entrada de la placa**: un **TVS (SMAJ18A) junto a los 1000 µF**.
+Bajó de prioridad al descartarse el repique como causa, pero **el TPS22810 tiene el mismo máximo
+absoluto de 20 V que el chip que murió** y es lo más expuesto de la placa: cuelga de la batería las
+24 horas. **Un load switch no es un dispositivo de protección, es un interruptor.**
+
+##### ✅ La placa nueva existe (2026-09-02), y el micro ya está validado sobre ella
+
+Pablo la fabricó y la pobló **parcialmente y a propósito**: tiene el **micro**, el **LED**, la
+**terminal serial**, el **conector de programación** y **la fuente del modem**. Nada más. Es la misma
+metodología de siempre: se estrena el mínimo que permite decir "esto anda" antes de mirar lo que se
+vino a probar.
+
+Validado en banco ese mismo día, en tres pasos:
+
+| Paso | Estado |
+|---|---|
+| Se programa, y el micro corre | ✅ con `PRUEBA_MINIMA` — ver la sección del programador |
+| La consola TERM | ✅ el banner sale limpio, o sea que el PLL arrancó y el divisor está bien |
+| **El firmware completo** (`PRUEBA_MINIMA = 0`) | ✅ **anda correcto** — con esto quedan validados el **cristal/LSE**, el RTC, el LPTIM1, FreeRTOS y el tickless sobre la placa nueva |
+
+⏳ **Lo que NO se probó todavía es justamente la fuente del modem.** El plan de banco, en este orden:
+`JP1` y `JP2` **abiertos** → `lte dcin on` → medir en **`C27`** y ajustar el pote a **3,8 V**
+(~12 mV por grado, y **no tiene tope hacia arriba**) → el mismo nodo en **VCA** → arrancar con carga →
+**el reposo, que tiene que seguir en 6 µA** → recién ahí `JP2` y el modem.
+
+##### ✅ La fuente ANDA (2026-09-04) y el firmware ya está limpio
+
+Pablo la ajustó y quedó en **3,8 V**. Con eso se cerró la etapa 1 y se hizo la limpieza que estaba
+anotada desde el 2026-08-20:
+
+1. ✅ **`EN_LTE_3V8` (PA4) desapareció del driver**: `drv_lte_3v8()` y `drv_lte_rieles()` ya no
+   existen, y `DRV_LTE_MS_ENTRE_RIELES` tampoco. Queda **`drv_lte_power()`**, que es el único
+   interruptor. En la consola, `lte 3v8` se fue y `lte dcin on|off` pasó a ser **`lte on|off`**.
+   ⏳ **Falta el `.ioc`**: PA4 sigue asignado como `EN_LTE_3V8`. Conviene sacarlo cuando se toque
+   CubeMX —un pin no asignado queda en analógico tras el reset, que es el de menor fuga—.
+2. ✅ **`drv_lte.h` dejó de decir que las dos fuentes son independientes**, y explica por qué el
+   diseño viejo dejaba que el firmware violara el máximo absoluto de `EN` (`VIN + 0,3 V`).
+3. ⚠ **Cortar la energía ahora mata también la alimentación del módulo.** Sigue vigente: la política
+   de sesiones tiene que apagar el módulo por su power switch o por AT **antes** de bajar
+   `EN_LTE_DCIN`. El driver deja hacerlo en cualquier orden a propósito — el orden correcto es de la
+   capa de aplicación.
+4. El `QOD` con `R1` = 330 Ω tarda **~0,5 s** en descargar los 470 µF en configuración `DCIN`
+   (τ = 155 ms) y ~3 ms en configuración 3V8. Importa si la aplicación hace un ciclo de energía para
+   resetear el módulo: cortar y reponer enseguida no resetea nada.
+5. **Nota para la capa de aplicación**: llenar `C1` son 5,64 mC, y si el origen no aportara nada
+   `12VRAIL` caería a 8,2 V por milisegundos. No es brownout —la fuente de 3V3 sigue trabajando— pero
+   **no hay que medir `vin` ni los 4-20 mA en el instante de encender el modem**.
 
 #### ⚠ PC13 no es un GPIO cualquiera
 
@@ -1392,16 +1717,129 @@ sistema**. El síntoma sería un modem que se prende o se apaga solo sin que nin
 toque, y no habría forma de encontrarlo mirando el firmware. Hoy está limpio
 (`hrtc.Init.OutPut = RTC_OUTPUT_DISABLE`, `main.c:529`); **no tocarlo al reconfigurar el RTC.**
 
-#### Qué hay que medir
+#### ⚠ El módulo es un WH-LTE-7S1-E, NO un SIM7080G (cambio del 2026-09-04)
 
-El modem va a ser **el consumidor más grande del equipo**, con picos de transmisión que ningún otro
-periférico de esta placa se acerca a pedir. Pero de esta etapa lo que importa es lo contrario: **el
-reposo tiene que seguir en los 6 µA**. Si subió, los dos sospechosos son el TPS62130 alimentado desde
-el riel crudo y un pin que quedó donde no debía.
+Decisión de Pablo: *"Por ahora NO vamos a usar el modem SIMCOM. Seguimos usando el WH-LTE-7S1-E."*
+El SIM7080G se evaluó mientras se rediseñaba la fuente y quedó afuera; **lo que sigue valiendo de
+aquel análisis es sólo lo de la fuente** —los 3,8 V, el pico de 0,5 A y el desacople— porque eso fue
+lo que dimensionó el LMR33630 y la placa ya está fabricada así.
 
-El driver **no toma candado de energía** —son tres GPIO y su estado sobrevive al Stop 2—. El
-`pwrLOCK_WAN` ya está reservado en `pwr_lock.h` esperando a la etapa 2, cuando haya una UART
-transmitiendo.
+Es un **LTE Cat-1 DTU de USR IOT**: serie a LTE. Del lado del micro es una UART y nada más — se lo
+configura con comandos AT y después transporta bytes en modo transparente (TCP/UDP/HTTPD/SMS, hasta 4
+sockets). Eso simplifica mucho la etapa 2 respecto de un módulo crudo: **no hay pila de red que
+manejar desde el firmware**.
+
+Documentación en **`Datasheets/Componentes/PUSR/`**: manual de hardware, manual de usuario, el juego
+de comandos AT y un `Comandos AT modem USR.txt` propio.
+
+| Parámetro | Valor |
+|---|---|
+| Alimentación | **5-16 V por `DCIN`** (pines 13/14, típico 12 V) **o 3,4-4,2 V por `VCAP`** (pin 16, recomendado 3,8 V) |
+| **UART** | **TTL-3,0 V**, `AT+comando`. Baudrates de 1200 a 921600 — **acá va a 115200** |
+| `PWRKEY` (pin 10) | *"Power pin, **pull up by default**"*, nivel activo **BAJO** |
+| Bandas | LTE FDD B1/B3/B7/B8/B20/B28 + GSM 900/1800 |
+| Indicadores | `WORK` (pin 9, parpadea 1 s), `NET`, `LINKA`, `LINKB` — salidas de 3,0 V, **no cableadas en R001** |
+
+**⚠ Tres cosas del manual que hay que tener presentes:**
+
+1. ⚠ **La UART del módulo es de 3,0 V, no de 3,3.** Textual: *"When the I/O of the user's MCU is not
+   3.0V, **level matching is needed**"*, con un circuito de referencia a transistores. Los dos
+   sentidos no son igual de riesgosos: **modem → micro anda sin adaptación** (los 3,0 V superan
+   cómodo el `VIH` del STM32, que es 0,7 × 3,3 = 2,31 V), pero **micro → modem le entra 0,3 V por
+   encima de su dominio**. Muchos módulos lo toleran; el fabricante pide adaptación. **Verificarlo en
+   la placa** — si el módulo no contesta o contesta basura, ése es el primer sospechoso, antes que el
+   firmware.
+2. ✅ **`JP1`/`JP2` excluyentes no es una convención de R001: el módulo lo exige.** Sobre `VCAP`:
+   *"**Can not use with DCIN simultaneously**"*. La placa implementa exactamente eso.
+3. ⚠ **El desacople de la rama 3V8 queda corto.** Para `DCIN` el fabricante pide 220 µF y la placa
+   pone `C1` = 470 µF, de sobra. Para `VCAP` su circuito de referencia son **470 + 220 + 22 µF** más
+   los cerámicos, y del lado de `JP2` sólo hay `C27` = 100 µF + 100 nF. Es un **Cat-1**, que transmite
+   con picos bastante más grandes que el Cat-M1 que se había supuesto. Si en configuración 3V8 el
+   módulo se resetea o se cae de la red al transmitir, **el sospechoso es el bulk, no el firmware**.
+
+#### ⚠ El modem arranca en modo TRANSPARENTE: `+++` solo no lo pasa a AT
+
+Encontrado el **2026-09-04**, en la primera prueba con el módulo. Pablo probó `lte tx +++AT` y no
+pasó nada — y es el error natural, porque en cualquier otro módulo `+++` alcanza. **Acá la secuencia
+es de TRES tiempos**, y el módulo pide una confirmación en el medio (traza real en
+`Datasheets/Componentes/PUSR/Comandos AT modem USR.txt`):
+
+```
+micro -> "+++"     (SIN CR: es una contraseña, no un comando)
+modem -> "a"
+micro -> "a"       (sin CR)
+modem -> "+ok"     <- recién a partir de acá acepta AT
+```
+
+**El segundo tramo es lo que hace que a mano no se pueda**: entre la `a` que contesta el módulo y la
+`a` que hay que devolverle no da el tiempo de tipear un comando. Por eso está implementado como
+**`drv_lte_escape()` / `lte esc`** y no como una receta. Para volver a modo transparente, `AT+ENTM`.
+
+La `+++` es en realidad la **contraseña de comando**, configurable con `AT+CMDPW` (1 a 10 bytes) y
+`+++` de fábrica. ⚠ **Si alguien la cambia, el síntoma es indistinguible de un TX roto.**
+
+⏳ Los tiempos **no están en el manual**; las constantes de `drv_lte.h` son un punto de partida
+generoso, a ajustar en banco.
+
+**El valor de retorno es un diagnóstico y en el bring-up vale más que el éxito**, porque separa el
+único par de hipótesis que desde afuera se ven iguales:
+
+| Resultado | Qué prueba |
+|---|---|
+| `lteESC_SIN_A` | **No dice nada del TX**: puede no estar llegando, o el módulo puede no estar en transparente, o la contraseña ser otra |
+| `lteESC_SIN_OK` | ⭐ **PRUEBA que el TX funciona** — el módulo contestó a algo que le mandamos. La falla está en el segundo tramo, no en el enlace |
+| `lteESC_OK` | Modo comando |
+
+Es el mismo criterio que el CTR del optoacoplador: buscar la **medición que cierra el diagnóstico**
+en vez de acumular síntomas.
+
+⏳ **Lo que el manual NO dice: cuánto dura el pulso del `PWRKEY`.** Sí dice que *"POWER_KEY and RESET
+have the same function to control the power on and off"*, y para `RESET` da **0,5 s**. O sea que 0,5 s
+es **por dónde empezar a probar, no un dato del `PWRKEY`** — por eso `lte key <ms>` recibe la duración
+por argumento y no hay constante que la fije. Tampoco está cuánto tarda en contestar un AT desde que
+se lo alimenta; eso va a fijar el timeout de arranque de una sesión y hay que medirlo.
+
+⚠ **La regla de no cortarle la alimentación a un módulo que está corriendo vale igual**, aunque acá
+no haya un párrafo del fabricante que la respalde: es la forma conocida de corromperle la flash
+interna a cualquiera de estos módulos. `drv_lte_power( false )` **no es una operación inocente**, y la
+política de sesiones tiene que apagar primero por el power switch o por AT.
+
+#### El consumo de reposo: 354 µA, y queda para después
+
+Medido por Pablo el **2026-09-04**, con la placa nueva ya poblada entera:
+
+| Configuración | Reposo |
+|---|---|
+| Placa nueva, sólo micro + LED + terminal | **14 µA** |
+| **Placa nueva, todos los componentes** | **354 µA** |
+| Placa original, todos los componentes, mismo firmware | **40 µA** |
+
+O sea que **el criterio de aceptación de la etapa no se cumplió**: se esperaba que el reposo no se
+moviera de los ~6 µA de `v0.0.13`, y la placa nueva completa consume ~9 veces lo que la vieja. Los
+340 µA aparecen al poblar el resto de los componentes, no con el micro solo.
+
+⏸ **Pablo decidió dejarlo afuera por ahora** y seguir con el firmware. Queda anotado como pendiente
+de hardware, y hay que retomarlo antes de campo: 354 µA contra 40 µA es un factor de 9 en la
+autonomía del equipo.
+
+Cuando se retome, lo que ya se sabe acota la búsqueda:
+
+- **No es el firmware**: el mismo binario da 40 µA en la placa original.
+- **No es el micro ni la terminal**: con eso solo la placa nueva da 14 µA, *mejor* que la vieja.
+- **Es algo que se agregó al poblarla.** El sospechoso natural es el que ya mordió una vez: un
+  **pull-up interno contra un contacto cerrado**, como los 82 µA de `SD_DET` (ver la sección de la
+  microSD). El método que corresponde es el de siempre — **despoblar o levantar de a un componente y
+  medir**, o alimentar los rieles de a uno.
+- ⚠ **No es la fuente del modem**: con el convertidor detrás del TPS22810, lo único permanente son
+  los **500 nA** del load switch. Eso era el sospechoso número uno del diseño viejo y el rediseño lo
+  eliminó.
+
+El driver del modem **sí toma candado de energía**, y a diferencia de lo que decía la etapa 1, es por
+**correctitud y no por consumo**: mientras el módulo está alimentado puede hablar sin que nadie le
+pregunte, y a 115200 la ventana de `__disable_irq()` del tickless (~100 µs) es más larga que un byte
+entero (87 µs). Ver la sección del tickless comiéndose bytes del USART, que es el mismo mecanismo a
+9600. El costo es que con el modem prendido la placa no baja de Sleep y consume ~3,5 mA — al lado de
+lo que come el modem, es ruido.
 
 ### ⚠ `printf` con `%f`: hay que habilitarlo, y el síntoma de que falta es que no imprime NADA
 

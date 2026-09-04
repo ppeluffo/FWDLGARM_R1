@@ -33,8 +33,8 @@
  *----------------------------------------------------------------------------*/
 typedef enum {
     fdTERM = 0,
-    fdWAN,          /* modem LTE   - sin implementar (hardware no poblado) */
-    fdRS485A,       /* Modbus      - sin implementar                       */
+    fdWAN,          /* modem LTE   - UART4                                 */
+    fdRS485A,       /* Modbus      - USART3                                */
     fdI2C,          /* bus I2C     - sin implementar                       */
     fdNVM,          /* config      - sin implementar                       */
     fdCOUNT

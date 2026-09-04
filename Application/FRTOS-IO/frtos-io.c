@@ -165,7 +165,7 @@ typedef struct {
 
 static const frtos_fd_t xFdTable[ fdCOUNT ] = {
     [ fdTERM   ] = { &xUartOps, drvUART_TERM },
-    [ fdWAN    ] = { NULL, 0 },
+    [ fdWAN    ] = { &xUartOps, drvUART_LTE },
     [ fdRS485A ] = { &xUartOps, drvUART_RS485 },
     [ fdI2C    ] = { &xI2cOps, 0 },
     [ fdNVM    ] = { NULL, 0 },

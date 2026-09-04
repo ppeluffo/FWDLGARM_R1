@@ -36,11 +36,12 @@
 #include "task.h"
 
 /* Instancias físicas. Entran agregando una fila a la tabla de drv_uart.c, que es
-   justamente para lo que la tabla existe: el RS485 no necesitó una línea de
-   código nuevo de UART. Falta el modem LTE, cuando se pueble. */
+   justamente para lo que la tabla existe: ni el RS485 ni el modem necesitaron una
+   línea de código nuevo de UART. */
 typedef enum {
     drvUART_TERM = 0,
     drvUART_RS485,
+    drvUART_LTE,
     drvUART_COUNT
 } drv_uart_id_t;
 
@@ -53,6 +54,15 @@ typedef enum {
  * los que cuestan encontrar.
  */
 #define DRV_UART_RS485_RXSIZE   256U
+
+/*
+ * 512 para el modem: es el que más datos mueve y el único que puede hablar sin que
+ * nadie le pregunte. Una respuesta AT son decenas de bytes, pero en modo
+ * transparente del otro lado hay un socket TCP, y ahí el largo lo decide el
+ * servidor. Con el buffer chico la pérdida sería silenciosa —el stream buffer
+ * descarta lo que no entra— y aparecería como tramas truncadas de vez en cuando.
+ */
+#define DRV_UART_LTE_RXSIZE     512U
 
 #define DRV_UART_TX_TIMEOUT_MS  1000U   /* techo para que termine una transmisión */
 

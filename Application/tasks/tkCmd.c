@@ -498,7 +498,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "vin",    "tension de los rieles: 12 V y VDDA (3V3)",              prvVinUso     },
     { "cnt",    "contador de pulsos CNT0 (PA12): cuenta y estado",       prvCntUso     },
     { "ev",     "electrovalvula TOYI: abrir, cerrar y estado",           prvEvUso      },
-    { "lte",    "modem LTE, etapa 1: los dos rieles y el PWRKEY",        prvLteUso     },
+    { "lte",    "modem LTE, etapa 1: la energia y el PWRKEY",            prvLteUso     },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
     { "reboot", "reinicio tibio, sin tocar NRST (diagnostico)",          NULL          },
@@ -2118,22 +2118,134 @@ static void cmdEv( void )
              drv_valvula_pin_ctl_estado() ? "1 - abrir" : "0 - cerrar (reposo)" );
 }
 //------------------------------------------------------------------------------
+/*------------------------------------------------------------------------------
+ * Modem LTE
+ *----------------------------------------------------------------------------*/
+
+/* 256 alcanza para cualquier respuesta AT y para un bloque de datos del puente.
+   Es estático: 256 bytes en el stack de tkCmd, que tiene 2 KB, no entran. */
+#define LTE_BUF             256U
+
+/* Techo para que el módulo empiece a contestar. Un AT simple contesta en
+   milisegundos; los comandos de red tardan mucho más, y para ésos está 'lte rx'
+   con el tiempo explícito. */
+#define LTE_ESCUCHA_MS      1000U
+
+static int16_t prvLteEscuchar( uint32_t ulMs );
+static void    prvLteBridge  ( void );
+
 static void prvLteUso( void )
 {
     xprintf( "uso:\r\n" );
-    xprintf( "  lte                estado de los tres pines\r\n" );
-    xprintf( "  lte on | off       los DOS rieles en orden (no toca el PWRKEY)\r\n" );
-    xprintf( "  lte dcin on|off    SOLO EN_LTE_DCIN (PC13): los 12 V del modem\r\n" );
-    xprintf( "  lte 3v8 on|off     SOLO EN_LTE_3V8 (PA4): el TPS62130\r\n" );
-    xprintf( "  lte key on|off     SOLO LTE_PWR (PA5). on = PWRKEY apretado\r\n" );
+    xprintf( "  lte                 estado\r\n" );
+    xprintf( "  lte on | off        energia del modem (no toca el power switch)\r\n" );
+    xprintf( "  lte key on|off      nivel de LTE_PWR (PA5). on = apretado\r\n" );
+    xprintf( "  lte key <ms>        pulso de <ms> y lo suelta\r\n" );
+    xprintf( "  lte esc             ENTRA AL MODO COMANDO (+++ / a / a / +ok)\r\n" );
+    xprintf( "  lte at <cmd>        manda <cmd>+CR y muestra la respuesta\r\n" );
+    xprintf( "  lte tx <texto>      manda el texto CRUDO, sin CR, y escucha\r\n" );
+    xprintf( "  lte rx <ms>         solo escucha\r\n" );
+    xprintf( "  lte bridge          puente terminal <-> modem (Ctrl-D para salir)\r\n" );
     xprintf( "\r\n" );
-    xprintf( "  Etapa 1: esto pone y saca niveles, nada mas. No manda ningun AT ni\r\n" );
-    xprintf( "  genera el pulso de encendido: 'key on' lo deja apretado hasta que\r\n" );
-    xprintf( "  alguien haga 'key off'.\r\n" );
+    xprintf( "  El modem arranca en modo TRANSPARENTE y no entiende AT hasta que se\r\n" );
+    xprintf( "  hace 'lte esc'. Mandar '+++' con 'tx' NO alcanza: la secuencia son 3\r\n" );
+    xprintf( "  tiempos y el 2do no da tiempo a tipearlo. Para salir: 'lte at AT+ENTM'\r\n" );
     xprintf( "\r\n" );
-    xprintf( "  El orden es DCIN primero y 3V8 despues; al apagar, al reves.\r\n" );
-    xprintf( "  Prueba pendiente: 'lte 3v8 on' con DCIN apagado dice si el TPS62130\r\n" );
-    xprintf( "  cuelga de DCIN conmutado o del riel de 12 V crudo.\r\n" );
+    xprintf( "  'at' y 'tx' toman UNA palabra: el parser corta en los espacios. Para\r\n" );
+    xprintf( "  cualquier comando con espacios, usar 'bridge'.\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  La fuente es en CASCADA: EN_LTE_DCIN (PC13) enciende el load switch\r\n" );
+    xprintf( "  y de el cuelgan las dos ramas, DCIN (JP1) y el convertidor de 3V8\r\n" );
+    xprintf( "  (JP2), que son excluyentes. Por eso hay un solo comando de energia y\r\n" );
+    xprintf( "  PA4 quedo sin funcion. Al apagar, el QOD tarda ~0,5 s en descargar\r\n" );
+    xprintf( "  C1 (470 uF) con JP1: cortar y reponer enseguida NO resetea nada.\r\n" );
+}
+
+/*
+ * Vuelca lo que conteste el modem. A diferencia del RS485 —que transporta tramas
+ * binarias y se lee mejor en hexa— acá lo que viene es texto AT, así que sale tal
+ * cual: los CR/LF del módulo hacen el trabajo. El hexa queda para los bytes que no
+ * se pueden imprimir, que es donde se ve si el baudrate está mal.
+ */
+static int16_t prvLteEscuchar( uint32_t ulMs )
+{
+    static char pcDatos[ LTE_BUF ];
+
+    int16_t sRet = drv_lte_read( pcDatos, LTE_BUF, ulMs );
+
+    if( sRet <= 0 )
+    {
+        xprintf( "silencio (%lu ms, nada recibido)\r\n", ( unsigned long ) ulMs );
+        return sRet;
+    }
+
+    xprintf( "recibidos %d:\r\n", ( int ) sRet );
+
+    for( int16_t i = 0; i < sRet; i++ )
+    {
+        char c = pcDatos[ i ];
+
+        if( ( ( c >= 0x20 ) && ( c < 0x7F ) ) || ( c == '\r' ) || ( c == '\n' ) )
+        {
+            xputChar( c );
+        }
+        else
+        {
+            xprintf( "<%02X>", ( unsigned ) ( ( uint8_t ) c ) );
+        }
+    }
+    xprintf( "\r\n" );
+
+    return sRet;
+}
+
+/*
+ * Puente transparente entre la terminal y el modem, que es la herramienta que
+ * hace utilizable el bring-up: deja hablarle al módulo a mano, con comandos de
+ * cualquier largo y con espacios, sin pasar por el parser.
+ *
+ * ⚠ Las dos puntas corren a velocidades distintas —la consola a 9600, el modem
+ * mucho más rápido— así que si el módulo larga una ráfaga larga, la terminal no da
+ * abasto y se pierde texto. Para leer una respuesta larga sin perder nada,
+ * 'lte at' y 'lte rx' la juntan primero en el buffer y recién después la imprimen.
+ */
+static void prvLteBridge( void )
+{
+    static char pcBuf[ LTE_BUF ];
+
+    xprintf( "puente abierto. Ctrl-D para salir.\r\n" );
+
+    for( ;; )
+    {
+        int16_t sN = drv_uart_read( drvUART_TERM, pcBuf, LTE_BUF, pdMS_TO_TICKS( 20U ) );
+
+        for( int16_t i = 0; i < sN; i++ )
+        {
+            if( pcBuf[ i ] == 0x04 )    /* Ctrl-D */
+            {
+                /* Lo tecleado antes del Ctrl-D sí se manda: cortarlo sería perder
+                   un comando entero por apurarse a salir. */
+                if( i > 0 )
+                {
+                    ( void ) drv_lte_write( pcBuf, ( uint16_t ) i );
+                }
+                xprintf( "\r\npuente cerrado.\r\n" );
+                return;
+            }
+        }
+
+        if( sN > 0 )
+        {
+            ( void ) drv_lte_write( pcBuf, ( uint16_t ) sN );
+        }
+
+        sN = drv_uart_read( drvUART_LTE, pcBuf, LTE_BUF, pdMS_TO_TICKS( 20U ) );
+
+        if( sN > 0 )
+        {
+            ( void ) frtos_write( fdTERM, pcBuf, ( uint16_t ) sN );
+        }
+    }
 }
 
 static void cmdLte( void )
@@ -2146,35 +2258,124 @@ static void cmdLte( void )
         {
             bool bOn = ( argv[ 1 ][ 1 ] == 'n' );
 
-            drv_lte_rieles( bOn );
-            xprintf( "rieles del modem %s (PWRKEY sin tocar)\r\n",
-                     bOn ? "ENCENDIDOS: DCIN y despues 3V8" : "apagados: 3V8 y despues DCIN" );
+            drv_lte_power( bOn );
+            xprintf( "energia del modem %s (PWRKEY sin tocar)\r\n",
+                     bOn ? "ENCENDIDA: EN_LTE_DCIN = 1" : "apagada: EN_LTE_DCIN = 0" );
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "bridge" ) == 0 )
+        {
+            prvLteBridge();
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "esc" ) == 0 )
+        {
+            xprintf( "secuencia de escape: +++ / a / a / +ok ...\r\n" );
+
+            switch( drv_lte_escape() )
+            {
+                case lteESC_OK:
+                    xprintf( "MODO COMANDO. Ya acepta 'lte at AT+CSQ'\r\n" );
+                    break;
+
+                case lteESC_SIN_OK:
+                    /* Vale más que un error: el modulo contesto algo que le
+                       mandamos, o sea que el TX del micro SI le llega. */
+                    xprintf( "contesto la 'a' pero no el '+ok'.\r\n"
+                             "  -> el TX FUNCIONA (le llego el '+++'). Falla el 2do tramo:\r\n"
+                             "     probar subiendo DRV_LTE_MS_ESPERA_OK, o mirar 'lte' por errores\r\n" );
+                    break;
+
+                case lteESC_SIN_A:
+                    xprintf( "no contesto la 'a'. Los sospechosos, en orden:\r\n"
+                             "  1. el TX del micro no le llega (su UART es de 3,0 V y la nuestra\r\n"
+                             "     de 3,3: el manual pide adaptacion de niveles)\r\n"
+                             "  2. no esta en modo transparente, o ya esta en modo comando\r\n"
+                             "  3. le cambiaron la password con AT+CMDPW (de fabrica es '+++')\r\n" );
+                    break;
+
+                default:
+                    xprintf( "ERROR: la UART no pudo transmitir\r\n" );
+                    break;
+            }
             return;
         }
 
         if( ( ucArgs >= 2U ) && ( argv[ 2 ] != NULL ) )
         {
-            bool bOn = ( strcmp( argv[ 2 ], "on" ) == 0 );
-
-            if( strcmp( argv[ 1 ], "dcin" ) == 0 )
-            {
-                drv_lte_dcin( bOn );
-                xprintf( "EN_LTE_DCIN (PC13) = %u\r\n", bOn ? 1U : 0U );
-                return;
-            }
-
-            if( strcmp( argv[ 1 ], "3v8" ) == 0 )
-            {
-                drv_lte_3v8( bOn );
-                xprintf( "EN_LTE_3V8 (PA4) = %u\r\n", bOn ? 1U : 0U );
-                return;
-            }
-
             if( strcmp( argv[ 1 ], "key" ) == 0 )
             {
-                drv_lte_pwrkey( bOn );
-                xprintf( "LTE_PWR (PA5) = %u  ->  PWRKEY %s\r\n", bOn ? 1U : 0U,
-                         bOn ? "APRETADO (nivel bajo en el modulo)" : "suelto" );
+                if( ( strcmp( argv[ 2 ], "on" ) == 0 ) || ( strcmp( argv[ 2 ], "off" ) == 0 ) )
+                {
+                    bool bOn = ( argv[ 2 ][ 1 ] == 'n' );
+
+                    drv_lte_pwrkey( bOn );
+                    xprintf( "LTE_PWR (PA5) = %u  ->  power switch %s\r\n", bOn ? 1U : 0U,
+                             bOn ? "APRETADO (nivel bajo en el modulo)" : "suelto" );
+                }
+                else
+                {
+                    /* Un pulso cronometrado: es la forma de averiguar cuánto
+                       necesita ESTE módulo, que es un dato que todavía no está. */
+                    uint32_t ulMs = ( uint32_t ) atoi( argv[ 2 ] );
+
+                    if( ulMs == 0U )
+                    {
+                        prvLteUso();
+                        return;
+                    }
+
+                    xprintf( "pulso de %lu ms...\r\n", ( unsigned long ) ulMs );
+                    drv_lte_pwrkey_pulso( ulMs );
+                    xprintf( "listo, LTE_PWR suelto\r\n" );
+                }
+                return;
+            }
+
+            if( strcmp( argv[ 1 ], "at" ) == 0 )
+            {
+                static char pcRta[ LTE_BUF ];
+
+                int16_t sRet = drv_lte_at( argv[ 2 ], pcRta, LTE_BUF, LTE_ESCUCHA_MS );
+
+                if( sRet < 0 )
+                {
+                    xprintf( "ERROR: no se pudo transmitir\r\n" );
+                }
+                else if( sRet == 0 )
+                {
+                    xprintf( "'%s' -> sin respuesta en %u ms\r\n",
+                             argv[ 2 ], ( unsigned ) LTE_ESCUCHA_MS );
+                }
+                else
+                {
+                    xprintf( "'%s' -> %d bytes:\r\n%s\r\n", argv[ 2 ], ( int ) sRet, pcRta );
+                }
+                return;
+            }
+
+            if( strcmp( argv[ 1 ], "tx" ) == 0 )
+            {
+                uint16_t usLargo = ( uint16_t ) strlen( argv[ 2 ] );
+
+                drv_lte_flush();
+
+                if( drv_lte_write( argv[ 2 ], usLargo ) != ( int16_t ) usLargo )
+                {
+                    xprintf( "ERROR: no se pudo transmitir\r\n" );
+                    return;
+                }
+
+                xprintf( "transmitidos %u bytes, escuchando...\r\n", ( unsigned ) usLargo );
+                ( void ) prvLteEscuchar( LTE_ESCUCHA_MS );
+                return;
+            }
+
+            if( strcmp( argv[ 1 ], "rx" ) == 0 )
+            {
+                ( void ) prvLteEscuchar( ( uint32_t ) atoi( argv[ 2 ] ) );
                 return;
             }
         }
@@ -2184,12 +2385,18 @@ static void cmdLte( void )
     }
 
     /* ---- 'lte' pelado ---- */
-    xprintf( "  DCIN  PC13 : %s\r\n",
-             drv_lte_dcin_estado() ? "1 - los 12 V del modem PRENDIDOS" : "0 - cortados (reposo)" );
-    xprintf( "  3V8   PA4  : %s\r\n",
-             drv_lte_3v8_estado() ? "1 - TPS62130 habilitado" : "0 - en shutdown (reposo)" );
-    xprintf( "  PWRKEY PA5 : %s\r\n",
-             drv_lte_pwrkey_estado() ? "1 - APRETADO (el transistor conduce)" : "0 - suelto (reposo)" );
+    xprintf( "  EN_LTE_DCIN PC13 : %s\r\n",
+             drv_lte_power_estado() ? "1 - modem ALIMENTADO (DCIN y 3V8)"
+                                    : "0 - cortado (reposo)" );
+    xprintf( "  LTE_PWR     PA5  : %s\r\n",
+             drv_lte_pwrkey_estado() ? "1 - APRETADO (el transistor conduce)"
+                                     : "0 - suelto (reposo)" );
+    xprintf( "  UART4 errores    : %lu  (ISR acumulado 0x%08lX)\r\n",
+             ( unsigned long ) drv_uart_errores( drvUART_LTE ),
+             ( unsigned long ) drv_uart_ultimo_isr( drvUART_LTE ) );
+    xprintf( "  pwr locks        : 0x%08lX %s\r\n",
+             ( unsigned long ) pwr_lock_estado(),
+             pwr_deep_sleep_permitido() ? "(Stop 2 habilitado)" : "(solo Sleep)" );
 }
 //------------------------------------------------------------------------------
 /*

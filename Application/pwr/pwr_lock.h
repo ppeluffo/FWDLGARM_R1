@@ -29,7 +29,8 @@ typedef enum {
     pwrLOCK_TERM   = 0,   /* hay una terminal conectada (TERM_SENSE en 0) */
     pwrLOCK_TERM_TX,      /* la USART de la consola está transmitiendo    */
     pwrLOCK_I2C,          /* hay una transacción en curso en el bus I2C  */
-    pwrLOCK_WAN,          /* reservado: modem LTE                        */
+    pwrLOCK_WAN,          /* el modem está alimentado: puede hablar solo */
+    pwrLOCK_WAN_TX,       /* la UART del modem está transmitiendo        */
     pwrLOCK_RS485,        /* reservado: Modbus                           */
     pwrLOCK_SD,           /* reservado: microSD                          */
     pwrLOCK_COUNT

@@ -12,6 +12,7 @@
    ata a lo generado; de acá para arriba nadie los ve. */
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart3;
+extern UART_HandleTypeDef huart4;
 
 /*------------------------------------------------------------------------------
  * La tabla
@@ -41,6 +42,7 @@ typedef struct {
 
 static uint8_t pucTermRxStore [ DRV_UART_TERM_RXSIZE  + 1U ]; /* +1: el stream buffer usa uno de guarda */
 static uint8_t pucRs485RxStore[ DRV_UART_RS485_RXSIZE + 1U ];
+static uint8_t pucLteRxStore  [ DRV_UART_LTE_RXSIZE   + 1U ];
 
 static drv_uart_t xUarts[ drvUART_COUNT ] = {
     [ drvUART_TERM ] = {
@@ -54,6 +56,17 @@ static drv_uart_t xUarts[ drvUART_COUNT ] = {
         .pucRxStore = pucRs485RxStore,
         .xRxSize    = DRV_UART_RS485_RXSIZE,
         .eTxLock    = pwrLOCK_RS485,
+    },
+    [ drvUART_LTE ] = {
+        .pxHal      = &huart4,
+        .pucRxStore = pucLteRxStore,
+        .xRxSize    = DRV_UART_LTE_RXSIZE,
+        /* Un bit propio, distinto del pwrLOCK_WAN que toma drv_lte mientras el
+           modem está alimentado: como los candados son un bitmask y no un
+           contador, compartirlo haría que el release del final de un write le
+           soltara el candado a la sesión entera. Misma razón por la que la
+           consola tiene pwrLOCK_TERM y pwrLOCK_TERM_TX separados. */
+        .eTxLock    = pwrLOCK_WAN_TX,
     },
 };
 
