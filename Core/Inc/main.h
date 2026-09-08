@@ -159,8 +159,33 @@ void Error_Handler(void);
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
 #define FW_NOMBRE              "FWDLGARM_R1"
-#define FW_VERSION             "0.0.8"
+#define FW_VERSION             "0.0.26"
 #define FW_FECHA               __DATE__ " " __TIME__
+
+/*
+ * ⚠ REGLA: la versión SUBE EN CADA ENTREGA A BANCO (Pablo, 2026-09-08).
+ *
+ * Es lo que permite decir sin ambigüedad qué firmware se probó, y era un
+ * problema real: hasta hoy este define decía "0.0.8" mientras los tags de git
+ * iban por `v0.0.14`. Se puso al día en 0.0.15 —continuando la serie de los
+ * tags, para que no haya DOS numeraciones conviviendo— y de acá en más va de a
+ * uno por cada binario que se entrega.
+ *
+ * Vamos por `0.0.X` durante toda la fase 2; **cuando la aplicación esté
+ * terminada, la versión pasa a `1.0.0`**.
+ *
+ * ---------------------------------------------------------------------------
+ * ESTOS TRES CAMPOS VIAJAN EN EL FRAME, y el servidor los usa para identificar
+ * al equipo (decisión de Pablo, 2026-09-07):
+ *
+ *     ID=<imei>&HW=SPQ_ARM_R1&TYPE=FWDLGARM_R1&VER=0.0.15&CLASS=...
+ *
+ * `FW_HW` es la PLACA, no el micro, y por eso cambia respecto del equipo AVR
+ * —que se declara `SPQ_AVRDA_R2`—. Es lo que le permite al servidor distinguir
+ * un datalogger nuevo de uno viejo.
+ */
+#define FW_HW                  "SPQ_ARM_R1"
+#define FW_TYPE                FW_NOMBRE
 
 /* USER CODE END Private defines */
 

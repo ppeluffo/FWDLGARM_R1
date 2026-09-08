@@ -298,7 +298,21 @@ static void pv_CMD_execute( void )
 
     for( uint8_t cmdIndex = 0; cmdIndex < BDCMD_numCommands; cmdIndex++ )
     {
-        if( !strncmp( BDCMD_commandList[ cmdIndex ], cmdLine_buffer, i ) )
+        /*
+         * ⚠ El largo TIENE que coincidir, no alcanza con que sea prefijo.
+         *
+         * Hasta el 2026-09-08 esto era sólo `strncmp( lista, buffer, i )`, o sea
+         * que comparaba los `i` caracteres tipeados contra el principio del
+         * comando: **`r` ejecutaba `reset`** y `s` ejecutaba `status`. En una
+         * consola de banco es una comodidad; en campo, con la línea serie
+         * expuesta, un carácter de ruido reinicia el equipo.
+         *
+         * Se cerró al entrar los comandos de configuración, que además de
+         * reiniciar pueden BORRAR la configuración del equipo ('config default').
+         * Ver CLAUDE.md, pendientes conocidos.
+         */
+        if( ( strlen( BDCMD_commandList[ cmdIndex ] ) == ( size_t ) i ) &&
+            ( !strncmp( BDCMD_commandList[ cmdIndex ], cmdLine_buffer, i ) ) )
         {
             BDCMD_commandFuntions[ cmdIndex ]();
             return;

@@ -430,10 +430,13 @@ Orden seguido, con cada etapa validada en banco y etiquetada en git:
    comportamiento del parser de comandos, y `BOR_LEV`.
 17. **Validación en Release** — obligatoria antes de campo. Ver abajo.
 
-**Pendientes conocidos, todos anotados y ninguno bloqueante:** el comando `reset` cuelga la placa
-(`reboot` anda, así que no es la reinicialización del firmware); el parser de comandos matchea por
-**prefijo**, así que un carácter de ruido puede ejecutar un comando destructivo; y `BOR_LEV` sigue en
-el default más bajo (~1,7 V), que para un equipo a batería conviene decidir a propósito.
+**Pendientes conocidos:** `BOR_LEV` sigue en el default más bajo (~1,7 V), que para un equipo a
+batería conviene decidir a propósito.
+
+✅ **Resueltos el 2026-09-08:** el parser dejó de matchear por **prefijo** (ver la fase 2), y el
+pendiente del `reset` se cerró **con el diagnóstico invertido**: `reset` **anda** y era `reboot` el
+que colgaba. O sea que **el problema nunca fue la línea de NRST**. `reboot` se eliminó — el detalle
+está en el comentario que quedó en `tkCmd.c`, en su lugar.
 
 ### ✅ Quién es el dueño de la hora: el MCP79410 (decidido el 2026-08-12)
 
@@ -845,6 +848,14 @@ El código propio vive **fuera de `Core/`**, para que una regeneración de CubeM
 
 ```
 Application/
+├── config/     cfg_hash.{h,c}          Pearson + tabla: el hash del protocolo
+│               cfg_utils.{h,c}         strlcpy y str2bool
+│               cfg_nvm.{h,c}           layout de la EEPROM, save/load, checksums
+│               cfg_base.{h,c}          timerpoll, timerdial, pwrmodo
+│               cfg_ainputs.{h,c}       3 canales de 4-20 mA + calibracion
+│               cfg_counter.{h,c}       contador de pulsos
+│               cfg_modbus.{h,c}        local + 5 canales remotos
+│               cfg_consigna.{h,c}      doble consigna de presion
 ├── pwr/        pwr_lock.{h,c}          candados de energía (ver abajo)
 ├── drivers/    drv_uart.{h,c}          UART sobre la HAL, tabla de instancias
 │               drv_term_sense.{h,c}    TERM_SENSE, poleado por tkCtl (no EXTI)
@@ -872,7 +883,7 @@ prioridad, el tamaño de stack y su memoria estática (`extern`); las definicion
 
 **`Application/` no se compila sola**: el `.cproject` lista `Core`, `Middlewares` y `Drivers` como
 *source path*. Al clonar o rehacer el proyecto hay que agregarla en *Project → Properties → C/C++
-General → Paths and Symbols → **Source Location** → Add Folder*, y sus cinco subdirectorios en la
+General → Paths and Symbols → **Source Location** → Add Folder*, y sus seis subdirectorios en la
 pestaña **Includes** (con el combo **Configuration** en `[ All configurations ]`, o anda en Debug y
 falla en Release meses después).
 
@@ -1840,6 +1851,494 @@ pregunte, y a 115200 la ventana de `__disable_irq()` del tickless (~100 µs) es 
 entero (87 µs). Ver la sección del tickless comiéndose bytes del USART, que es el mismo mecanismo a
 9600. El costo es que con el modem prendido la placa no baja de Sleep y consume ~3,5 mA — al lado de
 lo que come el modem, es ruido.
+
+## 🔨 FASE 2: la aplicación
+
+Cerrada la fase 1 (`v0.0.14`, todo el hardware con driver), empieza el port de la **aplicación** desde
+**FWDLGX 2.0.12** (AVR128DA64), que es el firmware **en producción**. El árbol vive en
+`~/Spymovil/Dataloggers/FWDLGX.X/` — `SRC/TASKS/` y `SRC/XLIBS/` son las partes que interesan.
+
+### ⭐ El frame es el contrato
+
+Pablo puso una sola condición dura: *"Es importante mantener el formato de los frames de datos ya que
+el servidor debe poder entendernos"*. **El servidor no se toca**, así que el protocolo no es una
+decisión de diseño: es un dato. Está relevado completo en la memoria del proyecto
+(`fwdlgx-protocolo-frames.md`); el resumen:
+
+- Transporte **HTTP GET** con query string (`AT+WKMOD=HTTPD`), respuestas **envueltas en HTML**.
+- Prefijo de todo frame: `ID=<imei>&HW=..&TYPE=..&VER=..&CLASS=..`. En el equipo nuevo:
+  **`HW="SPQ_ARM_R1"`, `TYPE="FWDLGARM_R1"`, `VER=` la versión del firmware** (Pablo, 2026-09-07).
+- Frame de datos: `CLASS=DATA` + `DATE`/`TIME` + un campo por canal **habilitado**, con **el nombre que
+  dice la configuración** + `V0` (válvula) + `bt3v3` + `bt12v`. Precisiones distintas y deliberadas:
+  analógicas `%0.2f`, contador y modbus `%0.3f`.
+- Secuencia: `PING`→`PONG`, `CONF_ALL` con **seis hashes** (uno por bloque), los `CONF_*` que el
+  servidor pida, y recién ahí los datos.
+
+### Paso 2: `dataRcd` y `tkSys`
+
+`Application/tasks/tkSys.{h,c}`, comando `poll`. La tarea despierta cada `timerpoll` segundos, polea
+todo lo configurado y deja un `dataRcd_t` — **mismos campos y mismo orden que el `dataRcd_s` del
+AVR**, porque de ahí sale el frame.
+
+**El comando `poll` llama a la MISMA función que la tarea** (`tkSys_poll()`), no a una copia de
+prueba: si fueran dos caminos, lo que se valida a mano dejaría de ser lo que hace el equipo solo.
+
+**`vTaskDelayUntil` y no `vTaskDelay`**: el período se cuenta desde el despertar anterior, así que lo
+que tarde el poleo no se acumula. Con `vTaskDelay` los registros se irían corriendo de los minutos
+redondos a lo largo del día.
+
+#### ⚠ El registro está incompleto a propósito, y lo DICE
+
+Dos campos todavía no se pueden medir. En vez de rellenar con ceros hay un **bitmask `usInvalidos`**,
+y la consola imprime `SIN_DATO`:
+
+| Campo | Por qué |
+|---|---|
+| Las 3 analógicas | El **INA3221 no contesta** en el I2C de la placa nueva. Es hardware |
+| El contador | Ver el paso 2b, abajo |
+
+**Un canal que no se pudo medir y otro que midió cero se ven idénticos en un float.** En un
+datalogger eso es lo peor que puede pasar: un dato plausible y falso se mezcla con los buenos y
+después no hay forma de separarlos. Es el mismo criterio que la firma en la SRAM del MCP79410 para la
+hora, o el `estado_asumido` de la válvula.
+
+⏳ **Qué hace el frame con un campo inválido se decide en el paso 3**: lo natural es no emitirlo, pero
+eso lo tiene que aceptar el servidor.
+
+#### ⚠ Dos hallazgos del banco (2026-09-08)
+
+**1. La hora puede ser inválida aunque el chip conteste.** El primer poleo estampó `01/01/01
+00:42:37` y el registro lo daba por bueno: el MCP79410 había arrancado frío y devolvía su fecha en
+blanco con toda naturalidad. `tkSys_poll()` no estaba consultando **`drv_rtc_validez()`**, que existe
+justamente para eso y **no es una heurística sobre la fecha** —mira la firma en la SRAM del chip, que
+se alimenta de la misma pila que el contador de tiempo—. Corregido: la hora se conserva en el
+registro para diagnóstico, pero marcada `dataINVALIDO_RTC`, y la consola lo dice con un
+`(HORA NO CONFIABLE)` pegado al timestamp.
+
+Es exactamente el escenario contra el que se diseñó la firma, y quedó demostrado que sin engancharla
+el equipo estampa `2001-01-01` sin que nada lo delate.
+
+**2. El nombre del canal ES la clave del campo en el frame, y no había nada que impidiera
+repetirlo.** En banco aparecieron dos campos `CAU0=` en la misma línea: el contador y el canal Modbus
+0 estaban los dos habilitados y los dos se llamaban `CAU0`. En el frame eso emite dos campos iguales
+y **el servidor se queda con uno de los dos** — un dato se pierde en silencio.
+
+Y no es un descuido raro: es la configuración natural cuando el caudal puede venir **por pulsos o por
+Modbus**, que son alternativas y no cosas simultáneas. El propio FWDLGX trae los dos ejemplos con ese
+mismo nombre. Ahora `cfg_nvm_chequear_nombres()` los detecta y los informa en `config` y en
+`config save`. **Avisa, no impide**: qué canales habilitar es decisión del operador, y un equipo que
+se niega a guardar en medio de una instalación es peor que uno que advierte.
+
+#### ⏳ Paso 2b: el caudal, y por qué va aparte
+
+Al portar el contador apareció algo que cambia el alcance: **el `modo_medida` NO cambia lo que se
+transmite.** `dr->contador` lleva **siempre** `cnt.caudal`; `PULSOS` sólo cambia cómo se imprime en la
+consola (entero en vez de 3 decimales). O sea que no hay una versión "simple" del contador que
+transmita pulsos: **el dato que viaja es el caudal, o no hay dato**.
+
+Y ese caudal, en el AVR, sale de un **EMA calculado en la ISR por cada pulso**, con:
+
+- decay a cero por silencio prolongado (`dT_zero_ms`, derivado de `magpp`),
+- clamp de slew-rate al ±10 % del caudal anterior,
+- arranque con alpha variable durante los primeros pulsos,
+- promediado de los EMA acumulados entre poleos,
+- descarte por debajo de `CAUDAL_MIN_M3H`.
+
+Son ~600 líneas afinadas en campo, con un simulador de pulsos en Python y escenarios E1…E10
+(`FWDLGX.X/SRC/DOCS/`). **Y toca la ISR de `drv_pulsos`**, que hoy sólo cuenta y no lleva timestamps
+por pulso. Es un paso propio, con su diseño y su validación contra ese simulador — no un detalle del
+paso 2.
+
+#### ✅ De paso: la sintaxis de `config counter` estaba mal
+
+Al leer `counter_config_channel()` del AVR apareció que el orden real es
+**`<enable> <name> <magpp> <modo> <qmax> <alpha>`** —el modo va **tercero**— y que **`alpha` es
+configurable**. Estaba puesto con el modo al final y sin alpha. Importa por dos razones: Pablo pidió
+la misma sintaxis que el AVR para no reeducar a los técnicos, y **`alpha` viaja en el hash**: sin
+poder fijarlo quedaría siempre en 0.25 y el hash no coincidiría con el de un equipo afinado distinto.
+
+### Paso 3: el frame
+
+`Application/tasks/wan_frame.{h,c}`, comando `frame`. Es la serialización de un `dataRcd_t` en el
+formato que espera el servidor, portada de `wan_load_dr_in_txbuffer()`. **Sin modem, sin red.**
+
+⭐ **Validado contra el AVR sin hardware**: se compiló la implementación nueva para el host junto con
+una transcripción literal de la del AVR y se compararon los frames en tres configuraciones —la de los
+ejemplos del servidor, la misma con `DATANR`, y los **9 canales habilitados**—. **Idénticos los
+tres.** El de 9 canales da 212 bytes, lo que confirma de paso por qué el AVR desbordaba: allá el
+buffer era de 255 y con nombres largos no alcanza. Acá son 512.
+
+```
+ID=000000000000000&HW=SPQ_ARM_R1&TYPE=FWDLGARM_R1&VER=0.0.21&CLASS=DATA&DATE=260908&TIME=140533
+&pA=3.14&pB=7.50&CAU0=12.345&PRE1=4.200&V0=1&bt3v3=3.281&bt12v=12.150
+```
+
+#### ⚠ El frame NO se imprime con `xprintf`
+
+`xprintf` formatea en un buffer estático de **160 bytes** (`XPRINTF_BUFFER_SIZE`) y **el frame es más
+largo**: 174 en el primer intento de banco, hasta ~350 con los 9 canales y nombres largos. Pasarlo por
+ahí lo **truncaba en silencio**, y el síntoma confundía: se veía un frame cortado a mitad de campo
+mientras el contador informaba el largo correcto, así que la sospecha caía sobre el frame en vez de
+sobre la impresión.
+
+Va con `frtos_write( fdTERM, … )` directo: el frame ya es una cadena terminada, no necesita formateo.
+**Vale para cualquier cosa larga que se quiera sacar por consola.**
+
+#### ⚠ La firma del RTC certifica CONTINUIDAD, no CORRECCIÓN
+
+Encontrado en banco el **2026-09-08**: el equipo informó `01/01/01` **con la firma intacta y el
+oscilador corriendo**, o sea que `drv_rtc_validez()` devolvió `rtcHORA_VALIDA` — correctamente, según
+lo que ese mecanismo puede saber.
+
+Y es una limitación de fondo, no un bug: **la firma se escribe al fijar la hora**, así que certifica
+que el reloj no se detuvo desde entonces. Si alguna vez se fijó una hora equivocada, la firma la
+certifica igual y el reloj viene contando sin interrupciones desde 2001.
+
+El refuerzo que se agregó **no es una heurística arbitraria** del tipo "el año parece viejo": **una
+muestra no puede ser anterior a la compilación del firmware que la tomó**. Si el año del RTC es menor
+que el año de `__DATE__`, la hora es *imposible*, no improbable — y eso no depende de ninguna
+constante que envejezca.
+
+```c
+#define TKSYS_ANIO_COMPILACION  ( ( __DATE__[9] - '0' ) * 10 + ( __DATE__[10] - '0' ) )
+```
+
+Los dos chequeos se complementan: la firma detecta el arranque frío (que el año no delata, porque el
+chip podría arrancar con una fecha plausible), y el año detecta la hora mal fijada (que la firma no
+puede ver).
+
+#### El centinela -9999 (decisión de Pablo, 2026-09-08)
+
+Un campo que no se pudo medir viaja como **-9999**, no se omite. El razonamiento es de Pablo:
+*"si no lo transmitimos el servidor no lo detecta"*. Un campo **ausente** se confunde con un canal
+deshabilitado y pasa desapercibido; un **-9999** salta a la vista, y como las magnitudes que mide el
+equipo son positivas, no puede confundirse con una medida real.
+
+Es el mismo criterio que el `SIN_DATO` de la consola, la firma del MCP79410 y el `estado_asumido` de
+la válvula: **hacer visible lo que no se sabe**.
+
+⚠ **La hora es la excepción**: no es un campo numérico, así que si el reloj arrancó frío viaja su
+fecha tal cual (`DATE=010101`), que del lado del servidor es igual de detectable.
+
+#### ⏳ El IMEI es falso en esta etapa
+
+`wan_imei()` devuelve **15 ceros**. Es provisorio y acordado con Pablo: esta etapa no incluye el
+modem. Lo definitivo, para el paso 5: **tkWAN prende el modem al arrancar, pregunta `AT+IMEI?` y lo
+cachea**; queda fijado aunque el modem se apague después, así que el frame nunca necesita el modem
+encendido para armarse. Sólo hay que cambiar lo que devuelve esa función.
+
+⚠ **Los 15 ceros son a propósito y no un placeholder cualquiera**: es sintácticamente un IMEI —no
+rompe el parseo del servidor— pero **ningún equipo real lo tiene**, así que un frame de prueba que
+llegara por error a producción sería rechazado como equipo desconocido en vez de mezclarse con los
+datos de un datalogger que existe.
+
+### Paso 4: el almacén de registros
+
+`Application/tasks/fs_datos.{h,c}`, comando `fs`. Buffer circular sobre la EEPROM, portado de
+`fileSystem.c`. **1984 registros de 64 bytes** en `0x01000..0x1FFFF` — casi el doble que el AVR, que
+usaba la EEPROM entera porque su configuración vivía en la NVM interna del micro.
+
+Con `timerpoll` de 5 minutos son **casi 7 días** de autonomía sin transmitir.
+
+#### ⚠ La FAT va en la SRAM del MCP79410, y es por VIDA ÚTIL
+
+Los datos se reparten sobre 1984 posiciones, así que cada celda se reescribe una vez por semana —unos
+500 ciclos en 10 años sobre un chip que aguanta millones—. Pero **la FAT se actualiza en cada
+registro**: en la EEPROM serían más de un millón de escrituras sobre las mismas celdas. La SRAM del
+RTC no tiene límite de ciclos y ya está respaldada por la pila. Es lo que hace el AVR
+(`RTC_write( FAT_ADDRESS, … )`) y encaja con el área que `drv_rtc79410` reserva después de la firma.
+
+⚠ **El riesgo que eso trae no es teórico en este equipo**: si se pierde la pila se pierde la FAT, y
+con ella la referencia a todos los datos. **El porta pila falla de forma intermitente** —de cuatro
+cortes aguantó tres—. Pablo decidió mantener el diseño del AVR; la defensa que sí se puso es barata:
+la FAT **se valida al leerla** —checksum *y* coherencia de punteros— y si no cierra se formatea
+avisando, en vez de operar con punteros basura y pisar la configuración, que vive justo antes en la
+misma EEPROM. Los registros llevan tag `0xC5`, así que el día que haga falta se puede reconstruir.
+
+#### Circular de verdad: el nuevo pisa al más viejo
+
+⚠ **Acá se cambió a propósito el comportamiento del AVR** (decisión de Pablo, 2026-09-08). Aquel dice
+"ringbuffer" en el comentario pero **no lo es**: al llenarse rechaza el registro nuevo
+(`ERROR: FS full`), o sea que conserva lo viejo y **pierde lo que está pasando**. Con el modem sin
+señal una semana, el equipo dejaría de registrar justo cuando más importa.
+
+Acá el nuevo pisa al más viejo, y **se avisa la primera vez**: que se empiece a pisar es información
+de campo — dice que el equipo lleva demasiado tiempo sin poder transmitir.
+
+#### Leer y borrar son operaciones separadas
+
+`fs_datos_peek()` mira sin consumir, `fs_datos_pop()` descarta. Un registro **se borra recién cuando
+el servidor confirmó que lo recibió**; si fueran una sola operación, cada sesión cortada se llevaría
+los datos puestos.
+
+`pop()` y `format()` **no borran la EEPROM**: alcanza con mover el puntero. Borrar costaría una
+escritura por registro —desgaste y tiempo— para no ganar nada.
+
+#### ⚠ `packed` en el registro, y el margen que quedó
+
+El `_Static_assert` cazó que el registro **no entraba en 64 bytes** por el relleno que ARM inserta
+para alinear los `float`. Se resolvió con `__attribute__((packed))`, pero **el motivo de fondo no es
+el tamaño**: sin él, el layout en memoria persistente dependería de opciones de compilación. Un
+cambio de flags o de versión del compilador movería los offsets y **los registros viejos se leerían
+corridos, con checksum válido** —porque el checksum se calcula sobre los mismos bytes—. Datos
+plausibles y falsos. En el AVR el asunto no existía: es de 8 bits y alinea a byte.
+
+⏳ **Queda ajustado: 62 de 64 bytes.** Agregar un campo a `dataRcd_t` no entra, y el
+`_Static_assert` lo va a decir. Cuando pase, la decisión es entre subir el registro a 72 —1763
+registros en vez de 1984, o sea 6,1 días en vez de 6,9— o sacar algo. **Conviene decidirlo antes de
+que haya equipos con datos guardados**, porque cambiar el tamaño invalida lo grabado.
+
+### Paso 4b: la microSD como extensión, con la EEPROM de ventana
+
+Diseño propuesto por Pablo y acordado el **2026-09-08**. Reemplaza la idea previa de "EEPROM
+primaria + SD histórico redundante".
+
+```
+cada muestra  ->  EEPROM (la VENTANA)  --se llena-->  un archivo en la microSD
+                       |                                      |
+                       +--- al transmitir: primero la EEPROM, después los archivos
+```
+
+**Por qué es el diseño correcto, y no una comodidad**: el problema real de la SD es el costo de cada
+acceso —encender, re-inicializar la tarjeta, montar, escribir, desmontar, apagar— contra los 5 ms de
+una escritura I2C. Poleando cada minuto, escribir la SD en cada muestra serían **1440 ciclos por
+día**. Con la ventana, **la SD se toca una vez cada 33 horas** (1984 registros a 1/min), en una
+operación grande y previsible. Es la diferencia entre usar FatFs de a ratos y tenerlo en el camino
+crítico de cada ciclo.
+
+Y el reparto queda limpio:
+
+- **La EEPROM absorbe cada muestra**: barata, siempre presente, y **sin estructura que corromper** —un
+  corte de alimentación pierde a lo sumo un registro, no la tabla de asignación entera como haría FAT.
+- **La SD sólo recibe volcados espaciados**, que es cuando el riesgo de FatFs es manejable.
+- **Degrada bien**: sin tarjeta, el equipo funciona exactamente como hoy.
+
+Casos de uso que lo motivaron (Pablo): un equipo **logueando sin transmitir dos semanas** —20.160
+muestras, ~10 volcados, unos pocos MB— y un modo **debug con la consola espejada a un archivo**. Lo
+segundo sí escribe seguido, pero es una sesión supervisada, no operación de campo.
+
+#### Las tres decisiones (Pablo, 2026-09-08)
+
+**1. En la SD van los FRAMES DE TEXTO ya armados**, no registros binarios. Cuesta ~3× más espacio,
+que en una SD es irrelevante, y a cambio: los archivos son legibles en una PC, **desaparece el
+problema de "configuración nueva con datos viejos"** —el frame guardado ya tiene los nombres con los
+que se midió— y al transmitir no hay que rearmar nada.
+
+**2. Los archivos se numeran con un CONTADOR SECUENCIAL**, no con la fecha. Si el RTC arrancó frío,
+los nombres por fecha colisionarían. El contador va junto a la FAT en la SRAM del RTC; la fecha ya
+viaja adentro de cada frame.
+
+**3. Al transmitir: primero la EEPROM, después los archivos de la SD.** No es el orden cronológico, y
+está bien: *"los frames tienen fecha que se usa para indexar la base de datos del servidor, no
+importa como lleguen"*. Los datos que entren durante la sesión quedan en la ventana para la próxima.
+
+⭐ Y tiene una ventaja que no se buscaba: **vaciar la EEPROM primero libera la ventana al principio de
+la sesión**, justo antes de la parte larga (los archivos). Eso reduce la chance de que la ventana se
+llene en medio de la transmisión, que era el caso incómodo del orden cronológico.
+
+#### ✅ FatFs, generado por Pablo el 2026-09-08
+
+*Middleware → FATFS → **User-defined*** (no SDMMC: la SD va por SPI). Quedó con `_USE_LFN = 0`,
+`_FS_TINY = 1`, `_VOLUMES = 1`, `_FS_REENTRANT = 0`, `_FS_NORTC = 0` y `_USE_MKFS = 1`.
+
+⚠ En la GUI la opción de la fecha **no se llama "Disabled"** sino **`Dynamic timestamp`**
+(= `_FS_NORTC = 0`); `Fixed timestamp` pondría la misma fecha en todos los archivos.
+
+`FATFS/Target/user_diskio.c` quedó enganchado a `drv_sd`, con dos decisiones:
+
+- ⚠ **`USER_initialize()` NO enciende la tarjeta**: sólo informa si está lista. El encendido lo hace
+  `fs_sd`, que es quien sabe cuándo vale la pena pagarlo y cuándo apagar. Si encendiera desde ahí,
+  FatFs prendería la SD sola en cada `f_mount` y nadie sabría cuándo apagarla — justo el control que
+  el diseño de ventana quiere conservar.
+- **`GET_BLOCK_SIZE` devuelve 1**, que no es la verdad —una SD borra de a bloques de decenas de KB—
+  pero es el valor **seguro**: hace que `f_mkfs` alinee de forma conservadora en vez de asumir una
+  alineación que la tarjeta no tiene. El valor real sale de `ERASE_BLK_LEN` en la CSD, que `drv_sd`
+  no expone. Sólo afecta al formateo.
+
+**`get_fattime()`** (en `fs_sd.c`) lee del MCP79410, y **si la hora no es confiable devuelve 0** —que
+FatFs interpreta como "sin fecha"— en vez de estampar 2001-01-01 en el directorio. Un archivo sin
+fecha se nota; uno fechado en 2001 se copia a un informe sin que nadie lo mire dos veces.
+
+⚠ Recordar que **`_FS_TIMEOUT` está en TICKS, no en ms**: con el tick a 512 Hz, el default de 1000
+son 1,95 s. Hoy no importa porque `_FS_REENTRANT = 0`.
+
+#### El volcado va al UMBRAL del 90 %, no al llenarse
+
+Es la diferencia entre un margen y un borde. Si se esperara a `count == length`, un volcado fallido
+—tarjeta ausente, error de escritura— dejaría al equipo pisando registros desde el intento siguiente.
+Con el umbral al 90 % quedan ~198 registros de aire para reintentar: más de 3 horas a una muestra por
+minuto.
+
+Y **el orden dentro del volcado es la única garantía real**: se escribe el archivo, se **confirma el
+`f_close()`**, y recién ahí se vacía la ventana. Si se vaciara antes, un corte en el medio se
+llevaría los datos de los dos lados a la vez. Si algo falla, la ventana **queda intacta**.
+
+### ⚠ La versión sube en CADA entrega a banco
+
+Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
+firmware estoy usando"*. **Vamos por `0.0.X` durante toda la fase 2; al terminar la aplicación, pasa
+a `1.0.0`.**
+
+No es burocracia: cuando se puso la regla, `FW_VERSION` en `main.h` decía **`"0.0.8"`** mientras los
+tags de git iban por **`v0.0.14`** — o sea que el banner mentía sobre qué firmware estaba corriendo,
+que es justo la pregunta que más veces hubo que contestar en el bring-up. Se puso al día en
+**`0.0.15`**, **continuando la serie de los tags** para que no queden dos numeraciones conviviendo
+(era la arruga que estaba anotada acá).
+
+Los tres campos que identifican al equipo viven juntos en `main.h`, bloque *USER CODE*, y son los que
+viajan en el frame:
+
+```c
+#define FW_NOMBRE   "FWDLGARM_R1"       /* = TYPE en el frame */
+#define FW_VERSION  "0.0.15"            /* = VER              */
+#define FW_HW       "SPQ_ARM_R1"        /* = HW, la PLACA     */
+```
+
+`status` los imprime tal cual van a viajar, así se verifica de un vistazo con qué identidad se
+presenta el equipo. Y `FW_FECHA` sale de `__DATE__`/`__TIME__`: **un número de versión se olvida de
+subir, la fecha de compilación no miente nunca** — por eso están las dos cosas.
+
+### El plan, y en qué paso estamos
+
+| # | Paso | Estado |
+|---|---|---|
+| **1** | **Configuración persistente** en la M24M01 (5 bloques, hashes, comandos) | ✅ **validado en banco el 2026-09-08** |
+| **2** | `dataRcd` y el poleo (`tkSys`) | 🔨 **escrito, sin probar** |
+| **2b** | ⏳ **El caudal del contador** — EMA por pulso, decay y slew-rate | pendiente, ver abajo |
+| **3** | ⭐ **El frame, sin modem** | 🔨 **escrito; idéntico al AVR en el test de host, falta banco** |
+| **4** | Almacenamiento: FS circular sobre la EEPROM | 🔨 **escrito, sin probar** |
+| **4b** | La microSD como extensión: la EEPROM es una VENTANA | 🔨 **escrito, sin probar** |
+| 5 | `tkWan`: la FSM y los modos continuo/discreto/mixto | |
+| 6 | Modbus | |
+| 7 | Consigna (`tkCtlPres`) | |
+| 8 | Watchdog cooperativo + `tkCtl` definitivo | |
+| 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo | |
+
+**Fuera de alcance por decisión de Pablo (2026-09-07)**: `tkFlow`/flowcontrol y los modos `PWR_RTU` y
+`PWR_SILENT`. Existen en el AVR; acá no entran todavía.
+
+### ⚠ El hash de configuración: la trampa del paso 1
+
+**No es un checksum de la struct: es un Pearson de 8 bits sobre un STRING FORMATEADO.**
+
+```
+[TIMERPOLL:%03d]   [A0:TRUE,pA,4,20,0.00,10.00,0.00]   [C0:TRUE,CAU0,5.300,CAUDAL,200.00,0.25]
+```
+
+El servidor calcula el suyo y los compara. **Si difiere un solo carácter** —un `%03d` que salga `%d`,
+un `TRUE` en minúscula, un decimal de más— el hash cambia y el servidor **pide reconfigurar ese bloque
+en cada sesión, para siempre**. No se ve en el banco: se ve como tráfico infinito en campo.
+
+Por eso se portaron **carácter por carácter** la tabla de Pearson de 256 bytes y cada string de
+formato, y por eso `cfg_hash.h` empieza con esa advertencia.
+
+Dos detalles que costaron atención:
+
+- **Cada campo se hashea por separado**, sobre un buffer que se limpia entre uno y otro. **No** es el
+  hash de un string único con todo concatenado: daría distinto.
+- ⚠ **El buffer de 64 bytes es parte del contrato.** Si un string no entra se trunca, y el hash
+  cambia; mantener el mismo límite es lo que garantiza que los dos equipos se comporten igual también
+  en el borde.
+- ⚠ En el AVR `char` es **unsigned** y en ARM es **signed**. El índice de la tabla sale de
+  `seed ^ ch`, así que un carácter de más de 0x7F daría un índice negativo. `cfg_hash_char()` castea a
+  `uint8_t` para reproducir el AVR — con nombres ASCII no se llega ahí nunca, pero el día que alguien
+  configure un canal con un acento el bug sería mudo.
+
+**Cómo se validó, y sin hardware**: se compiló la implementación nueva para el host junto con una
+transcripción literal de las funciones del AVR, y se compararon los cinco hashes en tres
+configuraciones (defaults, una realista, y una con nombres al límite del buffer). **Los 15
+coincidieron.** El test está en el scratchpad de la sesión, no en el repo.
+
+⏳ **Lo que ese test NO cierra**: corre con glibc, y el equipo real usa newlib (ARM) contra avr-libc
+(AVR). Un caso de borde de redondeo en `%.02f` podría diferir. La verificación final es barata:
+`config` imprime los cinco hashes, se ponen la misma configuración en los dos equipos y se comparan.
+
+### La configuración vive en la EEPROM externa (paso 1)
+
+`Application/config/`, comando `config`.
+
+**⚠ El STM32L496 no tiene EEPROM interna.** En el AVR la configuración iba a la NVM interna del micro
+y la EEPROM externa era el filesystem entero. Acá las dos cosas conviven en la **M24M01**, que tiene
+128 KB de sobra (decisión de Pablo, 2026-09-07):
+
+```
+0x00000 - 0x00FFF     4 KB   configuración   (usa 320 B; el resto es para crecer)
+0x01000 - 0x1FFFF   124 KB   filesystem      -> 1984 registros de 64 B
+```
+
+El FS todavía **no se escribe**: esta etapa sólo le reserva el espacio, para no tener que discutir el
+mapa después. De paso queda con casi el doble de registros que el AVR (1984 contra 1024).
+
+| Bloque | Dirección | Tamaño |
+|---|---|---|
+| `base` | `0x00000` | 16 / 64 B |
+| `ainputs` | `0x00040` | 88 / 192 B |
+| `counter` | `0x00100` | 40 / 64 B |
+| `modbus` | `0x00140` | 168 / 384 B |
+| `consigna` | `0x002C0` | 8 / 64 B |
+
+Hay un **`_Static_assert` por bloque**: si uno crece más de lo reservado, lo dice el compilador y no se
+descubre en campo pisando el bloque siguiente.
+
+**Un bloque, un checksum**, igual que el AVR: si uno se corrompe, **sólo ése** cae a sus valores por
+defecto y lo dice por consola. Un checksum malo **no impide arrancar** — en un equipo desatendido es
+mejor medir con la configuración de fábrica que no arrancar.
+
+⚠ **Por qué cada `cfg_*_defaults()` hace `memset()` antes de llenar**: el checksum se calcula sobre
+`sizeof(struct) - 1`, o sea sobre la struct entera **incluido el relleno del compilador**. Con padding
+sin inicializar, el checksum de una configuración recién puesta no coincidiría con el de la misma
+configuración releída. En el AVR no se veía porque las structs eran globales y arrancaban en cero.
+
+`config default` y `config load` trabajan **sólo en RAM**: nada se graba hasta `config save`. Es a
+propósito — así un `config default` mal tipeado se deshace con un `config load`.
+
+### ✅ Paso 1 validado en banco (2026-09-08)
+
+Los cuatro criterios de aceptación pasaron:
+
+| Criterio | Resultado |
+|---|---|
+| ⭐ **Los hashes** | `BH=0x25 AH=0xE5 CH=0x3F MH=0xD5 PH=0x2A` — **exactamente los predichos** por el test del host |
+| Persistencia | `config save` → reset → la configuración volvió idéntica, con los mismos hashes |
+| Bloque corrupto | `ee wr 0x00000 PABLO` + reset → **cayó sólo `base`**; los otros cuatro sobrevivieron |
+| Validaciones | `config ainput 0 true pA 20 4 0 10 0` rechazado (imin ≥ imax) |
+
+⭐ **Que los hashes coincidan con la predicción es lo que cierra el riesgo del contrato**: era lo
+único que el test del host no podía demostrar, porque corre con glibc y el equipo usa newlib. Ahora
+está probado que las dos formatean igual los `%.02f` de la configuración.
+
+⛔ **Un bug que salió de esta etapa: la tabla de comandos se llenó.** Al registrar `config` se llegó a
+17 y `CMDLINE_MAX_COMMANDS` era **16**, así que **`reboot` quedó sin registrar**. El driver lo avisaba
+—`CMD: ERROR: tabla de comandos llena (16)`— pero el mensaje sale en medio del chorro de arranque y
+pasa inadvertido; desde afuera el síntoma es un comando que "no existe". Subido a **24**, con margen
+para los comandos que trae la fase 2.
+
+### ✅ El pendiente del `reset` se cerró, con el diagnóstico dado vuelta (2026-09-08)
+
+`reboot` era un **experimento**, no una comodidad: existía para separar dos causas que desde afuera se
+ven iguales. Su comentario decía qué significaba cada resultado — *"reboot anda y reset mata la placa
+→ es la LÍNEA DE NRST"*, *"los dos matan la placa → no es NRST"*.
+
+**El experimento dio su resultado, y es el contrario del que se venía suponiendo:**
+
+| | Se creía | Medido el 2026-09-08 |
+|---|---|---|
+| `reset` (NVIC_SystemReset, pulsa NRST) | colgaba la placa | ✅ **anda** — reinicia e informa `SOFT PIN` |
+| `reboot` (salto tibio, sin NRST) | andaba | ⛔ **cuelga**, hay que ciclar la alimentación |
+
+**El problema nunca fue la línea de NRST.** Y `reboot` no falla por un detalle corregible: saltar al
+vector **sin resetear nada** deja el I2C, el SPI, las UARTs, el LPTIM y FreeRTOS corriendo con sus
+interrupciones pendientes, y después los `MX_*_Init()` los reprograman en caliente. Con el firmware
+chico del bring-up sobrevivía; con el I2C hablándole a la EEPROM al arrancar para cargar la
+configuración, no. **Se eliminó el comando**, y la explicación quedó en `tkCmd.c` en su lugar para
+que nadie lo reponga sin leerla.
+
+### ✅ El parser dejó de matchear por prefijo (2026-09-08)
+
+Estaba anotado como pendiente desde el principio: `strncmp( comando, tipeado, largo_tipeado )` hacía
+que **`r` ejecutara `reset`** y `s` ejecutara `status`. Se cerró al entrar los comandos de
+configuración, que además de reiniciar pueden **borrar la configuración** (`config default`). Ahora el
+largo tiene que coincidir: comando completo.
 
 ### ⚠ `printf` con `%f`: hay que habilitarlo, y el síntoma de que falta es que no imprime NADA
 

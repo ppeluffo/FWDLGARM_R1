@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include "fatfs.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -26,6 +27,7 @@
 
 #include "tkCtl.h"
 #include "tkCmd.h"
+#include "tkSys.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -382,6 +384,7 @@ int main(void)
   MX_SPI3_Init();
   MX_ADC1_Init();
   MX_UART4_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -433,6 +436,21 @@ int main(void)
                           tkCmd_PRIORITY,
                           tkCmd_Stack,
                           &tkCmd_TCB ) == NULL )
+  {
+    Error_Handler();
+  }
+
+  /* Medida. Arranca después de tkCmd a propósito: tkCmd es quien inicializa los
+     drivers y carga la configuración desde la EEPROM, y tkSys los necesita. La
+     espera de arranque de tkSys (10 s) es lo que le da margen. */
+  xHandle_tkSys = xTaskCreateStatic( tkSys,
+                                     "SYS",
+                                     tkSys_STACK_SIZE,
+                                     NULL,
+                                     tkSys_PRIORITY,
+                                     tkSys_Stack,
+                                     &tkSys_TCB );
+  if ( xHandle_tkSys == NULL )
   {
     Error_Handler();
   }

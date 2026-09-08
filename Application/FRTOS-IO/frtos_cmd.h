@@ -25,7 +25,17 @@
 #include <stdint.h>
 
 #define CMDLINE_MAX_CMD_LENGTH  10
-#define CMDLINE_MAX_COMMANDS    16
+/*
+ * ⚠ Subido de 16 a 24 el 2026-09-08, y la causa vale anotarla: al entrar el
+ * comando `config` la tabla llegó a 17 y **`reboot` quedó sin registrar**. El
+ * driver lo avisó por consola —`tabla de comandos llena (16)`— pero el mensaje
+ * sale en medio del chorro de arranque y es fácil que pase inadvertido; el
+ * síntoma real es un comando que simplemente "no existe".
+ *
+ * La fase 2 agrega varios comandos más (poleo, frame, filesystem), así que se
+ * dejó margen en vez de subir de a uno. Cuesta ~384 bytes de BSS sobre 256 KB.
+ */
+#define CMDLINE_MAX_COMMANDS    24
 #define MAX_INPUT_LENGTH        64
 #define CMDLINE_MAX_ARGS        16
 

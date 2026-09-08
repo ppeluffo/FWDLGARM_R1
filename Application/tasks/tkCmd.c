@@ -18,6 +18,11 @@
 #include "drv_pulsos.h"
 #include "drv_valvula.h"
 #include "drv_lte.h"
+#include "cfg_nvm.h"
+#include "tkSys.h"
+#include "wan_frame.h"
+#include "fs_datos.h"
+#include "fs_sd.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -291,9 +296,14 @@ static void cmdVin( void );
 static void cmdCnt( void );
 static void cmdEv( void );
 static void cmdLte( void );
+static void cmdConfig( void );
+static void cmdPoll( void );
+static void cmdFrame( void );
+static void cmdCls( void );
+static void cmdFs( void );
+static void prvFsUso( void );
 static void cmdKeys( void );
 static void cmdReset( void );
-static void cmdReboot( void );
 
 /* Ayudas detalladas de cada comando. Se definen junto a su comando, más abajo. */
 static void prvI2cUso  ( void );
@@ -306,6 +316,7 @@ static void prvVinUso  ( void );
 static void prvCntUso  ( void );
 static void prvEvUso   ( void );
 static void prvLteUso  ( void );
+static void prvConfigUso( void );
 
 /*
  * Causa del último reset, leída de RCC_CSR antes de limpiarla.
@@ -407,6 +418,24 @@ void tkCmd( void *pvParameters )
     /* Deja los dos rieles del modem cortados y el PWRKEY suelto. */
     drv_lte_init();
 
+    /*
+     * La configuración, de la EEPROM. Va acá y no antes porque necesita el bus
+     * I2C, que se levanta más arriba en esta misma función.
+     *
+     * Un bloque con checksum malo NO impide arrancar: cae a sus valores por
+     * defecto y lo dice por consola. En un equipo desatendido es preferible
+     * medir con la configuración de fábrica que no arrancar — y el aviso queda
+     * en el log para quien lo lea.
+     */
+    if( !cfg_nvm_load_all() )
+    {
+        xprintf( "CFG:: [!] hubo bloques con defaults, revisar con 'config'\r\n" );
+    }
+
+    /* El almacén de registros. Va después de la configuración porque comparte
+       la EEPROM con ella, y necesita el RTC para la FAT. */
+    ( void ) fs_datos_init();
+
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
@@ -421,9 +450,13 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "cnt",    cmdCnt    );
     FRTOS_CMD_register( "ev",     cmdEv     );
     FRTOS_CMD_register( "lte",    cmdLte    );
+    FRTOS_CMD_register( "config", cmdConfig );
+    FRTOS_CMD_register( "poll",   cmdPoll   );
+    FRTOS_CMD_register( "frame",  cmdFrame  );
+    FRTOS_CMD_register( "cls",    cmdCls    );
+    FRTOS_CMD_register( "fs",     cmdFs     );
     FRTOS_CMD_register( "keys",   cmdKeys   );
     FRTOS_CMD_register( "reset",  cmdReset  );
-    FRTOS_CMD_register( "reboot", cmdReboot );
 
     /* La versión y la fecha de compilación en el banner, no sólo en 'status':
        es lo primero que uno quiere ver al enchufar la terminal, y contesta sin
@@ -499,9 +532,13 @@ static const cmd_ayuda_t xAyuda[] = {
     { "cnt",    "contador de pulsos CNT0 (PA12): cuenta y estado",       prvCntUso     },
     { "ev",     "electrovalvula TOYI: abrir, cerrar y estado",           prvEvUso      },
     { "lte",    "modem LTE, etapa 1: la energia y el PWRKEY",            prvLteUso     },
+    { "config", "configuracion del datalogger (EEPROM)",                 prvConfigUso  },
+    { "poll",   "fuerza un poleo de todos los canales y lo imprime",    NULL          },
+    { "frame",  "arma el frame de datos y lo muestra (sin modem)",      NULL          },
+    { "cls",    "limpia la pantalla de la terminal",                    NULL          },
+    { "fs",     "memoria de registros: estado, lectura y formateo",     prvFsUso      },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
-    { "reboot", "reinicio tibio, sin tocar NRST (diagnostico)",          NULL          },
 };
 
 #define AYUDA_COUNT     ( sizeof( xAyuda ) / sizeof( xAyuda[ 0 ] ) )
@@ -559,6 +596,12 @@ static void cmdHelp( void )
 static void cmdStatus( void )
 {
     xprintf( "version      : %s %s\r\n", FW_NOMBRE, FW_VERSION );
+    /* Los tres campos tal cual viajan en el frame: así se verifica de un vistazo
+       con qué identidad se va a presentar el equipo ante el servidor. */
+    xprintf( "identidad    : HW=%s TYPE=%s VER=%s\r\n", FW_HW, FW_TYPE, FW_VERSION );
+    xprintf( "proximo poleo: en %lu s (timerpoll = %u s)\r\n",
+             ( unsigned long ) tkSys_segundos_al_proximo(),
+             ( unsigned ) xCfgBase.usTimerPoll );
     xprintf( "compilado    : %s\r\n", FW_FECHA );
     xprintf( "tick        : %lu (%lu Hz)\r\n",
              ( unsigned long ) xTaskGetTickCount(),
@@ -742,9 +785,19 @@ static void prvI2cScan( void )
     else
     {
         /* Traducir lo conocido, para no tener que ir al datasheet. */
-        xprintf( "esperados en R001: 50..53 = EEPROM M24M02 (dev A0..A6)\r\n" );
+        /*
+         * ⚠ Esta lista es lo que uno mira cuando FALTA un chip, así que tiene
+         * que decir la verdad. Estaba desactualizada: hablaba de una M24M02 en
+         * 50..53 —el chip es una M24M01 y contesta sólo en 50/51, ver CLAUDE.md—
+         * y no mencionaba ni la identification page ni el INA3221. El 2026-09-08
+         * el INA no contestó y la lista no ayudaba a notarlo.
+         */
+        xprintf( "esperados en R001: 50,51  = EEPROM M24M01 128KB (dev A0/A2)\r\n" );
+        xprintf( "                   58,59  = M24M01 identification page (solo lectura!)\r\n" );
+        xprintf( "                   41     = INA3221, medida de 4-20 mA\r\n" );
         xprintf( "                   6f     = MCP79410 RTCC (dev DE)\r\n" );
         xprintf( "                   57     = MCP79410 EEPROM interna (dev AE)\r\n" );
+        xprintf( "son 7 en total; si falta alguno, el chip no esta en el bus.\r\n" );
     }
 }
 
@@ -2399,6 +2452,441 @@ static void cmdLte( void )
              pwr_deep_sleep_permitido() ? "(Stop 2 habilitado)" : "(solo Sleep)" );
 }
 //------------------------------------------------------------------------------
+/*------------------------------------------------------------------------------
+ * Configuración del datalogger
+ *
+ * La sintaxis es la MISMA que la de FWDLGX en el AVR, a propósito: los técnicos
+ * que configuran equipos en campo ya la tienen en los dedos, y cambiarla sólo
+ * para que quede más linda cuesta errores en la instalación.
+ *----------------------------------------------------------------------------*/
+static void prvConfigUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  config                          muestra todo, con los hashes\r\n" );
+    xprintf( "  config save | load | default\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  config timerpoll <s>            periodo de muestreo\r\n" );
+    xprintf( "  config timerdial <s>            periodo de disque (modo discreto)\r\n" );
+    xprintf( "  config pwrmodo <continuo|discreto|mixto>\r\n" );
+    xprintf( "  config pwron <hhmm>             solo en mixto\r\n" );
+    xprintf( "  config pwroff <hhmm>            solo en mixto\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  config ainput <0..2> <enable> <name> <imin> <imax> <mmin> <mmax> <offset>\r\n" );
+    xprintf( "  config pst <s>                  settle time de los sensores 4-20\r\n" );
+    xprintf( "  config counter <enable> <name> <magpp> <caudal|pulsos> <qmax> <alpha>\r\n" );
+    xprintf( "  config consigna <enable> <diurna_hhmm> <nocturna_hhmm>\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  config modbus enable <true|false>\r\n" );
+    xprintf( "  config modbus localaddr <1..247>\r\n" );
+    xprintf( "  config modbus channel <0..4> <enable> <name> <slaaddr> <regaddr>\r\n" );
+    xprintf( "                        <nro_regs> <fcode> <tipo> <codec> <div_p10>\r\n" );
+    xprintf( "     tipo : U16|I16|U32|I32|FLOAT      codec: C0123|C1032|C3210|C2301\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  'default' y 'load' trabajan SOLO en RAM: nada se graba hasta que se\r\n" );
+    xprintf( "  haga 'config save'. Asi un 'default' mal tipeado se deshace con 'load'.\r\n" );
+}
+//------------------------------------------------------------------------------
+static void cmdConfig( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    /* 'config' pelado: el estado completo. */
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        cfg_nvm_print_all();
+        return;
+    }
+
+    /* ---- los que no llevan valor ---- */
+
+    if( strcmp( argv[ 1 ], "save" ) == 0 )
+    {
+        ( void ) cfg_nvm_save_all();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "load" ) == 0 )
+    {
+        ( void ) cfg_nvm_load_all();
+        cfg_nvm_print_all();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "default" ) == 0 )
+    {
+        cfg_nvm_defaults_all();
+        xprintf( "configuracion por defecto cargada EN RAM ('config save' para grabarla)\r\n" );
+        return;
+    }
+
+    /* ---- de acá en adelante hace falta al menos un valor ---- */
+
+    if( ( ucArgs < 2U ) || ( argv[ 2 ] == NULL ) )
+    {
+        prvConfigUso();
+        return;
+    }
+
+    bool bOk = false;
+
+    if     ( strcmp( argv[ 1 ], "timerpoll" ) == 0 ) { bOk = cfg_base_set_timerpoll( argv[ 2 ] ); }
+    else if( strcmp( argv[ 1 ], "timerdial" ) == 0 ) { bOk = cfg_base_set_timerdial( argv[ 2 ] ); }
+    else if( strcmp( argv[ 1 ], "pwrmodo"   ) == 0 ) { bOk = cfg_base_set_pwrmodo  ( argv[ 2 ] ); }
+    else if( strcmp( argv[ 1 ], "pwron"     ) == 0 ) { bOk = cfg_base_set_pwron    ( argv[ 2 ] ); }
+    else if( strcmp( argv[ 1 ], "pwroff"    ) == 0 ) { bOk = cfg_base_set_pwroff   ( argv[ 2 ] ); }
+    else if( strcmp( argv[ 1 ], "pst"       ) == 0 ) { bOk = cfg_ainputs_set_settle_time( argv[ 2 ] ); }
+
+    else if( strcmp( argv[ 1 ], "ainput" ) == 0 )
+    {
+        /* config ainput <ch> <enable> <name> <imin> <imax> <mmin> <mmax> <offset> */
+        if( ( ucArgs >= 9U ) && ( argv[ 9 ] != NULL ) )
+        {
+            bOk = cfg_ainputs_set_canal( ( uint8_t ) atoi( argv[ 2 ] ),
+                                         argv[ 3 ], argv[ 4 ], argv[ 5 ], argv[ 6 ],
+                                         argv[ 7 ], argv[ 8 ], argv[ 9 ] );
+        }
+        else
+        {
+            prvConfigUso();
+            return;
+        }
+    }
+
+    else if( strcmp( argv[ 1 ], "counter" ) == 0 )
+    {
+        /* config counter <enable> <name> <magpp> <modo> <qmax> <alpha>
+           Mismo orden que el AVR: el modo va TERCERO. */
+        if( ( ucArgs >= 7U ) && ( argv[ 7 ] != NULL ) )
+        {
+            bOk = cfg_counter_set( argv[ 2 ], argv[ 3 ], argv[ 4 ], argv[ 5 ],
+                                   argv[ 6 ], argv[ 7 ] );
+        }
+        else
+        {
+            prvConfigUso();
+            return;
+        }
+    }
+
+    else if( strcmp( argv[ 1 ], "consigna" ) == 0 )
+    {
+        /* config consigna <enable> <diurna> <nocturna> */
+        if( ( ucArgs >= 4U ) && ( argv[ 4 ] != NULL ) )
+        {
+            bOk = cfg_consigna_set( argv[ 2 ], argv[ 3 ], argv[ 4 ] );
+        }
+        else
+        {
+            prvConfigUso();
+            return;
+        }
+    }
+
+    else if( strcmp( argv[ 1 ], "modbus" ) == 0 )
+    {
+        if( strcmp( argv[ 2 ], "enable" ) == 0 )
+        {
+            bOk = ( ( ucArgs >= 3U ) && ( argv[ 3 ] != NULL ) ) ?
+                  cfg_modbus_set_enable( argv[ 3 ] ) : false;
+        }
+        else if( strcmp( argv[ 2 ], "localaddr" ) == 0 )
+        {
+            bOk = ( ( ucArgs >= 3U ) && ( argv[ 3 ] != NULL ) ) ?
+                  cfg_modbus_set_localaddr( argv[ 3 ] ) : false;
+        }
+        else if( strcmp( argv[ 2 ], "channel" ) == 0 )
+        {
+            /* config modbus channel <ch> <enable> <name> <sla> <reg> <nregs> <fcode> <tipo> <codec> <div> */
+            if( ( ucArgs >= 12U ) && ( argv[ 12 ] != NULL ) )
+            {
+                bOk = cfg_modbus_set_canal( ( uint8_t ) atoi( argv[ 3 ] ),
+                                            argv[ 4 ], argv[ 5 ], argv[ 6 ], argv[ 7 ],
+                                            argv[ 8 ], argv[ 9 ], argv[ 10 ], argv[ 11 ],
+                                            argv[ 12 ] );
+            }
+            else
+            {
+                prvConfigUso();
+                return;
+            }
+        }
+        else
+        {
+            prvConfigUso();
+            return;
+        }
+    }
+
+    else
+    {
+        prvConfigUso();
+        return;
+    }
+
+    if( bOk )
+    {
+        xprintf( "ok  (recordar 'config save')\r\n" );
+    }
+    else
+    {
+        xprintf( "ERROR: valor invalido\r\n" );
+    }
+}
+//------------------------------------------------------------------------------
+/*
+ * Fuerza un poleo y lo imprime.
+ *
+ * Llama a `tkSys_poll()`, la MISMA función que usa la tarea en cada vuelta, y no
+ * a una copia "de prueba": si fueran dos caminos distintos, lo que se valida a
+ * mano dejaría de ser lo que hace el equipo solo, que es la clase de diferencia
+ * que aparece recién en campo.
+ */
+static void cmdPoll( void )
+{
+    static dataRcd_t xDr;
+
+    xprintf( "poleando...\r\n" );
+    ( void ) tkSys_poll( &xDr );
+    tkSys_print( &xDr );
+}
+//------------------------------------------------------------------------------
+/*
+ * Arma el frame y lo imprime, sin tocar el modem.
+ *
+ * Es LA herramienta de validación de esta etapa: permite poner la misma
+ * configuración en un equipo AVR y en éste y comparar los dos frames carácter
+ * por carácter, sin red, sin servidor y sin que un dato de prueba llegue a
+ * producción. Si son iguales, el contrato queda cerrado antes de que el modem
+ * entre en juego.
+ *
+ * Imprime también el LARGO, que es la primera diferencia que salta si algo no
+ * coincide, y sirve para ver cuánto margen queda contra el buffer.
+ */
+static void cmdFrame( void )
+{
+    static char      pcFrame[ WAN_FRAME_BUFFER_SIZE ];
+    static dataRcd_t xDr;
+
+    /* Se polea de nuevo en vez de usar el último registro: así el frame refleja
+       el estado de AHORA, que es lo que uno quiere al compararlo contra otro
+       equipo. */
+    ( void ) tkSys_poll( &xDr );
+
+    uint16_t usLargo = wan_frame_data( pcFrame, sizeof( pcFrame ), &xDr, true );
+
+    if( usLargo == 0U )
+    {
+        return;     /* wan_frame_data() ya explicó por qué */
+    }
+
+    /*
+     * ⚠ Se escribe DIRECTO al fd, sin pasar por xprintf.
+     *
+     * `xprintf` formatea en un buffer estático de XPRINTF_BUFFER_SIZE (160
+     * bytes) y **el frame es más largo**: 174 en el primer intento de banco, y
+     * hasta ~350 con los 9 canales y nombres largos. Pasarlo por ahí lo truncaba
+     * en silencio — se veía un frame cortado a mitad de campo mientras el
+     * contador de bytes informaba el largo correcto, que es de los síntomas que
+     * hacen dudar del dato en vez de de la impresión.
+     *
+     * El frame ya es una cadena terminada: no necesita formateo, sólo salir.
+     */
+    ( void ) frtos_write( fdTERM, pcFrame, usLargo );
+
+    xprintf( "\r\n  (%u bytes de %u)\r\n",
+             ( unsigned ) usLargo, ( unsigned ) sizeof( pcFrame ) );
+
+    if( xDr.usInvalidos != 0U )
+    {
+        xprintf( "  [!] hay campos en %d: no se pudieron medir\r\n",
+                 ( int ) WAN_CENTINELA_SIN_DATO );
+    }
+}
+//------------------------------------------------------------------------------
+/*
+ * Limpia la pantalla. Se llamaba igual en FWDLGX, así que el nombre se conserva.
+ *
+ * Son secuencias ANSI, no un truco: `ESC[2J` borra la pantalla y `ESC[H` manda
+ * el cursor al ángulo. Las entiende cualquier terminal seria —minicom, PuTTY,
+ * screen—; en una que no las soporte se verían los caracteres crudos y no pasa
+ * nada más.
+ *
+ * Se escriben con xputChar y no con xprintf: el ESC (0x1B) es un carácter de
+ * control, y meterlo en una cadena de formato es pedir que algún día alguien lo
+ * "arregle".
+ */
+static void cmdCls( void )
+{
+    xputChar( 0x1B ); xprintf( "[2J" );     /* borrar toda la pantalla */
+    xputChar( 0x1B ); xprintf( "[H"  );     /* cursor a 1,1            */
+}
+//------------------------------------------------------------------------------
+static void prvFsUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  fs                 estado de la memoria de registros\r\n" );
+    xprintf( "  fs read <n>        muestra los <n> mas viejos SIN borrarlos\r\n" );
+    xprintf( "  fs frame <n>       arma el frame del registro <n> (0 = el mas viejo)\r\n" );
+    xprintf( "  fs pop <n>         DESCARTA los <n> mas viejos\r\n" );
+    xprintf( "  fs format          vacia la memoria\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  fs sd              estado de la microSD y sus lotes\r\n" );
+    xprintf( "  fs sd list         lista los archivos de la tarjeta\r\n" );
+    xprintf( "  fs sd dump         vuelca la ventana a un lote AHORA\r\n" );
+    xprintf( "  fs sd ver <arch>   muestra las primeras lineas de un lote\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  'read' y 'pop' son operaciones distintas a proposito: un registro\r\n" );
+    xprintf( "  se borra recien cuando el servidor confirmo que lo recibio.\r\n" );
+    xprintf( "  Al cambiar la configuracion conviene 'fs format': los registros\r\n" );
+    xprintf( "  guardados se armarian con los nombres NUEVOS y los datos VIEJOS.\r\n" );
+}
+//------------------------------------------------------------------------------
+static void prvFsEstado( void )
+{
+    fs_datos_stats_t xSt;
+
+    fs_datos_stats( &xSt );
+
+    xprintf( "  guardados : %u de %u\r\n", ( unsigned ) xSt.usCount, ( unsigned ) xSt.usLength );
+    xprintf( "  head/tail : %u / %u\r\n", ( unsigned ) xSt.usHead, ( unsigned ) xSt.usTail );
+
+    /* Con timerpoll conocido, "cuántos registros quedan" se entiende mucho
+       mejor como tiempo: es lo que dice cuánto puede estar sin transmitir. */
+    if( xCfgBase.usTimerPoll > 0U )
+    {
+        uint32_t ulLibres = ( uint32_t ) ( xSt.usLength - xSt.usCount );
+        uint32_t ulHoras  = ( ulLibres * xCfgBase.usTimerPoll ) / 3600UL;
+
+        xprintf( "  autonomia : %lu registros libres = %lu h con timerpoll de %u s\r\n",
+                 ( unsigned long ) ulLibres, ( unsigned long ) ulHoras,
+                 ( unsigned ) xCfgBase.usTimerPoll );
+    }
+
+    if( xSt.ulPisados > 0U )
+    {
+        xprintf( "  [!] PERDIDOS: %lu registros pisados por memoria llena\r\n",
+                 ( unsigned long ) xSt.ulPisados );
+    }
+}
+//------------------------------------------------------------------------------
+static void cmdFs( void )
+{
+    static dataRcd_t xDr;
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        prvFsEstado();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "format" ) == 0 )
+    {
+        fs_datos_format();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "sd" ) == 0 )
+    {
+        /* 'fs sd' pelado: el estado. */
+        if( ( ucArgs < 2U ) || ( argv[ 2 ] == NULL ) )
+        {
+            fs_sd_stats_t xSd;
+
+            fs_sd_stats( &xSd );
+
+            if( !xSd.bPresente )
+            {
+                xprintf( "  microSD    : NO (sin tarjeta, o no se pudo montar)\r\n" );
+                xprintf( "  la ventana en EEPROM sigue funcionando igual\r\n" );
+                return;
+            }
+
+            xprintf( "  microSD    : montada\r\n" );
+            xprintf( "  lotes      : %u sin transmitir\r\n", ( unsigned ) xSd.usLotes );
+            xprintf( "  proximo    : %s%04lu%s\r\n", FS_SD_PREFIJO,
+                     ( unsigned long ) ( xSd.ulProximoLote % 10000UL ), FS_SD_EXTENSION );
+            xprintf( "  libre      : %lu KB\r\n", ( unsigned long ) xSd.ulLibreKB );
+            return;
+        }
+
+        if( strcmp( argv[ 2 ], "list" ) == 0 )
+        {
+            fs_sd_listar();
+            return;
+        }
+
+        if( strcmp( argv[ 2 ], "dump" ) == 0 )
+        {
+            xprintf( "volcando la ventana a la tarjeta...\r\n" );
+            ( void ) fs_sd_volcar_ventana();
+            prvFsEstado();
+            return;
+        }
+
+        if( ( strcmp( argv[ 2 ], "ver" ) == 0 ) && ( ucArgs >= 3U ) && ( argv[ 3 ] != NULL ) )
+        {
+            fs_sd_ver( argv[ 3 ], 20U );
+            return;
+        }
+
+        prvFsUso();
+        return;
+    }
+
+    if( ( ucArgs < 2U ) || ( argv[ 2 ] == NULL ) )
+    {
+        prvFsUso();
+        return;
+    }
+
+    uint16_t usN = ( uint16_t ) atoi( argv[ 2 ] );
+
+    if( strcmp( argv[ 1 ], "read" ) == 0 )
+    {
+        for( uint16_t i = 0U; i < usN; i++ )
+        {
+            if( !fs_datos_peek( &xDr, i ) )
+            {
+                xprintf( "  (no hay mas registros o el %u esta corrupto)\r\n", ( unsigned ) i );
+                break;
+            }
+            xprintf( "[%u] ", ( unsigned ) i );
+            tkSys_print( &xDr );
+        }
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "frame" ) == 0 )
+    {
+        static char pcFrame[ WAN_FRAME_BUFFER_SIZE ];
+
+        if( !fs_datos_peek( &xDr, usN ) )
+        {
+            xprintf( "no hay registro %u\r\n", ( unsigned ) usN );
+            return;
+        }
+
+        uint16_t usLargo = wan_frame_data( pcFrame, sizeof( pcFrame ), &xDr, true );
+
+        if( usLargo > 0U )
+        {
+            ( void ) frtos_write( fdTERM, pcFrame, usLargo );
+            xprintf( "\r\n  (%u bytes)\r\n", ( unsigned ) usLargo );
+        }
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "pop" ) == 0 )
+    {
+        xprintf( "descartados %u registros\r\n", ( unsigned ) fs_datos_pop( usN ) );
+        prvFsEstado();
+        return;
+    }
+
+    prvFsUso();
+}
+//------------------------------------------------------------------------------
 /*
  * Muestra el código CRUDO de cada tecla, sin pasar por el parser.
  *
@@ -2498,55 +2986,33 @@ static void cmdReset( void )
 }
 //------------------------------------------------------------------------------
 /*
- * Reinicio TIBIO: vuelve al vector de reset SIN pasar por NRST.
+ * ⚠ 'reboot' EXISTIÓ Y SE SACÓ el 2026-09-08. No reponerlo sin leer esto.
  *
- * Es un instrumento de diagnóstico, no un reset de verdad. En el STM32L496 no
- * se puede evitar que un reset interno tire NRST a masa (el option byte
- * NRST_MODE existe en G0/G4/L5/U5, no en esta familia), así que esta es la única
- * forma de reiniciar el firmware dejando la línea de NRST quieta.
+ * Era un reinicio TIBIO —saltaba al vector de reset sin tocar NRST— y existía
+ * como EXPERIMENTO, para separar dos causas que desde afuera se ven iguales:
  *
- * PARA QUÉ: el 2026-08-11 cada "reset" deja la placa muerta hasta que se le corta
- * la alimentación, y al volver informa BOR/POR — o sea que el riel se cae. Este
- * comando separa las dos causas posibles de una vez:
+ *   reboot anda y reset mata la placa -> es la LÍNEA DE NRST: algo colgado de
+ *                                        ella apaga la fuente. Es hardware.
+ *   los dos matan la placa            -> no es NRST.
  *
- *   reboot anda y reset mata la placa -> es la LÍNEA DE NRST. Algo colgado de
- *                                        ella (enable del regulador, supervisor)
- *                                        apaga la fuente. Es hardware.
- *   los dos matan la placa            -> no es NRST; el transitorio lo genera
- *                                        otra cosa.
+ * **El experimento dio su resultado, y fue el contrario del que se suponía.** Al
+ * 2026-09-08, sobre la placa nueva: **`reset` anda** (reinicia y el arranque
+ * siguiente informa `SOFT PIN`) y **`reboot` cuelga** — hay que cortar y reponer
+ * la alimentación. O sea que **el problema nunca fue la línea de NRST**, y con
+ * eso se cierra el pendiente que estaba anotado desde el bring-up.
  *
- * ⚠ NO es equivalente a un reset: los periféricos NO se reinicializan, así que
- * quedan configurados de antes y los MX_*_Init() los van a reprogramar en
- * caliente. Sirve para esta prueba; no es un mecanismo para dejar en producción.
+ * Y no anda por una razón de fondo, no por un detalle a corregir: saltar al
+ * vector **sin resetear nada** deja el I2C, el SPI, las UARTs, el LPTIM y
+ * FreeRTOS corriendo con sus interrupciones pendientes, y después los
+ * `MX_*_Init()` los reprograman en caliente. Con el firmware chico del bring-up
+ * eso sobrevivía; con el I2C hablándole a la EEPROM en el arranque para cargar
+ * la configuración, no. Su propio comentario ya avisaba que no era un mecanismo
+ * para producción.
+ *
+ * Si alguna vez hace falta de nuevo, el camino es `HAL_DeInit()` antes del
+ * salto — pero conviene preguntarse primero qué agrega sobre `reset`, que
+ * funciona.
  */
-static void cmdReboot( void )
-{
-    xprintf( "reiniciando tibio, sin tocar NRST...\r\n" );
-    vTaskDelay( pdMS_TO_TICKS( 125 ) );
-
-    __disable_irq();
-
-    /* Callar todo lo que pueda interrumpir en medio del salto. */
-    for( uint32_t i = 0U; i < 8U; i++ )
-    {
-        NVIC->ICER[ i ] = 0xFFFFFFFFUL;
-        NVIC->ICPR[ i ] = 0xFFFFFFFFUL;
-    }
-    SysTick->CTRL = 0UL;
-
-    uint32_t ulSP = *( volatile uint32_t * )   FLASH_BASE;
-    uint32_t ulPC = *( volatile uint32_t * ) ( FLASH_BASE + 4UL );
-
-    /* El scheduler dejó al micro corriendo sobre el PSP; hay que volver al MSP
-       ANTES de reemplazar el stack pointer. */
-    __set_CONTROL( 0UL );
-    __ISB();
-    __set_MSP( ulSP );
-    __DSB();
-    __ISB();
-
-    ( ( void ( * )( void ) ) ulPC )();
-}
 //------------------------------------------------------------------------------
 
 #endif  /* TKCMD_MODO_BANCO */

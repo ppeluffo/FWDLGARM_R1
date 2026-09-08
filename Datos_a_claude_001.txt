@@ -1,0 +1,26 @@
+1- Lo que tenemos que tener presente es que estamos cambiando el microcontrolador  del datalogger con el firmware FWDLGX, de un AVR128DA64
+a un STM32L496.
+2- El firmware FWDLGX viene funcionando muy bien y ya fue optimizado y se eliminaron varios bugs.
+3- La idea es tener un firmware que realize las mismas funciones pero ahora en el micro STM32L496.
+4- Acepto tu recomendacion de ir primero por la configuracion persistente.
+   4.1 - En los AVR usabamos la memoria interna del micro NVM ya que la EEPROM se usaba solo para datos.
+   4.2 - Discutamos como vamos a hacer con el nuevo micro.
+5- A) El servidor existe. Debes ver en FWDLGX las diferentes tramas, formatos y respuestas.
+   B) La idea es que el datalogger haga lo mismo con este firmware que lo que hace con FWDLGX.
+      Basicamente espera durante 'timerpoll' y ahi polea las variables que tiene definidas.
+      Si esta en modo continuo trasmite hacia el servidor. Si no puede almacena
+      Si esta en modo discreto guarda el frame y cuando expira el timerdial transmite todo.
+   C) El equipo en campo mide hasta 3 canales de 4-20 mA que pueden ser sensores de presion, caudales, etc.
+      Tambíen puede medir un caudalímetro de pulsos
+      Tambien puede leer equipos con interfase modbus. Hasta 5 canales diferentes
+   D) Otras funciones que hace: Doble consigna, detector de nivel de agua
+   E) La idea es usar la microSD para 2 cosas:
+      - Log de datos poleados
+      - Log de actividad ( lo mismo que se muestra por la terminal este o no conectada)
+      
+** Cada etapa debemos discutirla primero **
+** La prioridad esta en que sea low-power **
+
+Si te parece lee el codigo de FWDLGX y sobre esta base vamos diseñando el nuevo firmware. 
+Primero me presentas el plan de trabajo y me consultas las dudas.
+Algo importante desde el principio: Debemos normalizar los logs tanto en la terminal como en el archivo de la microSD
