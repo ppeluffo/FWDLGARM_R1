@@ -37,7 +37,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* LED_PORT / LED_PIN / LED2_* están en main.h, para que los vean los demás .c. */
+/* LED_PORT / LED_PIN están en main.h, para que los vean los demás .c. */
 
 /* Patrones de Error_Handler: cantidad de destellos cortos antes de la pausa larga. */
 #define ERR_BLINKS_RELOJ      2U   /* un oscilador de baja velocidad no arrancó */
@@ -913,7 +913,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, EN_LTE_DCIN_Pin|EN_SENS12V_Pin|EN_PWR_RS485_Pin|EN_PWR_QMBUS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LED2_Pin|LTE_PWR_Pin|EN_EV_TOYI_Pin|CTL_EV_TOYI_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LTE_PWR_Pin|EN_EV_TOYI_Pin|CTL_EV_TOYI_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, EN_SENS3V3_Pin|EN_PWR_SENS420_Pin|EN_PWR_CPRES_Pin|LED_Pin, GPIO_PIN_RESET);
@@ -931,10 +931,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LED2_Pin LTE_PWR_Pin EN_EV_TOYI_Pin CTL_EV_TOYI_Pin
-                           SD_SS_Pin */
-  GPIO_InitStruct.Pin = LED2_Pin|LTE_PWR_Pin|EN_EV_TOYI_Pin|CTL_EV_TOYI_Pin
-                          |SD_SS_Pin;
+  /*Configure GPIO pins : LTE_PWR_Pin EN_EV_TOYI_Pin CTL_EV_TOYI_Pin SD_SS_Pin */
+  GPIO_InitStruct.Pin = LTE_PWR_Pin|EN_EV_TOYI_Pin|CTL_EV_TOYI_Pin|SD_SS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

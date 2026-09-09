@@ -87,8 +87,6 @@ void Error_Handler(void);
 #define LTE_TXD_GPIO_Port GPIOA
 #define LTE_RXD_Pin GPIO_PIN_1
 #define LTE_RXD_GPIO_Port GPIOA
-#define LED2_Pin GPIO_PIN_2
-#define LED2_GPIO_Port GPIOA
 #define LTE_PWR_Pin GPIO_PIN_5
 #define LTE_PWR_GPIO_Port GPIOA
 #define EN_EV_TOYI_Pin GPIO_PIN_6
@@ -143,8 +141,20 @@ void Error_Handler(void);
 #define LED_PORT               LED_GPIO_Port
 #define LED_PIN                LED_Pin
 
-#define LED2_PORT              LED2_GPIO_Port
-#define LED2_PIN               LED2_Pin
+/*
+ * ⛔ LED2 (PA2) YA NO EXISTE — sacado el 2026-09-09. No reponerlo.
+ *
+ * En R001 PA2 estaba declarado como LED2 en el `.ioc`, pero en la placa iba a
+ * uno de los pines de SIM del módulo LTE (21/22), que el WH-LTE-7S1-E
+ * **externaliza para su propia tarjeta**. Tenerlo manejado desde el micro
+ * cargaba ese bus y **el módulo no podía leer su SIM**: sin SIM no había red, y
+ * el equipo no transmitía un solo frame. Ver la sección del modem.
+ *
+ * Pablo lo dejó en *reset state* (sin asignar), que además es el de menor fuga.
+ * Los defines se eliminan en vez de dejarlos apuntando a símbolos que CubeMX ya
+ * no genera: así, si alguien vuelve a usar LED2, el error dice que no existe en
+ * vez de un `LED2_GPIO_Port undeclared` que no explica nada.
+ */
 
 /*
  * Identificación del firmware.
@@ -159,7 +169,7 @@ void Error_Handler(void);
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
 #define FW_NOMBRE              "FWDLGARM_R1"
-#define FW_VERSION             "0.0.30"
+#define FW_VERSION             "0.0.38"
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*

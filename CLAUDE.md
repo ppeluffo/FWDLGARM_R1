@@ -47,7 +47,7 @@ batería que duerme casi todo el tiempo.
 
 **Lo que sigue describe el poblado de la placa ORIGINAL**, que fue el que marcó el orden del
 bring-up. Hoy hay montados: la **fuente**, el **micro**, la
-**interfaz de programación SWD** (PA13/PA14), **LEDs en PB9 y PA2**, el **cristal de 32.768 kHz en
+**interfaz de programación SWD** (PA13/PA14), **LED en PB9**, el **cristal de 32.768 kHz en
 PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal** (PB6/PB7 más
 `TERM_SENSE` en PB5), el **bus I2C2** (PB13/PB14, pull-up de 10 kΩ) con la **EEPROM M24M01**, el
 **RTC MCP79410 con su pila** y el **INA3221** que mide los lazos de 4-20 mA, el **RS485** con su
@@ -818,7 +818,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | Contador de pulsos CNT0 | **PA12 `CNT0`**, EXTI por flanco de **bajada**, **sin pull interno**. Contacto seco → opto (open-collector con pull-up de 10K a 3V3) → RC de 4K7 / 1 µF → **74AUP1G17** (Schmitt, no inversor) |
 | Electroválvula TOYI (servo) | **PA6 `EN_EV_TOYI`** (TPS22810, EN=1 alimenta al servo), **PA7 `CTL_EV_TOYI`** (1 = abrir, 0 = cerrar). Sin realimentación de posición; el riel del servo lo elige un jumper: 12 V o 3,3 V |
 | Analógicas | PC5, PB0 |
-| LED, LED2 | PB9, PA2 (en el `.ioc`; no figuran en el CSV) |
+| LED | **PB9** (en el `.ioc`; no figura en el CSV). ⛔ **PA2 ya NO es LED2**: iba a un pin de SIM del módulo y por eso el modem no leía su tarjeta. Quedó sin asignar el 2026-09-09 |
 
 Puntos a resolver contra el esquemático `Hardware/R001/` y el datasheet **DS11585**
 (`Datasheets/STMicroelectronics/stm32l496ae.pdf`) antes de configurar el `.ioc`:
@@ -2298,6 +2298,91 @@ RTC en arranque frío y quedó **sin fecha** (`1980-00-00`, que es `get_fattime(
 `LOTE0002` y `LOTE0003`, con la hora ya fijada, quedaron con la fecha real. ⚠ El porta pila **volvió
 a fallar** durante las pruebas — sigue siendo el pendiente de hardware de siempre.
 
+### ✅ Paso 5a: el módulo se configura desde la consola, y el PING anda (2026-09-09)
+
+```
+lte on
+lte esc                            <- entra en modo comando
+lte info                           <- lee TODO del modulo, y cachea el IMEI
+lte set server 192.168.0.20 5000
+lte save                           <- graba y REINICIA el modulo
+lte exit                           <- vuelve a transparente
+lte ping
+-> ID=860909055244702&HW=SPQ_ARM_R1&TYPE=FWDLGARM_R1&VER=0.0.36&CLASS=PING
+<- "<html>CLASS=PONG</html>"
+```
+
+#### ⚠ El estado del módulo es EXPLÍCITO: los comandos no entran solos en modo AT
+
+Criterio de Pablo (2026-09-09), copiado del AVR: *"con un comando lo pongo en modo AT y con otro lo
+saco. Luego tengo comandos que ASUMIENDO que está en modo AT le mandan la configuración o leen. Estos
+comandos NO intentan ponerlo. Si no está, fallan."*
+
+`lte esc` entra, `lte exit` sale, y `info`/`set`/`save` sólo hablan. `lte ping` es al revés: **asume
+modo TRANSPARENTE**, porque en modo comando el módulo no transmite.
+
+**Y eso elimina un bug de raíz.** La primera versión intentaba entrar "por las dudas" antes de cada
+comando, y mandaba `+++` cuando el módulo **ya estaba** en modo AT. Ese `+++` va **sin CR** —es una
+contraseña, no un comando— así que quedaba colgado en el buffer del módulo y el `AT` siguiente se le
+concatenaba: leía `+++AT`, contestaba `ERROR`, y desde afuera se veía como *"no se pudo entrar en modo
+comando"* **estando adentro**. Un estado explícito no puede tener ese problema.
+
+#### La configuración del módulo NO se duplica en el datalogger
+
+**La IP, el puerto y la URL viven en el módulo** (criterio de Pablo). El equipo sólo escribe el
+payload; el GET entero lo arma el DTU. Por eso `lte info` **pregunta cada vez** en vez de mostrar una
+copia local que podría estar desactualizada.
+
+Los comandos envueltos existen para que **el técnico no tenga que saber AT** —mismo criterio que
+`modem set server` en FWDLGX—: `lte set server <ip> <puerto>`, `lte set apn`, `lte set url`,
+`lte set httpd`. Emiten los mismos AT que el AVR (`AT+HTPSV=ip,puerto`, `AT+APN=apn,,,0`, …). Y cada
+uno **verifica el `OK`**: el módulo contesta igual ante un parámetro mal formado, y un "listo" sobre
+una configuración que no entró es peor que un error.
+
+⚠ **Nada queda grabado hasta `lte save`** (`AT+S`), que además **reinicia el módulo** y lo deja en
+transparente.
+
+#### ⭐ Transmitir es sólo escribir el payload
+
+El módulo delimita la trama **por silencio** en la serie (su `ftime`), así que no hay terminador que
+mandar. Es lo mismo que hace `MODEM_txmit()` en el AVR.
+
+#### ⛔ Los pines 21 y 22 del módulo NO se rutean al micro: son las señales de su SIM
+
+**Causa raíz del "el equipo no transmite nada", encontrada por Pablo el 2026-09-09.** Es un error de
+hardware de R001 y **hay que corregirlo en la próxima revisión de la placa**.
+
+El WH-LTE-7S1-E **trae su propio socket de SIM** y externaliza esas señales por los pines 20-23
+—`VSIM`, `SIM_DAT`, `SIM_CLK`, `SIM_RST`— *"users can also design according to the needs with the SIM
+pins"*, o sea **por si alguien quiere poner la tarjeta afuera**. No son pines de propósito general.
+
+En R001 el 21 (`SIM_DAT`) y el 22 (`SIM_CLK`) estaban ruteados al micro, y eso **cargaba el bus de la
+SIM interna**: el módulo no podía leer su propia tarjeta. Liberados, funcionó de inmediato.
+
+⚠ **La regla que queda**: si el módulo trae la SIM adentro, esos cuatro pines se dejan **al aire**.
+Sólo se cablean si la SIM va a vivir en la placa portadora — y en ese caso van al socket, nunca al
+micro.
+
+#### ⚠ Tener señal NO es tener conexión: lo que decide es `AT+CIP?`
+
+El equipo no transmitía **un solo frame** y el servidor no registraba nada. La comparación que lo
+cerró fue de Pablo: **puso el mismo módulo en un datalogger AVR y ahí sí transmitía**, o sea que el
+módulo, la red y el servidor estaban bien.
+
+La causa estaba a la vista y era dos escalones más abajo de donde yo miraba: **`+ICCID:` vacío**. El
+módulo no leía su SIM —por los pines 21/22 ruteados al micro, ver arriba— así que no había registro de
+datos (`AT+CIP?` → `+CME ERROR:50`) y se tragaba el payload sin enviarlo. **El `CSQ 31` era lo que
+despistaba: es señal de radio, no conexión.**
+
+Por eso `lte info` consulta ahora también `AT+ICCID?` y `AT+CIP?`, y **cierra con un veredicto** en
+vez de dejar nueve respuestas para interpretar. El orden del aviso va de la **causa al efecto**: sin
+SIM no hay red, y sin red no hay IP — avisar de la IP cuando el problema es la SIM manda a buscar al
+lugar equivocado.
+
+⏳ **Para el paso 5b**: el log del AVR contra este mismo servidor devolvió
+`CLASS=CONF_ALL&CONFIG=ERROR` — *"El servidor no reconoce al datalogger"*. Para el `PING` no importa,
+pero **antes de probar los frames de configuración hay que dar de alta ese IMEI en el servidor**.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -2333,7 +2418,10 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **3** | ⭐ **El frame, sin modem** | ✅ **anda en banco**; ⏳ falta compararlo contra un AVR real |
 | **4** | Almacenamiento: FS circular sobre la EEPROM | ✅ **validado el 2026-09-09** |
 | **4b** | La microSD como extensión: la EEPROM es una VENTANA | ✅ **validado el 2026-09-09** |
-| 5 | `tkWan`: la FSM y los modos continuo/discreto/mixto | |
+| **5a** | **La sesión mínima: configurar el módulo y el `PING`** | ✅ **validado el 2026-09-09** |
+| 5b | Los frames de configuración (`CONF_ALL` + `CONF_*`) | |
+| 5c | Los frames de datos y el vaciado | |
+| 5d | Los modos continuo / discreto / mixto | |
 | 6 | Modbus | |
 | 7 | Consigna (`tkCtlPres`) | |
 | 8 | Watchdog cooperativo + `tkCtl` definitivo | |

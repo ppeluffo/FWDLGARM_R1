@@ -2184,6 +2184,10 @@ static void cmdEv( void )
    con el tiempo explícito. */
 #define LTE_ESCUCHA_MS      1000U
 
+/* Acá adentro entran el `ftime` del módulo, la petición HTTP por LTE y la
+   respuesta del servidor. Por eso es mucho más largo que un AT. */
+#define LTE_PING_TIMEOUT_MS 15000U
+
 static int16_t prvLteEscuchar( uint32_t ulMs );
 static void    prvLteBridge  ( void );
 
@@ -2195,6 +2199,9 @@ static void prvLteUso( void )
     xprintf( "  lte key on|off      nivel de LTE_PWR (PA5). on = apretado\r\n" );
     xprintf( "  lte key <ms>        pulso de <ms> y lo suelta\r\n" );
     xprintf( "  lte esc             ENTRA AL MODO COMANDO (+++ / a / a / +ok)\r\n" );
+    xprintf( "  lte info            como esta configurado el MODULO (lo lee de el)\r\n" );
+    xprintf( "  lte exit            SALE del modo comando, vuelve a transparente\r\n" );
+    xprintf( "  lte ping            manda un PING al servidor (en modo TRANSPARENTE)\r\n" );
     xprintf( "  lte at <cmd>        manda <cmd>+CR y muestra la respuesta\r\n" );
     xprintf( "  lte tx <texto>      manda el texto CRUDO, sin CR, y escucha\r\n" );
     xprintf( "  lte rx <ms>         solo escucha\r\n" );
@@ -2212,6 +2219,340 @@ static void prvLteUso( void )
     xprintf( "  (JP2), que son excluyentes. Por eso hay un solo comando de energia y\r\n" );
     xprintf( "  PA4 quedo sin funcion. Al apagar, el QOD tarda ~0,5 s en descargar\r\n" );
     xprintf( "  C1 (470 uF) con JP1: cortar y reponer enseguida NO resetea nada.\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  CONFIGURACION del modulo (la IP y el puerto viven en EL, no aca):\r\n" );
+    xprintf( "    lte set server <ip> <puerto>    ej: lte set server 192.168.0.20 5000\r\n" );
+    xprintf( "    lte set apn <apn>               ej: lte set apn SPYMOVIL.VPNANTEL\r\n" );
+    xprintf( "    lte set url <url>               ej: lte set url /apidlg?\r\n" );
+    xprintf( "    lte set httpd                   modo de trabajo HTTPD\r\n" );
+    xprintf( "    lte save                        GRABA y reinicia el modulo\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  ⚠ 'set', 'info' y 'save' ASUMEN el modo comando: NO entran solos.\r\n" );
+    xprintf( "    La secuencia es:  lte esc  ->  configurar  ->  lte save\r\n" );
+    xprintf( "  Y NADA queda grabado hasta 'lte save'.\r\n" );
+}
+//------------------------------------------------------------------------------
+/*
+ * Deja el módulo en modo comando, venga de donde venga.
+ *
+ * ⚠ Existe porque `lte esc` **falla si el módulo YA está en modo comando**: el
+ * `+++` se lee como texto cualquiera, no contesta la `a`, y el resultado es
+ * `SIN_A` — el mismo que cuando no escucha nada. Ese error es el que confunde
+ * cuando uno va y viene entre consultas.
+ *
+ * El orden importa: **primero el escape** y sólo si falla se prueba un `AT`. Al
+ * revés, un `AT` mandado en modo transparente **se iría a la red como datos**;
+ * es inocuo pero ensucia, y no hay razón para pagarlo en el caso normal.
+ */
+/*
+ * ⚠ LOS COMANDOS DE CONFIGURACIÓN NO ENTRAN SOLOS EN MODO AT. SI NO ESTÁ, FALLAN.
+ *
+ * Es el modelo del AVR y lo pidió Pablo explícitamente (2026-09-09): *"con un
+ * comando lo pongo en modo AT y con otro lo saco. Luego tengo comandos que
+ * ASUMIENDO que está en modo AT le mandan la configuración o leen. Estos
+ * comandos NO intentan ponerlo. Si no está, fallan."*
+ *
+ * O sea: `lte esc` entra, `lte exit` sale, y en el medio `info`/`set`/`save`
+ * sólo hablan. El estado del módulo lo maneja el técnico, que sabe en cuál está
+ * porque lo puso él.
+ *
+ * **Y elimina de raíz el bug del 2026-09-09**: intentar el escape "por las
+ * dudas" mandaba `+++` cuando el módulo YA estaba en modo comando. Ese `+++` va
+ * sin CR —es una contraseña, no un comando— así que quedaba colgado en el buffer
+ * del módulo y el `AT` siguiente se le concatenaba: leía `+++AT`, contestaba
+ * ERROR, y desde afuera se veía como "no se pudo entrar en modo comando"
+ * **estando adentro**. Un estado explícito no tiene ese problema.
+ */
+static bool prvLteListo( void )
+{
+    if( !drv_lte_power_estado() )
+    {
+        xprintf( "el modem esta APAGADO: 'lte on' primero\r\n" );
+        return false;
+    }
+
+    return true;
+}
+//------------------------------------------------------------------------------
+/*
+ * El PING: la primera pregunta de toda sesión, "¿estás ahí?".
+ *
+ * ⚠ **ASUME el modo TRANSPARENTE**, al revés que `info` y `set`. Es coherente
+ * con el mismo criterio: cada comando asume un estado y no lo cambia. En modo
+ * comando el módulo **no transmite nada**, así que un PING desde ahí no sale —
+ * por eso, si no hay respuesta, el mensaje pregunta justo por eso.
+ *
+ * Transmitir es sólo **escribir el payload**: el módulo arma el GET entero con
+ * la IP, el puerto y la URL que tiene grabados, y delimita la trama por
+ * SILENCIO en la serie (el `ftime` de su configuración). No hay terminador que
+ * mandar; es lo mismo que hace `MODEM_txmit()` en el AVR.
+ */
+static void prvLtePing( void )
+{
+    static char pcFrame[ WAN_FRAME_BUFFER_SIZE ];
+    static char pcRta  [ WAN_FRAME_BUFFER_SIZE ];
+
+    if( !prvLteListo() )
+    {
+        return;
+    }
+
+    uint16_t usLargo = wan_frame_ping( pcFrame, sizeof( pcFrame ) );
+
+    if( usLargo == 0U )
+    {
+        return;
+    }
+
+    xprintf( "-> " );
+    ( void ) frtos_write( fdTERM, pcFrame, usLargo );
+    xprintf( "\r\n" );
+
+    drv_lte_flush();
+
+    if( drv_lte_write( pcFrame, usLargo ) != ( int16_t ) usLargo )
+    {
+        xprintf( "ERROR: no se pudo transmitir\r\n" );
+        return;
+    }
+
+    /*
+     * El timeout es generoso a propósito: acá adentro entran el `ftime` del
+     * módulo, la petición HTTP por LTE y la respuesta del servidor. El AVR
+     * reintenta 5 veces por esta misma razón.
+     */
+    int16_t sRet = drv_lte_read( pcRta, sizeof( pcRta ) - 1U, LTE_PING_TIMEOUT_MS );
+
+    if( sRet <= 0 )
+    {
+        xprintf( "sin respuesta en %u ms.\r\n", ( unsigned ) LTE_PING_TIMEOUT_MS );
+        xprintf( "  el modulo esta en modo TRANSPARENTE? (en modo comando NO transmite)\r\n" );
+        xprintf( "  y verificar la IP con 'lte esc' + 'lte info'\r\n" );
+        return;
+    }
+
+    pcRta[ sRet ] = '\0';
+
+    xprintf( "<- " );
+    ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+    xprintf( "\r\n" );
+
+    /*
+     * La respuesta del servidor viene envuelta en HTML — el log del AVR del
+     * 2026-09-09 la muestra como `<html>CLASS=PONG</html>` — así que se busca el
+     * patrón adentro en vez de comparar la respuesta entera.
+     */
+    if( strstr( pcRta, "CLASS=PONG" ) != NULL )
+    {
+        xprintf( "PONG: el servidor contesta\r\n" );
+    }
+    else
+    {
+        xprintf( "[!] contesto algo, pero sin CLASS=PONG\r\n" );
+    }
+}
+//------------------------------------------------------------------------------
+/*
+ * Manda un comando AT de configuración y dice si el módulo lo aceptó.
+ *
+ * ⚠ **Existe para que el técnico no tenga que saber la sintaxis AT.** Los
+ * comandos crudos siguen disponibles con `lte at`, pero pedirle a alguien que
+ * está instalando un equipo en el campo que recuerde `AT+HTPSV=ip,puerto` es
+ * trasladarle un problema que el firmware puede resolver. Es el mismo criterio
+ * que tiene FWDLGX con `modem set server`.
+ *
+ * Entra en modo comando solo: obligar a un `lte esc` previo sería otra cosa que
+ * recordar, y falla de una forma que no se parece a "el comando no anduvo".
+ */
+static void prvLteSet( const char *pcCmd )
+{
+    static char pcRta[ 128 ];
+
+    if( !prvLteListo() )
+    {
+        return;
+    }
+
+    int16_t sRet = drv_lte_at( pcCmd, pcRta, sizeof( pcRta ), 2000U );
+
+    if( sRet <= 0 )
+    {
+        xprintf( "%s -> sin respuesta. El modulo esta en MODO COMANDO? ('lte esc')\r\n", pcCmd );
+        return;
+    }
+
+    ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+
+    /*
+     * Se busca el OK en vez de dar por bueno cualquier respuesta: el módulo
+     * contesta igual ante un parámetro mal formado, y un "listo" sobre una
+     * configuración que no entró es peor que un error.
+     */
+    if( strstr( pcRta, "OK" ) != NULL )
+    {
+        xprintf( "\r\nok - RECORDAR 'lte save', sin eso se pierde al reiniciar\r\n" );
+    }
+    else
+    {
+        xprintf( "\r\n[!] el modulo no contesto OK: revisar el valor\r\n" );
+    }
+}
+//------------------------------------------------------------------------------
+/*
+ * `AT+S`: graba la configuración en el módulo **y lo reinicia**.
+ *
+ * El reinicio no es un efecto lateral molesto, es parte del comando —así lo
+ * documenta el fabricante— y por eso el módulo queda en modo TRANSPARENTE
+ * después. Conviene decirlo, porque si no el `lte info` siguiente parece fallar.
+ */
+static void prvLteGrabar( void )
+{
+    static char pcRta[ 128 ];
+
+    if( !prvLteListo() )
+    {
+        return;
+    }
+
+    xprintf( "grabando (el modulo se REINICIA)...\r\n" );
+
+    int16_t sRet = drv_lte_at( "AT+S", pcRta, sizeof( pcRta ), 3000U );
+
+    if( sRet > 0 )
+    {
+        ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+    }
+
+    xprintf( "\r\nel modulo quedo REINICIADO y en modo TRANSPARENTE.\r\n" );
+    xprintf( "para seguir configurando: esperar unos segundos y hacer 'lte esc' de nuevo.\r\n" );
+}
+//------------------------------------------------------------------------------
+/*
+ * Muestra cómo está configurado el MÓDULO, leyéndolo de él.
+ *
+ * ⚠ **La IP, el puerto y la URL del servidor viven en el módulo, no en la
+ * configuración del datalogger** (criterio de Pablo, 2026-09-09). El equipo sólo
+ * escribe el payload por la UART; el GET entero lo arma el DTU. Por eso acá no
+ * hay una copia local que pueda quedar desactualizada: **se pregunta cada vez**,
+ * y lo que se ve es lo que de verdad se va a usar.
+ */
+static void prvLteInfo( void )
+{
+    static char pcRta[ 128 ];
+    bool bSimOk = false;
+    bool bIpOk  = false;
+
+    /* Los que están confirmados en `Datasheets/Componentes/PUSR/`. Agregar uno
+       es agregar una línea. */
+    static const char * const pcConsultas[] = {
+        "AT+IMEI?",     /* la identidad: es el ID del frame       */
+        "AT+ICCID?",    /* la SIM                                  */
+        "AT+CSQ",       /* señal de radio                          */
+        /*
+         * ⚠ LA CONSULTA QUE DECIDE SI SE PUEDE TRANSMITIR.
+         *
+         * `AT+CIP?` devuelve la IP que le dio la red. **Tener señal no es tener
+         * conexión de datos**: con `CSQ 31` —excelente— pero sin attach, el
+         * módulo se traga el payload y no lo envía. El servidor no ve nada
+         * llegar y desde el equipo se ve como "sin respuesta", que manda a
+         * buscar al lugar equivocado.
+         *
+         * Es lo que hace la FSM del AVR: se queda en OFFLINE hasta que
+         * `AT+CIP?` devuelve una IP, y recién ahí pasa a LINK y transmite.
+         * Encontrado el 2026-09-09 comparando contra un AVR con el MISMO módulo,
+         * que sí transmitía.
+         */
+        "AT+CIP?",      /* la IP local: SIN ESTO NO SE TRANSMITE   */
+        "AT+WKMOD?",    /* modo de trabajo: tiene que decir HTTPD  */
+        "AT+APN?",
+        "AT+HTPSV?",    /* IP y puerto del servidor               */
+        "AT+HTPURL?",   /* el prefijo del GET                     */
+        "AT+HTPTP?",    /* GET o POST                             */
+    };
+
+    if( !prvLteListo() )
+    {
+        return;
+    }
+
+    for( uint32_t i = 0U; i < ( sizeof( pcConsultas ) / sizeof( pcConsultas[ 0 ] ) ); i++ )
+    {
+        int16_t sRet = drv_lte_at( pcConsultas[ i ], pcRta, sizeof( pcRta ), 1000U );
+
+        if( sRet <= 0 )
+        {
+            xprintf( "  %-12s (sin respuesta - esta en MODO COMANDO? 'lte esc')\r\n",
+                     pcConsultas[ i ] );
+            continue;
+        }
+
+        /* La respuesta trae el eco del comando y los CR/LF del módulo, así que
+           sale tal cual en vez de intentar recortarla: cualquier parseo acá
+           sería una suposición sobre un formato que todavía no está fijado. */
+        ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+
+        /*
+         * El IMEI se aprovecha de paso: es el `ID` con el que el servidor
+         * identifica al equipo, y leerlo acá evita un comando aparte. Se guarda
+         * para toda la corrida —el módulo puede apagarse, su IMEI no cambia— así
+         * que después el frame se arma sin necesitar el modem encendido.
+         */
+        char *pcVal = strstr( pcRta, "+IMEI:" );
+
+        if( pcVal != NULL )
+        {
+            wan_imei_set( pcVal + 6 );
+        }
+
+        /*
+         * Se mira si hay SIM y si hay IP, porque **son las dos condiciones sin
+         * las cuales no se transmite nada**, y leerlas entre nueve respuestas es
+         * fácil de pasar por alto: el 2026-09-09 el equipo no mandaba un solo
+         * frame y el `+ICCID:` vacío estaba a la vista en la pantalla.
+         *
+         * El criterio es mínimo a propósito —un dígito después del prefijo— para
+         * no suponer nada sobre el formato exacto de la respuesta.
+         */
+        pcVal = strstr( pcRta, "+ICCID:" );
+
+        if( ( pcVal != NULL ) && ( pcVal[ 7 ] >= '0' ) && ( pcVal[ 7 ] <= '9' ) )
+        {
+            bSimOk = true;
+        }
+
+        pcVal = strstr( pcRta, "+CIP:" );
+
+        if( ( pcVal != NULL ) && ( pcVal[ 5 ] >= '0' ) && ( pcVal[ 5 ] <= '9' ) )
+        {
+            bIpOk = true;
+        }
+    }
+
+    xprintf( "\r\n" );
+
+    /*
+     * ⚠ El orden del diagnóstico va de la CAUSA al efecto: sin SIM no hay red, y
+     * sin red no hay IP. Avisar de la IP cuando el problema es la SIM mandaría a
+     * buscar al lugar equivocado.
+     */
+    if( !bSimOk )
+    {
+        xprintf( "[!] SIN SIM: el modulo no lee la tarjeta (+ICCID vacio).\r\n" );
+        xprintf( "    Sin SIM no hay red, no hay IP y NO SE TRANSMITE NADA, por mas\r\n" );
+        xprintf( "    que el CSQ sea bueno: eso es señal de radio, no conexion.\r\n" );
+    }
+    else if( !bIpOk )
+    {
+        xprintf( "[!] SIN IP: hay SIM pero el modulo todavia no esta en la red.\r\n" );
+        xprintf( "    Esperar unos segundos y volver a consultar: hasta que +CIP\r\n" );
+        xprintf( "    traiga una direccion, un 'lte ping' no va a salir.\r\n" );
+    }
+    else
+    {
+        xprintf( "SIM y red OK: se puede transmitir ('lte exit' y despues 'lte ping')\r\n" );
+    }
+
+    xprintf( "(queda en MODO COMANDO: 'lte exit' para volver a transparente)\r\n" );
 }
 
 /*
@@ -2320,6 +2661,103 @@ static void cmdLte( void )
         if( strcmp( argv[ 1 ], "bridge" ) == 0 )
         {
             prvLteBridge();
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "ping" ) == 0 )
+        {
+            prvLtePing();
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "exit" ) == 0 )
+        {
+            static char pcRta[ 64 ];
+
+            /*
+             * `AT+ENTM` devuelve el módulo al modo TRANSPARENTE, que es donde
+             * tiene que estar para trabajar: en modo comando no transmite nada.
+             *
+             * Como todos los de esta familia, **asume** que el módulo está en
+             * modo comando: manda el AT y ya. Si no estaba, lo trata como datos
+             * y no pasa nada.
+             */
+            int16_t sRet = drv_lte_at( "AT+ENTM", pcRta, sizeof( pcRta ), 1000U );
+
+            if( ( sRet > 0 ) && ( strstr( pcRta, "OK" ) != NULL ) )
+            {
+                xprintf( "modo TRANSPARENTE\r\n" );
+            }
+            else
+            {
+                xprintf( "sin confirmacion del modulo (puede que ya estuviera en transparente)\r\n" );
+            }
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "save" ) == 0 )
+        {
+            prvLteGrabar();
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "set" ) == 0 )
+        {
+            if( ( ucArgs < 2U ) || ( argv[ 2 ] == NULL ) )
+            {
+                prvLteUso();
+                return;
+            }
+
+            /* `httpd` no lleva valor; los otros tres sí. */
+            if( strcmp( argv[ 2 ], "httpd" ) == 0 )
+            {
+                prvLteSet( "AT+WKMOD=HTTPD" );
+                return;
+            }
+
+            if( ( ucArgs < 3U ) || ( argv[ 3 ] == NULL ) )
+            {
+                prvLteUso();
+                return;
+            }
+
+            static char pcCmd[ 96 ];
+
+            if( strcmp( argv[ 2 ], "server" ) == 0 )
+            {
+                if( ( ucArgs < 4U ) || ( argv[ 4 ] == NULL ) )
+                {
+                    xprintf( "faltan datos: 'lte set server <ip> <puerto>'\r\n" );
+                    return;
+                }
+                snprintf( pcCmd, sizeof( pcCmd ), "AT+HTPSV=%s,%s", argv[ 3 ], argv[ 4 ] );
+            }
+            else if( strcmp( argv[ 2 ], "apn" ) == 0 )
+            {
+                /* Los tres campos vacíos y el 0 final son los del AVR
+                   (`modem_atcmd_write_apn`): usuario, clave y tipo de
+                   autenticación. Se conservan porque es lo que funciona con
+                   este operador. */
+                snprintf( pcCmd, sizeof( pcCmd ), "AT+APN=%s,,,0", argv[ 3 ] );
+            }
+            else if( strcmp( argv[ 2 ], "url" ) == 0 )
+            {
+                snprintf( pcCmd, sizeof( pcCmd ), "AT+HTPURL=%s", argv[ 3 ] );
+            }
+            else
+            {
+                prvLteUso();
+                return;
+            }
+
+            prvLteSet( pcCmd );
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "info" ) == 0 )
+        {
+            prvLteInfo();
             return;
         }
 

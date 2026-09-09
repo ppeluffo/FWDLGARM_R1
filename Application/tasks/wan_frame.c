@@ -16,12 +16,57 @@
  * ⏳ PROVISORIO de esta etapa. Ver wan_frame.h: lo definitivo lo lee tkWAN del
  * modem con `AT+IMEI?` en el paso 5, y queda fijado para toda la corrida.
  */
-static const char pcImeiFalso[] = "000000000000000";
+static char pcImei[ 16 ] = "000000000000000";
 
 //------------------------------------------------------------------------------
 const char *wan_imei( void )
 {
-    return pcImeiFalso;
+    return pcImei;
+}
+//------------------------------------------------------------------------------
+void wan_imei_set( const char *pcNuevo )
+{
+    if( pcNuevo == NULL )
+    {
+        return;
+    }
+
+    /*
+     * Sólo se acepta si tiene pinta de IMEI: 15 dígitos. Un parseo que falle a
+     * medias —porque el módulo contestó otra cosa, o llegó cortado— dejaría al
+     * equipo presentándose ante el servidor con basura, y eso es peor que
+     * seguir con los ceros, que al menos son reconocibles.
+     */
+    size_t i;
+
+    for( i = 0U; i < 15U; i++ )
+    {
+        if( ( pcNuevo[ i ] < '0' ) || ( pcNuevo[ i ] > '9' ) )
+        {
+            return;
+        }
+    }
+
+    memcpy( pcImei, pcNuevo, 15U );
+    pcImei[ 15 ] = '\0';
+}
+//------------------------------------------------------------------------------
+uint16_t wan_frame_ping( char *pcBuf, uint16_t usSize )
+{
+    if( ( pcBuf == NULL ) || ( usSize == 0U ) )
+    {
+        return 0U;
+    }
+
+    int iN = snprintf( pcBuf, usSize, "ID=%s&HW=%s&TYPE=%s&VER=%s&CLASS=PING",
+                       wan_imei(), FW_HW, FW_TYPE, FW_VERSION );
+
+    if( ( iN < 0 ) || ( ( uint16_t ) iN >= usSize ) )
+    {
+        return 0U;
+    }
+
+    return ( uint16_t ) iN;
 }
 //------------------------------------------------------------------------------
 uint16_t wan_frame_data( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr,

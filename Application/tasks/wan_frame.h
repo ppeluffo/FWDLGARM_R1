@@ -110,4 +110,20 @@ uint16_t wan_frame_data( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr,
  *----------------------------------------------------------------------------*/
 const char *wan_imei( void );
 
+/*------------------------------------------------------------------------------
+ * Fija el IMEI leído del módulo. Lo llama quien haya hecho el `AT+IMEI?`.
+ *
+ * Se guarda **una vez por corrida**: el módulo puede apagarse entre sesiones,
+ * pero su IMEI no cambia. Así el frame se arma sin necesitar el modem encendido.
+ *----------------------------------------------------------------------------*/
+void wan_imei_set( const char *pcImei );
+
+/*------------------------------------------------------------------------------
+ * El frame de PING, que es el primero de toda sesión: pregunta si el servidor
+ * está del otro lado. La respuesta esperada es `CLASS=PONG`.
+ *
+ * No lleva datos ni fecha — sólo la identidad del equipo.
+ *----------------------------------------------------------------------------*/
+uint16_t wan_frame_ping( char *pcBuf, uint16_t usSize );
+
 #endif /* APPLICATION_TASKS_WAN_FRAME_H_ */
