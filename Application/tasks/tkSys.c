@@ -9,6 +9,7 @@
 #include "fs_datos.h"
 #include "fs_sd.h"
 #include "drv_adc.h"
+#include "drv_ina3221.h"
 #include "drv_pulsos.h"
 #include "drv_valvula.h"
 #include "drv_rtc79410.h"
@@ -43,6 +44,84 @@ static TickType_t xTicksProximoPoll;
                                                   ( __DATE__[ 10 ] - '0' ) ) )
 
 //------------------------------------------------------------------------------
+/*
+ * ⚠ EL CANAL DEL INA NO ES EL NÚMERO DE LA ENTRADA: EL MAPEO ESTÁ INVERTIDO.
+ *
+ * La entrada `a0` del datalogger está cableada al canal 3 del chip, y `a2` al 1.
+ * Sale de `ainputs_read_channel_raw()` de FWDLGX, que hace el mismo switch, y
+ * **depende del cableado de la placa, no del chip**: es un dato de R001, no una
+ * propiedad del INA3221. Por eso vive acá, en la capa de aplicación, y no adentro
+ * del driver — que habla de `inaCH1..3`, que son los del integrado.
+ *
+ * ✅ **Confirmado por Pablo el 2026-09-09**: en R001 la asignación es la misma que
+ * en el AVR, así que la tabla queda como está. No "corregirla" por parecer al
+ * revés — lo está, y a propósito.
+ */
+static const ina_canal_t xMapaCanales[ CFG_AINPUTS_NRO_CANALES ] = {
+    inaCH3,     /* a0 */
+    inaCH2,     /* a1 */
+    inaCH1,     /* a2 */
+};
+//------------------------------------------------------------------------------
+static void prvPolearAnalogicas( dataRcd_t *pxDr )
+{
+    float   fMa[ inaCH_COUNT ];
+    uint8_t i;
+    bool    bAlguno = false;
+
+    for( i = 0U; i < CFG_AINPUTS_NRO_CANALES; i++ )
+    {
+        pxDr->fAinputs[ i ] = 0.0f;
+        bAlguno |= xCfgAinputs.xCanal[ i ].bEnabled;
+    }
+
+    /* Sin canales habilitados no se enciende la fuente lineal ni se despierta el
+       chip: son ~1,4 s y 350 µA que no le sirven a nadie. */
+    if( !bAlguno )
+    {
+        return;
+    }
+
+    /*
+     * El `sensors_pwr_settle_time` de la configuración es un asentamiento EXTRA,
+     * no un reemplazo del que hace el driver: existe para los sensores lentos
+     * —los de ultrasonido de Dica— que necesitan bastante más que los 500 ms por
+     * omisión.
+     *
+     * Se aplica encendiendo el riel acá y esperando; `drv_ina_medir()` ve que ya
+     * está encendido y **no vuelve a pagar su propio asentamiento**, que es
+     * exactamente para lo que ese camino existe en el driver. Así el tiempo
+     * configurable sale sin tocar código validado.
+     */
+    if( xCfgAinputs.ucSensorsPwrSettleTime > 0U )
+    {
+        drv_ina_pwr_sensores( true );
+        vTaskDelay( pdMS_TO_TICKS( ( uint32_t ) xCfgAinputs.ucSensorsPwrSettleTime * 1000UL ) );
+    }
+
+    /* `false` = apagar el riel al terminar. El INA se duerme solo, ande o no. */
+    bool bOk = drv_ina_medir( fMa, false );
+
+    for( i = 0U; i < CFG_AINPUTS_NRO_CANALES; i++ )
+    {
+        if( !xCfgAinputs.xCanal[ i ].bEnabled )
+        {
+            continue;
+        }
+
+        if( !bOk )
+        {
+            /* Una falla del I2C invalida los TRES canales, no uno: `drv_ina_medir()`
+               informa un solo resultado para el barrido completo, así que no hay
+               forma de saber cuál se leyó bien. Marcar sólo alguno sería inventar. */
+            pxDr->usInvalidos |= ( uint16_t ) ( dataINVALIDO_AIN0 << i );
+            continue;
+        }
+
+        pxDr->fAinputs[ i ] = cfg_ainputs_convertir( i, fMa[ xMapaCanales[ i ] ] );
+    }
+}
+//------------------------------------------------------------------------------
 static void prvPolearRieles( dataRcd_t *pxDr )
 {
     uint32_t ulMv;
@@ -76,8 +155,6 @@ static void prvPolearRieles( dataRcd_t *pxDr )
 //------------------------------------------------------------------------------
 bool tkSys_poll( dataRcd_t *pxDr )
 {
-    uint8_t i;
-
     if( pxDr == NULL )
     {
         return false;
@@ -114,18 +191,7 @@ bool tkSys_poll( dataRcd_t *pxDr )
     }
 
     /* ---- 2. Analógicas de 4-20 mA ------------------------------------ */
-    for( i = 0U; i < CFG_AINPUTS_NRO_CANALES; i++ )
-    {
-        pxDr->fAinputs[ i ] = 0.0f;
-
-        if( xCfgAinputs.xCanal[ i ].bEnabled )
-        {
-            /* ⏳ Bloqueado por hardware: el INA3221 no contesta en el I2C de la
-               placa nueva. La conversión corriente->magnitud usa la calibración
-               de dos puntos de cfg_ainputs.h y entra acá cuando el chip aparezca. */
-            pxDr->usInvalidos |= ( uint16_t ) ( dataINVALIDO_AIN0 << i );
-        }
-    }
+    prvPolearAnalogicas( pxDr );
 
     /* ---- 3. Modbus --------------------------------------------------- */
     /* Paso 6. Los canales quedan en cero y NO se marcan inválidos: sin Modbus

@@ -2,6 +2,7 @@
  * fs_datos.c  -  ver fs_datos.h
  */
 
+#include <stddef.h>
 #include <string.h>
 
 #include "fs_datos.h"
@@ -21,13 +22,38 @@
 /* Dónde vive la FAT dentro de la SRAM del RTC: justo después de la firma. */
 #define FS_FAT_SRAM_ADDR        DRV_RTC_SRAM_USUARIO
 
-typedef struct {
+/*
+ * ⚠ `packed` por el mismo motivo que el registro: esto vive en memoria
+ * persistente (la SRAM del RTC) y su layout no puede depender del compilador.
+ */
+typedef struct __attribute__(( packed )) {
     uint16_t usHead;
     uint16_t usTail;
     uint16_t usCount;
     uint16_t usLength;
     uint8_t  ucChecksum;
 } fs_fat_t;
+
+/*
+ * ⚠ SOBRE QUÉ BYTES SE CALCULA EL CHECKSUM, Y POR QUÉ NO ES `sizeof - 1`.
+ *
+ * Tiene que ser **todo lo que hay ANTES del campo checksum**, y eso es
+ * exactamente `offsetof()`. Escribirlo como `sizeof(fs_fat_t) - 1` parece lo
+ * mismo y **no lo es** en cuanto el compilador mete relleno al final: la struct
+ * sin `packed` medía 10 bytes con el checksum en el 8, así que `sizeof - 1` daba
+ * 9 e **incluía al propio checksum en el rango**.
+ *
+ * El efecto era exacto y silencioso: al grabar entraba en la cuenta su valor
+ * VIEJO y al releer el NUEVO, así que **nunca coincidían**. La FAT se declaraba
+ * inválida en cada arranque —culpando a la pila del RTC, que estaba perfecta— y
+ * el equipo formateaba, perdiendo todos los registros guardados.
+ *
+ * Encontrado en banco el 2026-09-09 por Pablo, con el argumento correcto: *"el
+ * RTC no se perdió así que no parece haber habido un problema de la batería"*.
+ * Un mensaje de error que acusa al componente equivocado cuesta más que no
+ * tenerlo.
+ */
+#define FS_FAT_BYTES_CKS    ( offsetof( fs_fat_t, ucChecksum ) )
 
 /*
  * El registro tal cual queda en la EEPROM. El tag primero para poder reconocerlo
@@ -55,6 +81,11 @@ typedef struct __attribute__(( packed )) {
     uint8_t   ucChecksum;
 } fs_registro_t;
 
+/* Mismo criterio que la FAT: el checksum cubre todo lo anterior a él, y eso es
+   `offsetof`, no `sizeof - 1`. Acá coinciden porque la struct es `packed`, pero
+   escribirlo así lo deja correcto si algún día deja de serlo. */
+#define FS_RCD_BYTES_CKS    ( offsetof( fs_registro_t, ucChecksum ) )
+
 _Static_assert( sizeof( fs_registro_t ) <= FS_DATOS_RCD_SIZE,
                 "el registro no entra en FS_DATOS_RCD_SIZE" );
 _Static_assert( ( FS_FAT_SRAM_ADDR + sizeof( fs_fat_t ) ) <= DRV_RTC_SRAM_SIZE,
@@ -73,8 +104,7 @@ static uint32_t prvDireccion( uint16_t usPos )
 //------------------------------------------------------------------------------
 static bool prvFatGrabar( void )
 {
-    xFat.ucChecksum = cfg_checksum( ( const uint8_t * ) &xFat,
-                                    ( uint16_t ) ( sizeof( xFat ) - 1U ) );
+    xFat.ucChecksum = cfg_checksum( ( const uint8_t * ) &xFat, FS_FAT_BYTES_CKS );
 
     return ( drv_rtc_sram_escribir( FS_FAT_SRAM_ADDR, ( const char * ) &xFat,
                                     ( uint8_t ) sizeof( xFat ) )
@@ -100,8 +130,7 @@ bool fs_datos_init( void )
         return false;
     }
 
-    uint8_t ucCalculado = cfg_checksum( ( const uint8_t * ) &xFat,
-                                        ( uint16_t ) ( sizeof( xFat ) - 1U ) );
+    uint8_t ucCalculado = cfg_checksum( ( const uint8_t * ) &xFat, FS_FAT_BYTES_CKS );
 
     /*
      * Se valida el checksum Y la coherencia de los punteros.
@@ -150,8 +179,7 @@ bool fs_datos_write( const dataRcd_t *pxDr )
     memset( &xRcd, 0, sizeof( xRcd ) );
     xRcd.ucTag = FS_TAG;
     xRcd.xDr   = *pxDr;
-    xRcd.ucChecksum = cfg_checksum( ( const uint8_t * ) &xRcd,
-                                    ( uint16_t ) ( sizeof( xRcd ) - 1U ) );
+    xRcd.ucChecksum = cfg_checksum( ( const uint8_t * ) &xRcd, FS_RCD_BYTES_CKS );
 
     if( drv_eeprom_write( prvDireccion( xFat.usHead ), ( const char * ) &xRcd,
                           ( uint32_t ) sizeof( xRcd ) ) != ( int32_t ) sizeof( xRcd ) )
@@ -215,8 +243,7 @@ bool fs_datos_peek( dataRcd_t *pxDr, uint16_t usOffset )
         return false;
     }
 
-    uint8_t ucCalculado = cfg_checksum( ( const uint8_t * ) &xRcd,
-                                        ( uint16_t ) ( sizeof( xRcd ) - 1U ) );
+    uint8_t ucCalculado = cfg_checksum( ( const uint8_t * ) &xRcd, FS_RCD_BYTES_CKS );
 
     if( ucCalculado != xRcd.ucChecksum )
     {

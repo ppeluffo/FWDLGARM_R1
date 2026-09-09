@@ -2,6 +2,7 @@
  * cfg_ainputs.c  -  ver cfg_ainputs.h
  */
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -180,5 +181,37 @@ bool cfg_ainputs_set_settle_time( const char *pcVal )
 
     xCfgAinputs.ucSensorsPwrSettleTime = ( uint8_t ) lVal;
     return true;
+}
+//------------------------------------------------------------------------------
+float cfg_ainputs_convertir( uint8_t ucCh, float fMa )
+{
+    if( ucCh >= CFG_AINPUTS_NRO_CANALES )
+    {
+        return -999.0f;
+    }
+
+    const cfg_ainput_canal_t *px = &xCfgAinputs.xCanal[ ucCh ];
+
+    /* En el AVR el denominador se calcula sobre los uint8 y se compara contra 0;
+       acá es float pero el caso es el mismo: sin span no hay recta. */
+    float fSpanI = ( float ) px->ucImax - ( float ) px->ucImin;
+
+    if( fSpanI == 0.0f )
+    {
+        return -999.0f;
+    }
+
+    float fPendiente = ( px->fMmax - px->fMmin ) / fSpanI;
+    float fMag       = px->fMmin + ( fMa - ( float ) px->ucImin ) * fPendiente;
+
+    fMag += px->fOffset;
+
+    /* Ver el header: sin esto, un cero con ruido sale como "-0.00" en el frame. */
+    if( fabsf( fMag ) < 0.01f )
+    {
+        fMag = 0.0f;
+    }
+
+    return fMag;
 }
 //------------------------------------------------------------------------------

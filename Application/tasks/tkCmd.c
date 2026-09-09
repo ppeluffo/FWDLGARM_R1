@@ -2734,6 +2734,11 @@ static void prvFsUso( void )
     xprintf( "  fs sd list         lista los archivos de la tarjeta\r\n" );
     xprintf( "  fs sd dump         vuelca la ventana a un lote AHORA\r\n" );
     xprintf( "  fs sd ver <arch>   muestra las primeras lineas de un lote\r\n" );
+    xprintf( "  fs sd format borrar   FORMATEA la tarjeta en FAT (BORRA TODO)\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  Las tarjetas nuevas de mas de 32 GB vienen en exFAT, que este\r\n" );
+    xprintf( "  firmware no lee: hay que formatearlas con 'fs sd format borrar'.\r\n" );
+    xprintf( "  La palabra 'borrar' va a proposito: sin ella no hace nada.\r\n" );
     xprintf( "\r\n" );
     xprintf( "  'read' y 'pop' son operaciones distintas a proposito: un registro\r\n" );
     xprintf( "  se borra recien cuando el servidor confirmo que lo recibio.\r\n" );
@@ -2827,6 +2832,27 @@ static void cmdFs( void )
         if( ( strcmp( argv[ 2 ], "ver" ) == 0 ) && ( ucArgs >= 3U ) && ( argv[ 3 ] != NULL ) )
         {
             fs_sd_ver( argv[ 3 ], 20U );
+            return;
+        }
+
+        if( strcmp( argv[ 2 ], "format" ) == 0 )
+        {
+            /*
+             * ⛔ La palabra de confirmación no es burocracia: esto borra los
+             * lotes que todavía no se transmitieron. El parser ya exige el
+             * comando completo, pero `fs sd format` es lo bastante parecido a
+             * `fs format` —que sólo vacía la ventana— como para que un tipeo
+             * apurado se lleve los datos de una instalación.
+             */
+            if( ( ucArgs < 3U ) || ( argv[ 3 ] == NULL ) ||
+                ( strcmp( argv[ 3 ], "borrar" ) != 0 ) )
+            {
+                xprintf( "esto BORRA TODA la tarjeta, incluidos los lotes sin transmitir.\r\n" );
+                xprintf( "si es lo que queres: 'fs sd format borrar'\r\n" );
+                return;
+            }
+
+            ( void ) fs_sd_format();
             return;
         }
 

@@ -33,6 +33,7 @@
 /* USER CODE BEGIN DECL */
 
 #include "drv_sd.h"
+#include "fs_sd.h"
 
 
 /* Includes ------------------------------------------------------------------*/
@@ -186,6 +187,17 @@ DRESULT USER_write (
         {
             return RES_ERROR;
         }
+
+        /*
+         * Indicador de actividad. Éste es el ÚNICO punto que sabe que una
+         * operación larga —un `f_mkfs()`, un volcado grande— está avanzando:
+         * desde afuera esas llamadas son un bloque opaco de varios segundos.
+         *
+         * El diskio sólo avisa; qué mostrar lo decide `fs_sd`, así que esta capa
+         * no sabe nada de la consola. Fuera de una operación larga la función
+         * vuelve en una comparación.
+         */
+        fs_sd_progreso();
     }
 
     return RES_OK;

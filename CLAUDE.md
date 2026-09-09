@@ -1894,7 +1894,7 @@ y la consola imprime `SIN_DATO`:
 
 | Campo | Por qué |
 |---|---|
-| Las 3 analógicas | El **INA3221 no contesta** en el I2C de la placa nueva. Es hardware |
+| ~~Las 3 analógicas~~ | ✅ **resuelto el 2026-09-09**: Pablo cambió el INA3221 y el poleo ya las lee |
 | El contador | Ver el paso 2b, abajo |
 
 **Un canal que no se pudo medir y otro que midió cero se ven idénticos en un float.** En un
@@ -1928,6 +1928,49 @@ Modbus**, que son alternativas y no cosas simultáneas. El propio FWDLGX trae lo
 mismo nombre. Ahora `cfg_nvm_chequear_nombres()` los detecta y los informa en `config` y en
 `config save`. **Avisa, no impide**: qué canales habilitar es decisión del operador, y un equipo que
 se niega a guardar en medio de una instalación es peor que uno que advierte.
+
+#### ✅ Las analógicas entraron al poleo (2026-09-09)
+
+Pablo **cambió el INA3221** —el viejo no contestaba en el I2C— y con eso se destrabó lo único que
+faltaba del paso 2. Tres cosas del enganche que no son obvias:
+
+**⚠ 1. El canal del INA NO es el número de la entrada: el mapeo está invertido.**
+
+| Entrada | Canal del chip |
+|---|---|
+| `a0` | `inaCH3` |
+| `a1` | `inaCH2` |
+| `a2` | `inaCH1` |
+
+Sale de `ainputs_read_channel_raw()` de FWDLGX, que hace exactamente ese switch. **Depende del
+cableado de la placa, no del chip**, y por eso la tabla vive en `tkSys.c` y no adentro del driver
+—que habla de `inaCH1..3`, que son los del integrado—. ✅ **Confirmado por Pablo el 2026-09-09**: en
+R001 la asignación es la misma que en el AVR. No "corregirla" por parecer al revés.
+
+**2. El `sensors_pwr_settle_time` es un asentamiento EXTRA, no un reemplazo.** Existe para los
+sensores lentos —los de ultrasonido de Dica— que necesitan mucho más que los 500 ms por omisión. Se
+aplica **encendiendo el riel desde `tkSys` y esperando**; `drv_ina_medir()` ve que ya está encendido y
+no vuelve a pagar su propio asentamiento, que es justo para lo que ese camino existe en el driver. Así
+el tiempo configurable sale **sin tocar código validado**.
+
+**3. La conversión reproduce la del AVR, incluidos sus dos casos de borde**, porque de ahí sale el
+número que viaja en el frame (`cfg_ainputs_convertir()`). ✅ **Validada en banco el 2026-09-09**
+contra corriente inyectada:
+
+- **`|magnitud| < 0,01` se fuerza a 0,0.** No es cosmético: sin eso, un cero medido con un pelo de
+  ruido negativo se imprime **`-0.00`** con dos decimales, y del lado del servidor eso es un valor
+  distinto de `0.00`. El comentario del AVR dice lo mismo.
+- **`imax == imin` devuelve -999.0**, el centinela que el AVR usa para "la configuración no permite
+  convertir". Es **otro** número que el **-9999** de `wan_frame.h`, que significa "no se pudo medir":
+  se conservan los dos porque el servidor ya conoce el primero.
+
+⚠ **Una falla del I2C invalida los TRES canales, no uno.** `drv_ina_medir()` informa un solo
+resultado para el barrido completo, así que no hay forma de saber cuál se leyó bien; marcar sólo
+alguno sería inventar.
+
+Y una diferencia deliberada con el AVR que ya estaba documentada: **el corrimiento del registro de
+shunt va con extensión de signo**. Aquel hacía `>> 3` sobre un `uint16_t`, así que una corriente
+negativa —lazo abierto, sensor al revés— salía como un número enorme y positivo.
 
 #### ⏳ Paso 2b: el caudal, y por qué va aparte
 
@@ -2055,6 +2098,37 @@ la FAT **se valida al leerla** —checksum *y* coherencia de punteros— y si no
 avisando, en vez de operar con punteros basura y pisar la configuración, que vive justo antes en la
 misma EEPROM. Los registros llevan tag `0xC5`, así que el día que haga falta se puede reconstruir.
 
+#### ⚠ El checksum se calcula con `offsetof`, NO con `sizeof - 1`
+
+Bug encontrado en banco el **2026-09-09**, y vale como patrón porque el síntoma acusaba al
+componente equivocado.
+
+`fs_fat_t` son cuatro `uint16_t` y un `uint8_t` de checksum: **9 bytes de contenido, pero `sizeof`
+daba 10** porque el compilador alinea el final a 2. O sea que el checksum vivía en el byte 8 y el
+**byte 9 era relleno**. El código calculaba sobre `sizeof - 1` = 9 bytes, y eso **incluye al propio
+checksum en el rango**: al grabar entraba su valor viejo y al releer el nuevo, así que **nunca
+coincidían**.
+
+El efecto era exacto y silencioso: **la FAT se declaraba inválida en cada arranque**, el equipo
+formateaba y perdía todos los registros guardados. Y el mensaje decía
+`(se perdio el respaldo del RTC?)`, **culpando a la pila del MCP79410, que estaba perfecta**.
+
+⭐ **Lo cazó Pablo con el argumento correcto**: *"el RTC no se perdió así que no parece haber habido
+un problema de la batería"*. Un diagnóstico que acusa al componente equivocado cuesta más que no
+tener diagnóstico — la hora había sobrevivido al corte, así que la SRAM también.
+
+**La regla**: el checksum cubre **todo lo que hay antes del campo checksum**, y eso se escribe
+`offsetof( tipo, ucChecksum )`. `sizeof - 1` parece lo mismo y sólo coincide cuando el campo es
+literalmente el último byte — o sea cuando no hay relleno al final, que es una propiedad del
+compilador y no del diseño.
+
+⚠ **En `cfg_nvm.c` el mismo patrón NO es un bug pero sí es frágil**: ahí se escribe y se lee en
+`pucData[ usSize - 1 ]`, que también es relleno, pero **el mismo byte en los dos lados**, así que
+cierra. El precio es que el campo `ucChecksum` de esas structs no se usa y **el checksum real vive en
+el padding**: si alguien agrega un campo y el relleno cambia de tamaño, se mueve de lugar y las
+configuraciones guardadas dejan de validar. No se tocó para no invalidar lo ya grabado, pero es lo
+primero a corregir si alguna vez hay que cambiar esas structs.
+
 #### Circular de verdad: el nuevo pisa al más viejo
 
 ⚠ **Acá se cambió a propósito el comportamiento del AVR** (decisión de Pablo, 2026-09-08). Aquel dice
@@ -2162,6 +2236,35 @@ fecha se nota; uno fechado en 2001 se copia a un informe sin que nadie lo mire d
 ⚠ Recordar que **`_FS_TIMEOUT` está en TICKS, no en ms**: con el tick a 512 Hz, el default de 1000
 son 1,95 s. Hoy no importa porque `_FS_REENTRANT = 0`.
 
+#### ✅ La tarjeta se formatea DESDE EL DATALOGGER (`fs sd format borrar`)
+
+Criterio de Pablo, **2026-09-09**: *"la idea es que las tarjetas microSD las trabajemos solo en el
+datalogger y no tengamos que formatearlas antes en un PC"*. Un técnico que cambia una tarjeta en
+campo no tiene una PC al lado.
+
+Y no es un lujo: **las tarjetas nuevas de más de 32 GB vienen en exFAT**, que esta configuración no
+lee (`_FS_EXFAT = 0`) y rechaza con `FR_NO_FILESYSTEM`. Es exactamente lo que apareció en banco —
+`FRESULT=13` — con la tarjeta funcionando perfectamente a nivel de sectores.
+
+Tres decisiones del formateo:
+
+- **`FM_FAT | FM_FAT32`, NO `FM_ANY`.** `FM_ANY` incluye `FM_EXFAT`, y dejaría la tarjeta formateada
+  en algo que **el propio equipo no puede montar después**. Que FatFs elija entre FAT16 y FAT32 según
+  la capacidad está bien; salirse de ahí, no.
+- **Con tabla de particiones** (sin `FM_SFD`), que es como vienen las SD de fábrica y lo que espera
+  cualquier lector de tarjetas.
+- **Se monta al terminar para verificar.** Formatear y no comprobarlo dejaría al equipo diciendo
+  "listo" sobre una tarjeta que va a rechazar el primer volcado — y eso se descubriría **33 horas
+  después**, con los datos ya en riesgo.
+
+⛔ **La palabra `borrar` es obligatoria y va a propósito**: `fs sd format` se parece demasiado a
+`fs format` —que sólo vacía la ventana— como para que un tipeo apurado se lleve los lotes de una
+instalación. El parser ya exige el comando completo; esto es la segunda red.
+
+⚠ **Tarda**: escribe las dos copias de la FAT **sector por sector**, porque `drv_sd` no expone
+escritura múltiple. En una tarjeta grande son varios segundos con la tarea bloqueada. Si alguna vez
+molesta, ahí está el lugar donde mirar (CMD25, multi-block write).
+
 #### El volcado va al UMBRAL del 90 %, no al llenarse
 
 Es la diferencia entre un margen y un borde. Si se esperara a `count == length`, un volcado fallido
@@ -2172,6 +2275,28 @@ minuto.
 Y **el orden dentro del volcado es la única garantía real**: se escribe el archivo, se **confirma el
 `f_close()`**, y recién ahí se vacía la ventana. Si se vaciara antes, un corte en el medio se
 llevaría los datos de los dos lados a la vez. Si algo falla, la ventana **queda intacta**.
+
+### ✅ Pasos 4 y 4b validados en banco (2026-09-09)
+
+| Criterio | Resultado |
+|---|---|
+| ⭐ **La FAT sobrevive al corte** | `FS:: 2 registros guardados de 1984` al arrancar — antes decía "FAT invalida" |
+| Formateo desde el equipo | `fs sd format borrar` → **FAT32, 3.804.608 KB libres** |
+| Volcado | `SD:: 2 registros volcados a LOTE0001.DAT`, y la ventana quedó en 0 |
+| Numeración secuencial | `LOTE0001` … `LOTE0003`, con el contador en la SRAM del RTC |
+| Fecha de los archivos | `2026-09-09 12:08` con hora confiable, **sin fecha** cuando no lo era |
+| ⭐ **Sin tarjeta** | `no hay tarjeta (SD_DET en alto)` y **la ventana quedó intacta**: `guardados: 1` antes y después |
+
+⭐ **La última es la que valida el diseño**: la microSD es una **extensión**, no una dependencia. Si
+ahí se hubieran perdido datos, todo el esquema de ventana estaría mal planteado.
+
+Los **306 bytes de un lote de 2 registros** son 153 por línea, o sea un frame más el CRLF: el
+contenido es el que se va a transmitir, sin rearmar nada.
+
+ℹ️ **De paso quedó probado el mecanismo de la hora, por los dos lados**: `LOTE0001` se creó con el
+RTC en arranque frío y quedó **sin fecha** (`1980-00-00`, que es `get_fattime()` devolviendo 0);
+`LOTE0002` y `LOTE0003`, con la hora ya fijada, quedaron con la fecha real. ⚠ El porta pila **volvió
+a fallar** durante las pruebas — sigue siendo el pendiente de hardware de siempre.
 
 ### ⚠ La versión sube en CADA entrega a banco
 
@@ -2203,11 +2328,11 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | # | Paso | Estado |
 |---|---|---|
 | **1** | **Configuración persistente** en la M24M01 (5 bloques, hashes, comandos) | ✅ **validado en banco el 2026-09-08** |
-| **2** | `dataRcd` y el poleo (`tkSys`) | 🔨 **escrito, sin probar** |
+| **2** | `dataRcd` y el poleo (`tkSys`) | ✅ **validado el 2026-09-09** (falta el caudal → 2b) |
 | **2b** | ⏳ **El caudal del contador** — EMA por pulso, decay y slew-rate | pendiente, ver abajo |
-| **3** | ⭐ **El frame, sin modem** | 🔨 **escrito; idéntico al AVR en el test de host, falta banco** |
-| **4** | Almacenamiento: FS circular sobre la EEPROM | 🔨 **escrito, sin probar** |
-| **4b** | La microSD como extensión: la EEPROM es una VENTANA | 🔨 **escrito, sin probar** |
+| **3** | ⭐ **El frame, sin modem** | ✅ **anda en banco**; ⏳ falta compararlo contra un AVR real |
+| **4** | Almacenamiento: FS circular sobre la EEPROM | ✅ **validado el 2026-09-09** |
+| **4b** | La microSD como extensión: la EEPROM es una VENTANA | ✅ **validado el 2026-09-09** |
 | 5 | `tkWan`: la FSM y los modos continuo/discreto/mixto | |
 | 6 | Modbus | |
 | 7 | Consigna (`tkCtlPres`) | |

@@ -57,4 +57,26 @@ bool cfg_ainputs_set_canal( uint8_t ucCh, const char *pcEnable, const char *pcNa
 
 bool cfg_ainputs_set_settle_time( const char *pcVal );
 
+/*------------------------------------------------------------------------------
+ * Convierte la corriente leída (mA) en la magnitud física del canal, con la
+ * calibración de dos puntos.
+ *
+ *     magnitud = mmin + (I - imin) * (mmax - mmin) / (imax - imin) + offset
+ *
+ * ⚠ **Reproduce `ainputs_read_channel()` del AVR, incluidos sus dos casos de
+ * borde**, porque de acá sale el número que viaja en el frame:
+ *
+ *  - **Un resultado con |magnitud| < 0,01 se fuerza a 0,0.** No es cosmético:
+ *    sin eso, un cero medido con un pelo de ruido negativo se imprime como
+ *    `-0.00` con dos decimales, y del lado del servidor eso es un valor distinto
+ *    de `0.00`. El comentario del AVR lo dice igual.
+ *  - **Si `imax == imin` devuelve -999.0**, que es el centinela que el AVR usa
+ *    para "la configuración no permite convertir". Es **otro** número que el
+ *    -9999 de `wan_frame.h`, que significa "no se pudo medir": se conservan los
+ *    dos porque el servidor ya conoce el primero. La validación de
+ *    `cfg_ainputs_set_canal()` impide llegar acá, pero un bloque corrupto que
+ *    pase el checksum sí podría.
+ *----------------------------------------------------------------------------*/
+float cfg_ainputs_convertir( uint8_t ucCh, float fMa );
+
 #endif /* APPLICATION_CONFIG_CFG_AINPUTS_H_ */

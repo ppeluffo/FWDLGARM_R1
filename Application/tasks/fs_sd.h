@@ -91,6 +91,41 @@ bool fs_sd_borrar_lote   ( const char *pcNombre );
 
 void fs_sd_stats( fs_sd_stats_t *pxStats );
 
+/*------------------------------------------------------------------------------
+ * FORMATEA la tarjeta en FAT, con tabla de particiones, desde el propio equipo.
+ *
+ * Existe porque el criterio de Pablo (2026-09-09) es que **las tarjetas se
+ * trabajen sólo en el datalogger**: un técnico que cambia una microSD en el
+ * campo no tiene una PC al lado, y las tarjetas nuevas de más de 32 GB vienen
+ * en **exFAT**, que esta configuración de FatFs no entiende (`_FS_EXFAT = 0`) y
+ * rechaza con `FR_NO_FILESYSTEM`.
+ *
+ * ⛔ **BORRA TODO LO QUE HAYA EN LA TARJETA**, incluidos los lotes que todavía no
+ * se transmitieron. Por eso el comando de consola exige una palabra de
+ * confirmación: un `fs sd format` tipeado de más no puede llevarse los datos de
+ * una instalación.
+ *
+ * ⚠ **Tarda**: escribe las dos copias de la FAT sector por sector —`drv_sd` no
+ * expone escritura múltiple— así que en una tarjeta grande son varios segundos
+ * con la tarea bloqueada. Es una operación de mantenimiento, no de campo.
+ *----------------------------------------------------------------------------*/
+bool fs_sd_format( void );
+
+/*------------------------------------------------------------------------------
+ * Indicador de actividad para las operaciones largas.
+ *
+ * Lo llama `USER_write()` del diskio cada vez que escribe un sector — es el único
+ * punto que sabe que `f_mkfs()` está avanzando, porque desde afuera la llamada es
+ * un bloque opaco de varios segundos.
+ *
+ * ⚠ El diskio sólo **avisa**; qué mostrar (y si mostrar algo) se decide acá. Así
+ * la capa que toca el hardware no sabe nada de la consola.
+ *
+ * Fuera de una operación larga no hace nada, así que el costo en el camino normal
+ * es una comparación.
+ *----------------------------------------------------------------------------*/
+void fs_sd_progreso( void );
+
 /* Lista los lotes por consola. */
 void fs_sd_listar( void );
 

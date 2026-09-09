@@ -25,6 +25,67 @@ _Static_assert( ( FS_SD_CONTADOR_SRAM_ADDR + 4U ) <= DRV_RTC_SRAM_SIZE,
 static FATFS xFs;
 static bool  bMontado;
 
+/*
+ * Buffer de un sector, compartido por el volcado y por el formateo.
+ *
+ * Es uno solo y estático a propósito: **nunca se usan a la vez** —hay una sola
+ * tarea dueña de la SD, que es de dónde sale la serialización en este diseño (ver
+ * `_FS_REENTRANT = 0`)— y 512 bytes no entran en el stack de ninguna tarea de
+ * este firmware.
+ */
+static char pcBufSector[ _MAX_SS ];
+
+/*------------------------------------------------------------------------------
+ * Indicador de actividad. Ver fs_sd.h.
+ *
+ * Se imprime **uno cada FS_SD_PROGRESO_CADA sectores** y no en cada uno: a 9600
+ * cada carácter son ~1 ms más el mutex y el semáforo del TX, así que un carácter
+ * por sector le agregaría segundos a la operación que se quiere acompañar. Con 32
+ * el molinete gira visiblemente y el costo se pierde en el ruido.
+ *----------------------------------------------------------------------------*/
+#define FS_SD_PROGRESO_CADA     32U
+
+static const char pcGiro[] = { '|', '/', '-', '\\' };
+
+static bool     bProgresoOn;
+static uint32_t ulProgresoSectores;
+static uint8_t  ucProgresoIdx;
+//------------------------------------------------------------------------------
+void fs_sd_progreso( void )
+{
+    if( !bProgresoOn )
+    {
+        return;
+    }
+
+    if( ( ++ulProgresoSectores % FS_SD_PROGRESO_CADA ) != 0U )
+    {
+        return;
+    }
+
+    /* El backspace deja el cursor donde estaba, así que el molinete gira en el
+       lugar en vez de llenar la pantalla de caracteres. */
+    xputChar( pcGiro[ ucProgresoIdx++ & 0x03U ] );
+    xputChar( '\b' );
+}
+//------------------------------------------------------------------------------
+static void prvProgresoIniciar( void )
+{
+    ulProgresoSectores = 0U;
+    ucProgresoIdx      = 0U;
+    bProgresoOn        = true;
+}
+//------------------------------------------------------------------------------
+static void prvProgresoTerminar( void )
+{
+    bProgresoOn = false;
+
+    /* Borra el último carácter del molinete: sin esto queda una barra suelta
+       pegada al mensaje que viene después. */
+    xputChar( ' ' );
+    xputChar( '\b' );
+}
+
 //------------------------------------------------------------------------------
 /*
  * ⚠ `get_fattime()` NO está acá: vive en el bloque USER CODE de
@@ -62,6 +123,36 @@ static void prvNombreDeLote( uint32_t ulNro, char *pcNombre, uint16_t usSize )
 }
 //------------------------------------------------------------------------------
 /*
+ * Enciende y arranca la tarjeta, SIN montar.
+ *
+ * Está separado de `prvMontar()` porque el formateo lo necesita así: `f_mkfs()`
+ * trabaja sobre una tarjeta inicializada pero **sin filesystem que montar** —que
+ * es justamente el caso que viene a resolver—.
+ */
+static bool prvEncender( void )
+{
+    drv_sd_power( true );
+
+    /* El orden es obligatorio: `drv_sd_presente()` devuelve false con el riel
+       apagado, porque ahí el pin de detección está en alta impedancia. */
+    if( !drv_sd_presente() )
+    {
+        xprintf( "SD:: no hay tarjeta (SD_DET en alto)\r\n" );
+        drv_sd_power( false );
+        return false;
+    }
+
+    if( !drv_sd_arrancar() )
+    {
+        xprintf( "SD:: la tarjeta NO inicializa (CMD0/ACMD41) - probar 'sd' para el detalle\r\n" );
+        drv_sd_power( false );
+        return false;
+    }
+
+    return true;
+}
+//------------------------------------------------------------------------------
+/*
  * Enciende, arranca y monta. Es la parte cara, y por eso el diseño de ventana
  * existe: esto se paga una vez por volcado, no una vez por muestra.
  */
@@ -72,26 +163,33 @@ static bool prvMontar( void )
         return true;
     }
 
-    drv_sd_power( true );
-
-    /* El orden es obligatorio: `drv_sd_presente()` devuelve false con el riel
-       apagado, porque ahí el pin de detección está en alta impedancia. */
-    if( !drv_sd_presente() )
+    if( !prvEncender() )
     {
-        drv_sd_power( false );
         return false;
     }
 
-    if( !drv_sd_arrancar() )
-    {
-        xprintf( "SD:: la tarjeta no inicializa\r\n" );
-        drv_sd_power( false );
-        return false;
-    }
+    /*
+     * ⚠ Cada fallo imprime SU causa, y los llamadores no agregan nada.
+     *
+     * La primera prueba de banco (2026-09-09) mostró dos mensajes pegados —"no
+     * se pudo montar" y "no hay tarjeta"— que se contradecían entre sí: la
+     * tarjeta estaba presente y había inicializado, y lo único que falló fue el
+     * montaje. Un diagnóstico que acusa a la causa equivocada cuesta más que no
+     * tenerlo.
+     *
+     * El `FRESULT` se imprime con su número porque es lo que separa las
+     * hipótesis: 1 = DISK_ERR (la lectura de sectores falla, o sea diskio o
+     * driver), 3 = NOT_READY (disk_initialize dijo que no), 13 = NO_FILESYSTEM
+     * (los sectores se leen bien pero no hay una FAT donde debería).
+     */
+    FRESULT xRes = f_mount( &xFs, "", 1 );
 
-    if( f_mount( &xFs, "", 1 ) != FR_OK )
+    if( xRes != FR_OK )
     {
-        xprintf( "SD:: no se pudo montar (formateada en FAT?)\r\n" );
+        xprintf( "SD:: f_mount fallo, FRESULT=%d%s\r\n", ( int ) xRes,
+                 ( xRes == FR_NO_FILESYSTEM ) ? " (NO_FILESYSTEM: la tarjeta no esta en FAT - 'fs sd format borrar')" :
+                 ( xRes == FR_DISK_ERR )      ? " (DISK_ERR: la lectura de sectores falla)" :
+                 ( xRes == FR_NOT_READY )     ? " (NOT_READY: disk_initialize rechazo)" : "" );
         drv_sd_power( false );
         return false;
     }
@@ -121,7 +219,6 @@ bool fs_sd_volcar_ventana( void )
     fs_datos_stats_t xSt;
     dataRcd_t        xDr;
     char             pcNombre[ FS_SD_NOMBRE_LARGO ];
-    static char      pcFrame[ WAN_FRAME_BUFFER_SIZE ];
     FIL              xFile;
     uint16_t         usEscritos = 0U;
     bool             bOk        = true;
@@ -158,6 +255,8 @@ bool fs_sd_volcar_ventana( void )
         return false;
     }
 
+    prvProgresoIniciar();
+
     /* Un frame por línea, en el mismo formato en que se van a transmitir. */
     for( uint16_t i = 0U; i < xSt.usCount; i++ )
     {
@@ -166,19 +265,19 @@ bool fs_sd_volcar_ventana( void )
             continue;   /* un registro corrupto no aborta el lote entero */
         }
 
-        uint16_t usLargo = wan_frame_data( pcFrame, sizeof( pcFrame ) - 2U, &xDr, true );
+        uint16_t usLargo = wan_frame_data( pcBufSector, sizeof( pcBufSector ) - 2U, &xDr, true );
 
         if( usLargo == 0U )
         {
             continue;
         }
 
-        pcFrame[ usLargo++ ] = '\r';
-        pcFrame[ usLargo++ ] = '\n';
+        pcBufSector[ usLargo++ ] = '\r';
+        pcBufSector[ usLargo++ ] = '\n';
 
         UINT uxEscritos;
 
-        if( ( f_write( &xFile, pcFrame, usLargo, &uxEscritos ) != FR_OK ) ||
+        if( ( f_write( &xFile, pcBufSector, usLargo, &uxEscritos ) != FR_OK ) ||
             ( uxEscritos != usLargo ) )
         {
             xprintf( "SD:: ERROR escribiendo %s\r\n", pcNombre );
@@ -199,6 +298,8 @@ bool fs_sd_volcar_ventana( void )
         xprintf( "SD:: ERROR al cerrar %s\r\n", pcNombre );
         bOk = false;
     }
+
+    prvProgresoTerminar();
 
     if( bOk )
     {
@@ -347,6 +448,93 @@ void fs_sd_stats( fs_sd_stats_t *pxStats )
     prvDesmontar();
 }
 //------------------------------------------------------------------------------
+bool fs_sd_format( void )
+{
+    if( !prvEncender() )
+    {
+        return false;
+    }
+
+    /*
+     * ⚠ Hay que REGISTRAR el volumen aunque no se pueda montar.
+     *
+     * `f_mkfs()` necesita un objeto `FATFS` asociado al drive, y con una tarjeta
+     * en exFAT o virgen el montaje falla — que es justamente el caso que se viene
+     * a arreglar. Por eso va `f_mount( …, 0 )`: la opción 0 **registra sin
+     * montar**, no toca la tarjeta, y no puede fallar por no encontrar un
+     * filesystem.
+     */
+    ( void ) f_mount( &xFs, "", 0 );
+    bMontado = false;
+
+    xprintf( "SD:: formateando... (escribe las dos FAT sector por sector, puede tardar)  " );
+    prvProgresoIniciar();
+
+    /*
+     * `FM_FAT | FM_FAT32` y NO `FM_ANY`: `FM_ANY` incluye `FM_EXFAT`, y esta
+     * configuración de FatFs no lee exFAT (`_FS_EXFAT = 0`) — dejaría la tarjeta
+     * formateada en algo que el propio equipo no puede montar después. Que
+     * elija entre FAT16 y FAT32 según el tamaño está bien; salirse de ahí, no.
+     *
+     * Sin `FM_SFD`, o sea **con tabla de particiones**, que es como vienen las SD
+     * de fábrica y lo que espera cualquier lector de tarjetas.
+     *
+     * `au = 0` deja que FatFs elija el tamaño de cluster según la capacidad.
+     */
+    FRESULT xRes = f_mkfs( "", FM_FAT | FM_FAT32, 0,
+                           pcBufSector, ( UINT ) sizeof( pcBufSector ) );
+
+    prvProgresoTerminar();
+    xprintf( "\r\n" );
+
+    if( xRes != FR_OK )
+    {
+        xprintf( "SD:: f_mkfs fallo, FRESULT=%d%s\r\n", ( int ) xRes,
+                 ( xRes == FR_MKFS_ABORTED ) ? " (MKFS_ABORTED: la tarjeta es muy chica o no se puede leer)" :
+                 ( xRes == FR_DISK_ERR )     ? " (DISK_ERR: fallo la escritura de sectores)" :
+                 ( xRes == FR_NOT_READY )    ? " (NOT_READY)" : "" );
+        prvDesmontar();
+        return false;
+    }
+
+    /*
+     * Se monta para verificar que quedó usable. Formatear y NO comprobarlo
+     * dejaría al equipo diciendo "listo" sobre una tarjeta que después va a
+     * rechazar el primer volcado — y eso se descubriría 33 horas más tarde, con
+     * los datos ya en riesgo.
+     */
+    if( f_mount( &xFs, "", 1 ) != FR_OK )
+    {
+        xprintf( "SD:: [!] formateo hecho pero la tarjeta NO monta\r\n" );
+        prvDesmontar();
+        return false;
+    }
+
+    bMontado = true;
+
+    DWORD  ulLibres;
+    FATFS *pxFsPtr;
+    const char *pcTipo = ( xFs.fs_type == FS_FAT32 ) ? "FAT32" :
+                         ( xFs.fs_type == FS_FAT16 ) ? "FAT16" : "FAT12";
+
+    if( f_getfree( "", &ulLibres, &pxFsPtr ) == FR_OK )
+    {
+        xprintf( "SD:: formateada en %s, %lu KB libres\r\n", pcTipo,
+                 ( unsigned long ) ( ( ulLibres * pxFsPtr->csize ) / 2UL ) );
+    }
+    else
+    {
+        xprintf( "SD:: formateada en %s\r\n", pcTipo );
+    }
+
+    /* El contador de lotes vuelve a cero: los archivos que numeraba ya no
+       existen, y arrancar de LOTE0001 es lo menos confuso al mirar la tarjeta. */
+    prvContadorGrabar( 0U );
+
+    prvDesmontar();
+    return true;
+}
+//------------------------------------------------------------------------------
 void fs_sd_listar( void )
 {
     DIR     xDir;
@@ -354,8 +542,7 @@ void fs_sd_listar( void )
 
     if( !prvMontar() )
     {
-        xprintf( "SD:: no hay tarjeta\r\n" );
-        return;
+        return;     /* prvMontar() ya explicó por qué */
     }
 
     if( f_opendir( &xDir, "" ) == FR_OK )
@@ -384,7 +571,6 @@ void fs_sd_listar( void )
 void fs_sd_ver( const char *pcNombre, uint16_t usLineas )
 {
     FIL  xFile;
-    char pcLinea[ WAN_FRAME_BUFFER_SIZE ];
 
     if( pcNombre == NULL )
     {
@@ -393,8 +579,7 @@ void fs_sd_ver( const char *pcNombre, uint16_t usLineas )
 
     if( !prvMontar() )
     {
-        xprintf( "SD:: no hay tarjeta\r\n" );
-        return;
+        return;     /* prvMontar() ya explicó por qué */
     }
 
     if( f_open( &xFile, pcNombre, FA_READ ) != FR_OK )
@@ -406,14 +591,14 @@ void fs_sd_ver( const char *pcNombre, uint16_t usLineas )
 
     for( uint16_t i = 0U; i < usLineas; i++ )
     {
-        if( f_gets( pcLinea, ( int ) sizeof( pcLinea ), &xFile ) == NULL )
+        if( f_gets( pcBufSector, ( int ) sizeof( pcBufSector ), &xFile ) == NULL )
         {
             break;
         }
 
         /* Sin xprintf: la línea es un frame y puede pasar los 160 bytes de su
            buffer. Ver wan_frame. */
-        ( void ) frtos_write( fdTERM, pcLinea, ( uint16_t ) strlen( pcLinea ) );
+        ( void ) frtos_write( fdTERM, pcBufSector, ( uint16_t ) strlen( pcBufSector ) );
     }
 
     ( void ) f_close( &xFile );

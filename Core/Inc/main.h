@@ -159,7 +159,7 @@ void Error_Handler(void);
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
 #define FW_NOMBRE              "FWDLGARM_R1"
-#define FW_VERSION             "0.0.26"
+#define FW_VERSION             "0.0.30"
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*
