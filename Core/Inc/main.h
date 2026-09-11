@@ -168,8 +168,8 @@ void Error_Handler(void);
  * es la pregunta que más veces hubo que contestar en este bring-up. Un número de
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
-#define FW_NOMBRE              "FWDLGARM_R1"
-#define FW_VERSION             "0.0.38"
+#define FW_NOMBRE              "FWDLGARM_R1"   /* el del banner, NO el del frame */
+#define FW_VERSION             "0.0.43"
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*
@@ -195,7 +195,20 @@ void Error_Handler(void);
  * un datalogger nuevo de uno viejo.
  */
 #define FW_HW                  "SPQ_ARM_R1"
-#define FW_TYPE                FW_NOMBRE
+
+/*
+ * ⚠ `FW_TYPE` NO es `FW_NOMBRE`: va SIN la revisión de placa.
+ *
+ * Es el **tipo de firmware** —la familia de producto— y sigue el patrón del AVR,
+ * donde `TYPE=FWDLGX` no lleva sufijo y la revisión vive en `HW=SPQ_AVRDA_R2`.
+ * Acá es igual: `TYPE=FWDLGARM` y `HW=SPQ_ARM_R1`.
+ *
+ * Corregido por Pablo el 2026-09-11. Los dos campos se ven parecidos y por eso
+ * conviene que estén separados a la vista: **`FW_NOMBRE` es lo que dice el banner
+ * de la consola, `FW_TYPE` es lo que viaja al servidor.** Unificarlos de nuevo
+ * metería la revisión de placa en un campo que no la lleva.
+ */
+#define FW_TYPE                "FWDLGARM"
 
 /* USER CODE END Private defines */
 

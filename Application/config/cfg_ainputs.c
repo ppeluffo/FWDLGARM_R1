@@ -107,6 +107,17 @@ uint8_t cfg_ainputs_hash( void )
     return ucHash;
 }
 //------------------------------------------------------------------------------
+/*
+ * ⚠ **Un argumento en NULL significa "no cambiar este campo"**, y el ÚNICO
+ * obligatorio es el nombre. No es una comodidad: es la regla del AVR
+ * (`ainputs_config_channel()`), y **el servidor la usa**. El 2026-09-11 contestó
+ * `C0=FALSE,X,1.0,CAUDAL` —cuatro campos de los seis— y exigirlos todos hacía
+ * que el bloque entero se descartara.
+ *
+ * Los que vengan se validan **contra los que ya están**, y recién si el
+ * conjunto completo cierra se escribe: así un campo suelto no puede dejar la
+ * configuración en un estado que ninguna validación aprobó.
+ */
 bool cfg_ainputs_set_canal( uint8_t ucCh, const char *pcEnable, const char *pcName,
                             const char *pcImin, const char *pcImax,
                             const char *pcMmin, const char *pcMmax,
@@ -117,22 +128,22 @@ bool cfg_ainputs_set_canal( uint8_t ucCh, const char *pcEnable, const char *pcNa
         return false;
     }
 
-    if( ( pcEnable == NULL ) || ( pcName == NULL ) || ( pcImin == NULL ) ||
-        ( pcImax == NULL )   || ( pcMmin == NULL ) || ( pcMmax == NULL ) ||
-        ( pcOffset == NULL ) )
+    if( pcName == NULL )
     {
         return false;
     }
 
-    bool bEnable;
+    bool bEnable = xCfgAinputs.xCanal[ ucCh ].bEnabled;
 
-    if( !cfg_str2bool( pcEnable, &bEnable ) )
+    if( ( pcEnable != NULL ) && !cfg_str2bool( pcEnable, &bEnable ) )
     {
         return false;
     }
 
-    long lImin = atol( pcImin );
-    long lImax = atol( pcImax );
+    long lImin = ( pcImin != NULL ) ? atol( pcImin )
+                                    : ( long ) xCfgAinputs.xCanal[ ucCh ].ucImin;
+    long lImax = ( pcImax != NULL ) ? atol( pcImax )
+                                    : ( long ) xCfgAinputs.xCanal[ ucCh ].ucImax;
 
     /*
      * imin < imax no es un capricho: la conversión divide por (imax - imin). Con
@@ -145,8 +156,10 @@ bool cfg_ainputs_set_canal( uint8_t ucCh, const char *pcEnable, const char *pcNa
         return false;
     }
 
-    float fMmin = ( float ) atof( pcMmin );
-    float fMmax = ( float ) atof( pcMmax );
+    float fMmin = ( pcMmin != NULL ) ? ( float ) atof( pcMmin )
+                                     : xCfgAinputs.xCanal[ ucCh ].fMmin;
+    float fMmax = ( pcMmax != NULL ) ? ( float ) atof( pcMmax )
+                                     : xCfgAinputs.xCanal[ ucCh ].fMmax;
 
     if( fMmin == fMmax )
     {
@@ -159,7 +172,11 @@ bool cfg_ainputs_set_canal( uint8_t ucCh, const char *pcEnable, const char *pcNa
     xCfgAinputs.xCanal[ ucCh ].ucImax   = ( uint8_t ) lImax;
     xCfgAinputs.xCanal[ ucCh ].fMmin    = fMmin;
     xCfgAinputs.xCanal[ ucCh ].fMmax    = fMmax;
-    xCfgAinputs.xCanal[ ucCh ].fOffset  = ( float ) atof( pcOffset );
+    if( pcOffset != NULL )
+    {
+        xCfgAinputs.xCanal[ ucCh ].fOffset = ( float ) atof( pcOffset );
+    }
+
     cfg_strlcpy( xCfgAinputs.xCanal[ ucCh ].pcName, pcName, CFG_PARAMNAME_LENGTH );
 
     return true;

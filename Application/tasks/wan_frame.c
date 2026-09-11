@@ -9,6 +9,7 @@
 
 #include "wan_frame.h"
 #include "cfg_nvm.h"
+#include "tkCmd.h"
 #include "frtos-io.h"
 #include "main.h"
 
@@ -16,7 +17,11 @@
  * ⏳ PROVISORIO de esta etapa. Ver wan_frame.h: lo definitivo lo lee tkWAN del
  * modem con `AT+IMEI?` en el paso 5, y queda fijado para toda la corrida.
  */
-static char pcImei[ 16 ] = "000000000000000";
+static char pcImei [ 16 ] = "000000000000000";
+static char pcIccid[ 24 ] = "";
+
+/* `rssi` crudo tal como lo devuelve el módulo. 99 mientras no se leyó. */
+static uint8_t ucRssiCrudo = 99U;
 
 //------------------------------------------------------------------------------
 const char *wan_imei( void )
@@ -67,6 +72,164 @@ uint16_t wan_frame_ping( char *pcBuf, uint16_t usSize )
     }
 
     return ( uint16_t ) iN;
+}
+//------------------------------------------------------------------------------
+void wan_iccid_set( const char *pcNuevo )
+{
+    if( pcNuevo == NULL )
+    {
+        return;
+    }
+
+    /* Igual que el IMEI: sólo se acepta si empieza con un dígito. Un parseo a
+       medias dejaría al equipo informando basura como identidad de la SIM. */
+    if( ( pcNuevo[ 0 ] < '0' ) || ( pcNuevo[ 0 ] > '9' ) )
+    {
+        return;
+    }
+
+    uint32_t i = 0U;
+
+    while( ( i < ( sizeof( pcIccid ) - 1U ) ) &&
+           ( ( ( pcNuevo[ i ] >= '0' ) && ( pcNuevo[ i ] <= '9' ) ) ||
+             ( ( pcNuevo[ i ] >= 'A' ) && ( pcNuevo[ i ] <= 'F' ) ) ) )
+    {
+        pcIccid[ i ] = pcNuevo[ i ];
+        i++;
+    }
+
+    pcIccid[ i ] = '\0';
+}
+//------------------------------------------------------------------------------
+const char *wan_iccid( void )
+{
+    return pcIccid;
+}
+//------------------------------------------------------------------------------
+void wan_csq_set( uint8_t ucRssi )
+{
+    ucRssiCrudo = ucRssi;
+}
+//------------------------------------------------------------------------------
+bool wan_csq_valido( void )
+{
+    /* Ver wan_frame.h: 99 es "desconocido" y >= 31 es el centinela de "todavía
+       no campó en la red". Ninguno de los dos es una medida. */
+    return ( ucRssiCrudo < 31U );
+}
+//------------------------------------------------------------------------------
+uint8_t wan_csq( void )
+{
+    /*
+     * El contrato lleva el valor absoluto de los dBm, no el `rssi`:
+     *     dBm = -113 + 2 * rssi   ->   |dBm| = 113 - 2 * rssi
+     * Con `rssi = 20` da 73, que es lo que manda el AVR.
+     */
+    if( !wan_csq_valido() )
+    {
+        return 0U;      /* sin medida; el servidor lo ve como señal nula */
+    }
+
+    return ( uint8_t ) ( 113U - ( 2U * ucRssiCrudo ) );
+}
+//------------------------------------------------------------------------------
+/*
+ * El identificador único del micro, en hexadecimal.
+ *
+ * ⚠ **Son 96 bits = 24 caracteres, contra los 32 que manda el AVR** (su
+ * `NVM_signature2str()`). Es una diferencia de silicio, no una decisión: el
+ * STM32L4 tiene un UID de 96 bits y el AVR uno más largo. Si el servidor
+ * validara el largo, acá habría que rellenar — pero el equipo se identifica por
+ * el **IMEI**, así que esto es informativo.
+ */
+static void prvUidStr( char *pcBuf, uint16_t usSize )
+{
+    const uint32_t *pulUid = ( const uint32_t * ) UID_BASE;
+
+    snprintf( pcBuf, usSize, "%08lX%08lX%08lX",
+              ( unsigned long ) pulUid[ 0 ],
+              ( unsigned long ) pulUid[ 1 ],
+              ( unsigned long ) pulUid[ 2 ] );
+}
+//------------------------------------------------------------------------------
+uint16_t wan_frame_conf_all( char *pcBuf, uint16_t usSize )
+{
+    char pcUid[ 32 ];
+
+    if( ( pcBuf == NULL ) || ( usSize == 0U ) )
+    {
+        return 0U;
+    }
+
+    prvUidStr( pcUid, sizeof( pcUid ) );
+
+    /*
+     * ⚠ CINCO hashes, no seis: falta `FH` (flowcontrol), que este equipo no
+     * tiene. Ver wan_frame.h — el servidor lo va a pedir en todas las sesiones y
+     * eso está previsto.
+     */
+    int iN = snprintf( pcBuf, usSize,
+                       "ID=%s&HW=%s&TYPE=%s&VER=%s&CLASS=CONF_ALL"
+                       "&UID=%s&ICCID=%s&CSQ=%u&WDG=%u"
+                       "&BH=0x%02X&AH=0x%02X&CH=0x%02X&MH=0x%02X&PH=0x%02X",
+                       wan_imei(), FW_HW, FW_TYPE, FW_VERSION,
+                       pcUid, wan_iccid(),
+                       ( unsigned ) wan_csq(),
+                       ( unsigned ) wan_causa_reset(),
+                       ( unsigned ) cfg_base_hash(),
+                       ( unsigned ) cfg_ainputs_hash(),
+                       ( unsigned ) cfg_counter_hash(),
+                       ( unsigned ) cfg_modbus_hash(),
+                       ( unsigned ) cfg_consigna_hash() );
+
+    if( ( iN < 0 ) || ( ( uint16_t ) iN >= usSize ) )
+    {
+        xprintf( "WAN:: ERROR: el frame CONF_ALL no entra en %u bytes\r\n",
+                 ( unsigned ) usSize );
+        return 0U;
+    }
+
+    return ( uint16_t ) iN;
+}
+//------------------------------------------------------------------------------
+wan_conf_rta_t wan_frame_conf_all_rta( const char *pcRta, wan_conf_flags_t *pxFlags )
+{
+    if( ( pcRta == NULL ) || ( pxFlags == NULL ) )
+    {
+        return wanCONF_SIN_RESPUESTA;
+    }
+
+    memset( pxFlags, 0, sizeof( wan_conf_flags_t ) );
+
+    /*
+     * El orden de los chequeos importa: `CONFIG=OK` primero, porque una
+     * respuesta que lista bloques también contiene la palabra `CONFIG`.
+     */
+    if( strstr( pcRta, "CONFIG=OK" ) != NULL )
+    {
+        return wanCONF_OK;
+    }
+
+    /*
+     * `CONFIG=ERROR` = el servidor no reconoce al datalogger (no está dado de
+     * alta). `FAIL` = no reconoce el frame. Los dos significan lo mismo para el
+     * equipo: no hay nada que hacer hasta que alguien toque el servidor.
+     */
+    if( ( strstr( pcRta, "CONFIG=ERROR" ) != NULL ) ||
+        ( strstr( pcRta, "FAIL" ) != NULL ) )
+    {
+        return wanCONF_DESCONOCIDO;
+    }
+
+    /* Los nombres son los del AVR, y `FLOWC` se parsea aunque no se use. */
+    pxFlags->bBase        = ( strstr( pcRta, "BASE"    ) != NULL );
+    pxFlags->bAinputs     = ( strstr( pcRta, "AINPUT"  ) != NULL );
+    pxFlags->bCounter     = ( strstr( pcRta, "COUNTER" ) != NULL );
+    pxFlags->bModbus      = ( strstr( pcRta, "MODBUS"  ) != NULL );
+    pxFlags->bConsigna    = ( strstr( pcRta, "PRESION" ) != NULL );
+    pxFlags->bFlowcontrol = ( strstr( pcRta, "FLOWC"   ) != NULL );
+
+    return wanCONF_RECONFIGURAR;
 }
 //------------------------------------------------------------------------------
 uint16_t wan_frame_data( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr,
@@ -172,5 +335,557 @@ uint16_t wan_frame_data( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr,
     }
 
     return usIdx;
+}
+//------------------------------------------------------------------------------
+
+/*==============================================================================
+ * LOS BLOQUES DE CONFIGURACIÓN (paso 5b-2)
+ *
+ * El servidor manda la configuración que quiere que tenga el equipo y acá se
+ * parsea y se aplica. Portado de `wan_process_rsp_config*()` de FWDLGX.
+ *============================================================================*/
+
+/*
+ * Los delimitadores del AVR, tal cual: `&` separa campos, `,` separa los
+ * tokens de un campo, `=` separa clave de valor, y **`<` y `>` están porque la
+ * respuesta viene envuelta en HTML** (`<html>…</html>`) — sin ellos el último
+ * valor se llevaría puesto el cierre de la etiqueta.
+ */
+static const char pcDelim[] = "&,;:=><";
+
+//------------------------------------------------------------------------------
+static bool prvEsDelim( char cCh )
+{
+    /* Los caracteres de control terminan el token igual que un delimitador. El
+       AVR no lo hace —su buffer siempre venía cerrado por el `<` del HTML— pero
+       una respuesta con CRLF al final dejaría el `\r` pegado al valor, y el
+       setter lo rechazaría por una razón que desde afuera no se entiende. */
+    return ( ( cCh == '\0' ) || ( cCh < ' ' ) || ( strchr( pcDelim, cCh ) != NULL ) );
+}
+//------------------------------------------------------------------------------
+/*
+ * Extrae en `pcVal` el token número `ucToken` (0 = el primero) que sigue a
+ * `pcClave` en la respuesta. `pcClave` incluye el `=`: "TPOLL=", "A0=".
+ *
+ * Reemplaza al par `strlcpy` + `strsep` repetido del AVR, y a propósito:
+ *
+ *  - **`strsep()` no está en newlib** (es de BSD, como `strlcpy`).
+ *  - Aquel copiaba 64 bytes desde el campo a un buffer global y tokenizaba ahí,
+ *    así que **un campo largo se truncaba y los últimos tokens salían NULL**:
+ *    un canal modbus con nombres largos perdía el `pow10` en silencio. Acá se
+ *    parsea en el lugar y cada token se acota por separado. **Eso no toca el
+ *    contrato**: el contrato es lo que se MANDA (el hash sobre el string
+ *    formateado), no cómo se lee la respuesta.
+ *
+ * Devuelve false si la clave no está o el token está vacío — y en los dos casos
+ * el campo se deja como estaba, que es lo correcto: el servidor no lo mandó.
+ */
+static bool prvCampo( const char *pcRta, const char *pcClave, uint8_t ucToken,
+                      char *pcVal, uint16_t usSize )
+{
+    const char *p;
+    uint16_t    i;
+
+    if( ( pcRta == NULL ) || ( pcClave == NULL ) || ( pcVal == NULL ) || ( usSize < 2U ) )
+    {
+        return false;
+    }
+
+    pcVal[ 0 ] = '\0';
+
+    p = strstr( pcRta, pcClave );
+
+    if( p == NULL )
+    {
+        return false;
+    }
+
+    p += strlen( pcClave );
+
+    /* Saltear los tokens anteriores al pedido. */
+    while( ucToken > 0U )
+    {
+        while( !prvEsDelim( *p ) )
+        {
+            p++;
+        }
+
+        /* Sólo `&,;:=` continúan la lista; un '\0', un '<' o un control
+           significan que la respuesta se acabó antes del token pedido. */
+        if( ( *p == '\0' ) || ( strchr( "&,;:=", *p ) == NULL ) )
+        {
+            return false;
+        }
+
+        p++;
+        ucToken--;
+    }
+
+    for( i = 0U; ( i < ( uint16_t ) ( usSize - 1U ) ) && !prvEsDelim( p[ i ] ); i++ )
+    {
+        pcVal[ i ] = p[ i ];
+    }
+
+    pcVal[ i ] = '\0';
+
+    return ( i > 0U );
+}
+//------------------------------------------------------------------------------
+/*
+ * Los dos veredictos que TODA respuesta de configuración puede traer, y que se
+ * chequean antes de buscar un solo campo.
+ *
+ * ⚠ El orden importa: una respuesta que trae configuración también contiene la
+ * palabra `CONFIG` si el servidor la incluyera, así que `CONFIG=OK` va primero
+ * y se compara entero.
+ */
+static bool prvVeredicto( const char *pcRta, wan_conf_rta_t *peRta )
+{
+    if( ( pcRta == NULL ) || ( pcRta[ 0 ] == '\0' ) )
+    {
+        *peRta = wanCONF_SIN_RESPUESTA;
+        return true;
+    }
+
+    if( strstr( pcRta, "CONFIG=OK" ) != NULL )
+    {
+        *peRta = wanCONF_OK;
+        return true;
+    }
+
+    if( ( strstr( pcRta, "CONFIG=ERROR" ) != NULL ) ||
+        ( strstr( pcRta, "CONFIG=FAIL"  ) != NULL ) )
+    {
+        *peRta = wanCONF_DESCONOCIDO;
+        return true;
+    }
+
+    return false;
+}
+
+//------------------------------------------------------------------------------
+/*
+ * Lee hasta `ucNro` tokens de `pcClave` y deja en `ppcOut` un puntero por cada
+ * uno — **NULL el que el servidor no haya mandado**. Devuelve cuántos vinieron.
+ *
+ * ⚠ **Que falten campos es NORMAL, no un error**, y costó una vuelta el
+ * 2026-09-11: el servidor contestó `C0=FALSE,X,1.0,CAUDAL` —cuatro de los seis
+ * que parsea el AVR— y la primera versión, que los exigía todos, descartó el
+ * bloque entero. Los setters tratan el NULL como "dejá este campo como está",
+ * que es exactamente lo que hace el AVR (`if ( s_qmax != NULL ) …`).
+ *
+ * El token 1 es el NOMBRE en los tres bloques, y es el único imprescindible:
+ * sin él no hay nada que configurar.
+ */
+static uint8_t prvTokens( const char *pcRta, const char *pcClave, uint8_t ucNro,
+                          char pcBuf[][ 16 ], const char *ppcOut[] )
+{
+    uint8_t i;
+    uint8_t ucVinieron = 0U;
+
+    for( i = 0U; i < ucNro; i++ )
+    {
+        if( prvCampo( pcRta, pcClave, i, pcBuf[ i ], 16U ) )
+        {
+            ppcOut[ i ] = pcBuf[ i ];
+            ucVinieron++;
+        }
+        else
+        {
+            ppcOut[ i ] = NULL;
+        }
+    }
+
+    return ucVinieron;
+}
+//------------------------------------------------------------------------------
+/*
+ * El aviso de que un bloque vino corto. **No es cosmético**: si el servidor no
+ * manda un campo que sí entra en el hash, el equipo se queda con SU valor y el
+ * hash no va a coincidir nunca — o sea que va a pedir reconfigurar ese bloque
+ * en todas las sesiones. Verlo en la consola es lo único que separa ese caso de
+ * un error del parseo.
+ */
+static void prvAvisarIncompleto( const char *pcQue, uint8_t ucVinieron, uint8_t ucNro )
+{
+    if( ucVinieron < ucNro )
+    {
+        xprintf( "WAN:: [!] %s: vinieron %u de %u campos; el resto queda como estaba\r\n",
+                 pcQue, ( unsigned ) ucVinieron, ( unsigned ) ucNro );
+    }
+}
+/*------------------------------------------------------------------------------
+ * CONF_BASE
+ *----------------------------------------------------------------------------*/
+static wan_conf_rta_t prvAplicarBase( const char *pcRta )
+{
+    char pcVal[ 24 ];
+    bool bAlgo = false;
+
+    if( prvCampo( pcRta, "TPOLL=", 0U, pcVal, sizeof( pcVal ) ) )
+    {
+        if( cfg_base_set_timerpoll( pcVal ) )
+        {
+            xprintf( "WAN:: reconfig TIMERPOLL = %s\r\n", pcVal );
+            bAlgo = true;
+        }
+        else
+        {
+            xprintf( "WAN:: ERROR: TIMERPOLL rechazado (%s)\r\n", pcVal );
+        }
+    }
+
+    if( prvCampo( pcRta, "TDIAL=", 0U, pcVal, sizeof( pcVal ) ) )
+    {
+        if( cfg_base_set_timerdial( pcVal ) )
+        {
+            xprintf( "WAN:: reconfig TIMERDIAL = %s\r\n", pcVal );
+            bAlgo = true;
+        }
+        else
+        {
+            xprintf( "WAN:: ERROR: TIMERDIAL rechazado (%s)\r\n", pcVal );
+        }
+    }
+
+    if( prvCampo( pcRta, "PWRMODO=", 0U, pcVal, sizeof( pcVal ) ) )
+    {
+        if( cfg_base_set_pwrmodo( pcVal ) )
+        {
+            xprintf( "WAN:: reconfig PWRMODO = %s\r\n", pcVal );
+            bAlgo = true;
+        }
+        else
+        {
+            /*
+             * ⚠ Acá se va a caer `PWR_RTU` y `PWR_SILENT`, que existen en el AVR
+             * y en este equipo NO (fuera de alcance por decisión de Pablo,
+             * 2026-09-07). El equipo queda con el modo que tenía, que es lo
+             * seguro: adoptar un modo que no sabe ejecutar sería peor.
+             */
+            xprintf( "WAN:: ERROR: PWRMODO desconocido (%s), queda el anterior\r\n", pcVal );
+        }
+    }
+
+    if( prvCampo( pcRta, "PWRON=", 0U, pcVal, sizeof( pcVal ) ) )
+    {
+        if( cfg_base_set_pwron( pcVal ) )
+        {
+            xprintf( "WAN:: reconfig PWRON = %s\r\n", pcVal );
+            bAlgo = true;
+        }
+        else
+        {
+            xprintf( "WAN:: ERROR: PWRON rechazado (%s)\r\n", pcVal );
+        }
+    }
+
+    if( prvCampo( pcRta, "PWROFF=", 0U, pcVal, sizeof( pcVal ) ) )
+    {
+        if( cfg_base_set_pwroff( pcVal ) )
+        {
+            xprintf( "WAN:: reconfig PWROFF = %s\r\n", pcVal );
+            bAlgo = true;
+        }
+        else
+        {
+            xprintf( "WAN:: ERROR: PWROFF rechazado (%s)\r\n", pcVal );
+        }
+    }
+
+    return bAlgo ? wanCONF_RECONFIGURAR : wanCONF_SIN_RESPUESTA;
+}
+
+/*------------------------------------------------------------------------------
+ * CONF_AINPUTS
+ *----------------------------------------------------------------------------*/
+static wan_conf_rta_t prvAplicarAinputs( const char *pcRta )
+{
+    /* Los siete tokens de un canal: enable, name, imin, imax, mmin, mmax, offset. */
+    char        pcTk[ 7 ][ 16 ];
+    const char *ppcTk[ 7 ];
+    char        pcClave[ 8 ];
+    char        pcVal[ 16 ];
+    bool        bAlgo = false;
+    uint8_t     ucCh;
+
+    if( prvCampo( pcRta, "PST=", 0U, pcVal, sizeof( pcVal ) ) )
+    {
+        if( cfg_ainputs_set_settle_time( pcVal ) )
+        {
+            xprintf( "WAN:: reconfig PST = %s\r\n", pcVal );
+            bAlgo = true;
+        }
+        else
+        {
+            xprintf( "WAN:: ERROR: PST rechazado (%s)\r\n", pcVal );
+        }
+    }
+
+    for( ucCh = 0U; ucCh < CFG_AINPUTS_NRO_CANALES; ucCh++ )
+    {
+        snprintf( pcClave, sizeof( pcClave ), "A%u=", ( unsigned ) ucCh );
+
+        uint8_t ucVinieron = prvTokens( pcRta, pcClave, 7U, pcTk, ppcTk );
+
+        /* Sin el nombre no hay canal: o el servidor no lo mandó, o vino roto. */
+        if( ppcTk[ 1 ] == NULL )
+        {
+            continue;
+        }
+
+        prvAvisarIncompleto( pcClave, ucVinieron, 7U );
+
+        if( cfg_ainputs_set_canal( ucCh, ppcTk[0], ppcTk[1], ppcTk[2], ppcTk[3],
+                                          ppcTk[4], ppcTk[5], ppcTk[6] ) )
+        {
+            xprintf( "WAN:: reconfig A%u\r\n", ( unsigned ) ucCh );
+            bAlgo = true;
+        }
+        else
+        {
+            xprintf( "WAN:: ERROR: A%u rechazado\r\n", ( unsigned ) ucCh );
+        }
+    }
+
+    return bAlgo ? wanCONF_RECONFIGURAR : wanCONF_SIN_RESPUESTA;
+}
+
+/*------------------------------------------------------------------------------
+ * CONF_COUNTERS
+ *
+ * ⚠ Son SEIS tokens: enable, name, magpp, **modo**, qmax, alpha. El modo va
+ * tercero y `alpha` es configurable — ver el comentario de `cfg_counter_set()`.
+ *----------------------------------------------------------------------------*/
+static wan_conf_rta_t prvAplicarCounter( const char *pcRta )
+{
+    char        pcTk[ 6 ][ 16 ];
+    const char *ppcTk[ 6 ];
+
+    uint8_t ucVinieron = prvTokens( pcRta, "C0=", 6U, pcTk, ppcTk );
+
+    if( ppcTk[ 1 ] == NULL )
+    {
+        return wanCONF_SIN_RESPUESTA;
+    }
+
+    prvAvisarIncompleto( "C0", ucVinieron, 6U );
+
+    if( !cfg_counter_set( ppcTk[0], ppcTk[1], ppcTk[2], ppcTk[3], ppcTk[4], ppcTk[5] ) )
+    {
+        xprintf( "WAN:: ERROR: C0 rechazado\r\n" );
+        return wanCONF_SIN_RESPUESTA;
+    }
+
+    xprintf( "WAN:: reconfig C0\r\n" );
+
+    return wanCONF_RECONFIGURAR;
+}
+
+/*------------------------------------------------------------------------------
+ * CONF_MODBUS
+ *----------------------------------------------------------------------------*/
+static wan_conf_rta_t prvAplicarModbus( const char *pcRta )
+{
+    /* Nueve: enable, name, sla, regaddr, nroregs, fcode, tipo, codec, pow10. */
+    char        pcTk[ 9 ][ 16 ];
+    const char *ppcTk[ 9 ];
+    char        pcClave[ 8 ];
+    char        pcVal[ 16 ];
+    bool        bAlgo = false;
+    uint8_t     ucCh;
+
+    if( prvCampo( pcRta, "ENABLE=", 0U, pcVal, sizeof( pcVal ) ) )
+    {
+        if( cfg_modbus_set_enable( pcVal ) )
+        {
+            xprintf( "WAN:: reconfig MODBUS ENABLE = %s\r\n", pcVal );
+            bAlgo = true;
+        }
+        else
+        {
+            xprintf( "WAN:: ERROR: MODBUS ENABLE rechazado (%s)\r\n", pcVal );
+        }
+    }
+
+    if( prvCampo( pcRta, "LOCALADDR=", 0U, pcVal, sizeof( pcVal ) ) )
+    {
+        if( cfg_modbus_set_localaddr( pcVal ) )
+        {
+            xprintf( "WAN:: reconfig MODBUS LOCALADDR = %s\r\n", pcVal );
+            bAlgo = true;
+        }
+        else
+        {
+            xprintf( "WAN:: ERROR: MODBUS LOCALADDR rechazado (%s)\r\n", pcVal );
+        }
+    }
+
+    for( ucCh = 0U; ucCh < CFG_MODBUS_NRO_CANALES; ucCh++ )
+    {
+        snprintf( pcClave, sizeof( pcClave ), "M%u=", ( unsigned ) ucCh );
+
+        uint8_t ucVinieron = prvTokens( pcRta, pcClave, 9U, pcTk, ppcTk );
+
+        if( ppcTk[ 1 ] == NULL )
+        {
+            continue;
+        }
+
+        prvAvisarIncompleto( pcClave, ucVinieron, 9U );
+
+        if( cfg_modbus_set_canal( ucCh, ppcTk[0], ppcTk[1], ppcTk[2], ppcTk[3], ppcTk[4],
+                                         ppcTk[5], ppcTk[6], ppcTk[7], ppcTk[8] ) )
+        {
+            xprintf( "WAN:: reconfig M%u\r\n", ( unsigned ) ucCh );
+            bAlgo = true;
+        }
+        else
+        {
+            xprintf( "WAN:: ERROR: M%u rechazado\r\n", ( unsigned ) ucCh );
+        }
+    }
+
+    return bAlgo ? wanCONF_RECONFIGURAR : wanCONF_SIN_RESPUESTA;
+}
+
+/*------------------------------------------------------------------------------
+ * CONF_CONSIGNA
+ *
+ * Los tres campos van juntos a un solo setter, así que se exigen los tres: con
+ * dos de tres habría que inventar el que falta con el valor actual, y eso es
+ * indistinguible de que el servidor lo haya mandado así.
+ *----------------------------------------------------------------------------*/
+static wan_conf_rta_t prvAplicarConsigna( const char *pcRta )
+{
+    char pcEnable[ 8 ], pcDiurna[ 8 ], pcNocturna[ 8 ];
+
+    if( !prvCampo( pcRta, "ENABLE=",   0U, pcEnable,   sizeof( pcEnable   ) ) ||
+        !prvCampo( pcRta, "DIURNA=",   0U, pcDiurna,   sizeof( pcDiurna   ) ) ||
+        !prvCampo( pcRta, "NOCTURNA=", 0U, pcNocturna, sizeof( pcNocturna ) ) )
+    {
+        xprintf( "WAN:: ERROR: CONSIGNA incompleta, se ignora\r\n" );
+        return wanCONF_SIN_RESPUESTA;
+    }
+
+    if( !cfg_consigna_set( pcEnable, pcDiurna, pcNocturna ) )
+    {
+        xprintf( "WAN:: ERROR: CONSIGNA rechazada\r\n" );
+        return wanCONF_SIN_RESPUESTA;
+    }
+
+    xprintf( "WAN:: reconfig CONSIGNA\r\n" );
+
+    return wanCONF_RECONFIGURAR;
+}
+
+/*==============================================================================
+ * La tabla de bloques: nombre, hash y parser. Tener los tres juntos es lo que
+ * deja que la máquina de estados del paso 5c recorra los cinco en un lazo en
+ * vez de escribir cinco veces la misma secuencia.
+ *============================================================================*/
+
+typedef struct {
+    const char     *pcClase;
+    uint8_t       (*pfHash)( void );
+    wan_conf_rta_t (*pfAplicar)( const char *pcRta );
+} wan_bloque_desc_t;
+
+static const wan_bloque_desc_t xBloques[ wanBLOQUE_NRO ] = {
+    [ wanBLOQUE_BASE     ] = { "CONF_BASE",     cfg_base_hash,     prvAplicarBase     },
+    [ wanBLOQUE_AINPUTS  ] = { "CONF_AINPUTS",  cfg_ainputs_hash,  prvAplicarAinputs  },
+    [ wanBLOQUE_COUNTER  ] = { "CONF_COUNTERS", cfg_counter_hash,  prvAplicarCounter  },
+    [ wanBLOQUE_MODBUS   ] = { "CONF_MODBUS",   cfg_modbus_hash,   prvAplicarModbus   },
+    [ wanBLOQUE_CONSIGNA ] = { "CONF_CONSIGNA", cfg_consigna_hash, prvAplicarConsigna },
+};
+
+//------------------------------------------------------------------------------
+const char *wan_conf_clase( wan_bloque_t eBloque )
+{
+    return ( eBloque < wanBLOQUE_NRO ) ? xBloques[ eBloque ].pcClase : "?";
+}
+//------------------------------------------------------------------------------
+bool wan_conf_pedido( const wan_conf_flags_t *pxFlags, wan_bloque_t eBloque )
+{
+    if( pxFlags == NULL )
+    {
+        return false;
+    }
+
+    switch( eBloque )
+    {
+        case wanBLOQUE_BASE:     return pxFlags->bBase;
+        case wanBLOQUE_AINPUTS:  return pxFlags->bAinputs;
+        case wanBLOQUE_COUNTER:  return pxFlags->bCounter;
+        case wanBLOQUE_MODBUS:   return pxFlags->bModbus;
+        case wanBLOQUE_CONSIGNA: return pxFlags->bConsigna;
+        default:                 return false;
+    }
+}
+//------------------------------------------------------------------------------
+uint16_t wan_frame_conf_bloque( char *pcBuf, uint16_t usSize, wan_bloque_t eBloque )
+{
+    int iN;
+
+    if( ( pcBuf == NULL ) || ( usSize == 0U ) || ( eBloque >= wanBLOQUE_NRO ) )
+    {
+        return 0U;
+    }
+
+    if( eBloque == wanBLOQUE_BASE )
+    {
+        /*
+         * ⚠ Sólo CONF_BASE lleva la identidad del equipo (UID, ICCID, CSQ, WDG).
+         * Los otros cuatro mandan nada más que el hash. Es así en el AVR y por
+         * lo tanto es lo que espera el servidor.
+         */
+        char pcUid[ 32 ];
+
+        prvUidStr( pcUid, sizeof( pcUid ) );
+
+        iN = snprintf( pcBuf, usSize,
+                       "ID=%s&HW=%s&TYPE=%s&VER=%s&CLASS=%s"
+                       "&UID=%s&ICCID=%s&CSQ=%u&WDG=%u&HASH=0x%02X",
+                       wan_imei(), FW_HW, FW_TYPE, FW_VERSION,
+                       xBloques[ eBloque ].pcClase,
+                       pcUid, wan_iccid(),
+                       ( unsigned ) wan_csq(),
+                       ( unsigned ) wan_causa_reset(),
+                       ( unsigned ) xBloques[ eBloque ].pfHash() );
+    }
+    else
+    {
+        iN = snprintf( pcBuf, usSize,
+                       "ID=%s&HW=%s&TYPE=%s&VER=%s&CLASS=%s&HASH=0x%02X",
+                       wan_imei(), FW_HW, FW_TYPE, FW_VERSION,
+                       xBloques[ eBloque ].pcClase,
+                       ( unsigned ) xBloques[ eBloque ].pfHash() );
+    }
+
+    if( ( iN < 0 ) || ( ( uint16_t ) iN >= usSize ) )
+    {
+        xprintf( "WAN:: ERROR: el frame %s no entra en %u bytes\r\n",
+                 xBloques[ eBloque ].pcClase, ( unsigned ) usSize );
+        return 0U;
+    }
+
+    return ( uint16_t ) iN;
+}
+//------------------------------------------------------------------------------
+wan_conf_rta_t wan_conf_aplicar( wan_bloque_t eBloque, const char *pcRta )
+{
+    wan_conf_rta_t eRta;
+
+    if( eBloque >= wanBLOQUE_NRO )
+    {
+        return wanCONF_SIN_RESPUESTA;
+    }
+
+    if( prvVeredicto( pcRta, &eRta ) )
+    {
+        return eRta;
+    }
+
+    return xBloques[ eBloque ].pfAplicar( pcRta );
 }
 //------------------------------------------------------------------------------

@@ -62,6 +62,27 @@ uint8_t cfg_hash_char( uint8_t ucSeed, char cCh );
 uint8_t cfg_hash_string( uint8_t ucSeed, const char *pcStr );
 
 /*------------------------------------------------------------------------------
+ * Modo verboso: mientras está encendido, `cfg_hash_string()` imprime por consola
+ * **cada string que consume**, que es lo que el hash realmente cubre.
+ *
+ * ⭐ Es *la* herramienta de diagnóstico del contrato, y hay una razón para que
+ * imprima desde acá y no desde cada `cfg_*_hash()`: lo que se ve es el string
+ * que entra al Pearson, no una reimpresión que podría diferir en un decimal — y
+ * si difiriera, el diagnóstico mentiría justo sobre lo que se vino a mirar.
+ *
+ * Sirve para el único problema que no se puede depurar de otra forma: el
+ * servidor pide reconfigurar un bloque **para siempre** porque su string y el
+ * nuestro difieren en algún carácter. Con esto se ponen los dos al lado y se ve
+ * cuál.
+ *
+ * ⚠ El caso que lo motivó (2026-09-11): un campo que **entra en el hash** y que
+ * el servidor **no mandó en la respuesta** —el `PST` de ainputs— deja al equipo
+ * con su propio valor, y ahí el hash no puede coincidir nunca. Eso no se ve en
+ * el valor del hash; se ve en el string.
+ *----------------------------------------------------------------------------*/
+void cfg_hash_verbose( bool bOn );
+
+/*------------------------------------------------------------------------------
  * Append acotado a `pcBuf[*pusIdx..]`, con la MISMA semántica que el
  * `u_strbuf_append_P()` del AVR: nunca escribe fuera del buffer, y **avanza el
  * índice sólo si el contenido entró completo**. Devuelve false si se truncó, y

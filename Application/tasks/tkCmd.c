@@ -19,6 +19,7 @@
 #include "drv_valvula.h"
 #include "drv_lte.h"
 #include "cfg_nvm.h"
+#include "cfg_hash.h"
 #include "tkSys.h"
 #include "wan_frame.h"
 #include "fs_datos.h"
@@ -333,6 +334,24 @@ static uint32_t ulCausaReset;
 #define CAUSA_RESET_MASK   ( RCC_CSR_LPWRRSTF | RCC_CSR_WWDGRSTF | RCC_CSR_IWDGRSTF \
                            | RCC_CSR_SFTRSTF  | RCC_CSR_BORRSTF  | RCC_CSR_PINRSTF )
 
+uint8_t wan_causa_reset( void )
+{
+    /*
+     * Las banderas son ACUMULATIVAS hasta que alguien escribe `RMVF`, así que
+     * puede haber varias puestas a la vez. Se informa **la más específica**, en
+     * orden de menos a más común: un reset por watchdog dice mucho más que el
+     * `PIN` que suele venir junto con él.
+     */
+    if( ulCausaReset & RCC_CSR_IWDGRSTF ) { return ( uint8_t ) wanRESET_IWDG; }
+    if( ulCausaReset & RCC_CSR_WWDGRSTF ) { return ( uint8_t ) wanRESET_WWDG; }
+    if( ulCausaReset & RCC_CSR_LPWRRSTF ) { return ( uint8_t ) wanRESET_LPWR; }
+    if( ulCausaReset & RCC_CSR_SFTRSTF  ) { return ( uint8_t ) wanRESET_SOFT; }
+    if( ulCausaReset & RCC_CSR_BORRSTF  ) { return ( uint8_t ) wanRESET_BOR;  }
+    if( ulCausaReset & RCC_CSR_PINRSTF  ) { return ( uint8_t ) wanRESET_PIN;  }
+
+    return ( uint8_t ) wanRESET_NINGUNO;
+}
+//------------------------------------------------------------------------------
 static void prvImprimirCausaReset( void )
 {
     if( ( ulCausaReset & CAUSA_RESET_MASK ) == 0U )
@@ -2202,6 +2221,7 @@ static void prvLteUso( void )
     xprintf( "  lte info            como esta configurado el MODULO (lo lee de el)\r\n" );
     xprintf( "  lte exit            SALE del modo comando, vuelve a transparente\r\n" );
     xprintf( "  lte ping            manda un PING al servidor (en modo TRANSPARENTE)\r\n" );
+    xprintf( "  lte conf            CONF_ALL + los CONF_* que pida, y los APLICA\r\n" );
     xprintf( "  lte at <cmd>        manda <cmd>+CR y muestra la respuesta\r\n" );
     xprintf( "  lte tx <texto>      manda el texto CRUDO, sin CR, y escucha\r\n" );
     xprintf( "  lte rx <ms>         solo escucha\r\n" );
@@ -2272,6 +2292,236 @@ static bool prvLteListo( void )
     }
 
     return true;
+}
+//------------------------------------------------------------------------------
+/*
+ * Una vuelta completa contra el servidor: escribe el frame y espera la
+ * respuesta. La usan CONF_ALL y los cinco bloques, que hacen exactamente lo
+ * mismo, y por eso está acá afuera: con seis copias, un arreglo en una se
+ * olvida en las otras cinco.
+ *
+ * ⚠ **ASUME modo TRANSPARENTE.** Ver `prvLtePing()`.
+ */
+static bool prvLteTxRx( const char *pcFrame, uint16_t usLargo,
+                        char *pcRta, uint16_t usRtaSize )
+{
+    xprintf( "-> " );
+    ( void ) frtos_write( fdTERM, pcFrame, usLargo );
+    xprintf( "\r\n" );
+
+    drv_lte_flush();
+
+    if( drv_lte_write( pcFrame, usLargo ) != ( int16_t ) usLargo )
+    {
+        xprintf( "ERROR: no se pudo transmitir\r\n" );
+        return false;
+    }
+
+    int16_t sRet = drv_lte_read( pcRta, usRtaSize - 1U, LTE_PING_TIMEOUT_MS );
+
+    if( sRet <= 0 )
+    {
+        xprintf( "sin respuesta en %u ms.\r\n", ( unsigned ) LTE_PING_TIMEOUT_MS );
+        xprintf( "  el modulo esta en modo TRANSPARENTE? (en modo comando NO transmite)\r\n" );
+        return false;
+    }
+
+    pcRta[ sRet ] = '\0';
+
+    xprintf( "<- " );
+    ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+    xprintf( "\r\n" );
+
+    return true;
+}
+//------------------------------------------------------------------------------
+/*
+ * Los frames `CONF_*`: por cada bloque que el servidor pidió, se le manda su
+ * hash y él contesta con la configuración que quiere que tenga el equipo.
+ *
+ * Tres cosas que no son obvias:
+ *
+ *  - **Se sigue con los demás aunque uno falle.** Es lo que hace el AVR
+ *    (`wan_state_online_config()`: sólo `conf_base` aborta la secuencia) y es
+ *    lo que permite que un `FLOWC` que nunca vamos a configurar no deje al
+ *    equipo sin transmitir una sola muestra.
+ *  - **Se verifica que la respuesta sea de ESTE bloque** antes de aplicarla. Es
+ *    el `wan_check_response()` del AVR, y no es paranoia: con el módulo en
+ *    transparente una respuesta demorada del frame anterior llega igual, y
+ *    aplicar la configuración de un bloque leyendo la respuesta de otro
+ *    escribiría basura con toda naturalidad.
+ *  - **Se graba UNA sola vez al final**, y sólo si algo cambió. Ver
+ *    `wan_conf_aplicar()`.
+ */
+static void prvLteConfBloques( const wan_conf_flags_t *pxFlags )
+{
+    static char pcFrame[ WAN_FRAME_BUFFER_SIZE ];
+    static char pcRta  [ WAN_FRAME_BUFFER_SIZE ];
+    char        pcEsperado[ 24 ];
+    bool        bAlgo = false;
+    uint8_t     i;
+
+    for( i = 0U; i < ( uint8_t ) wanBLOQUE_NRO; i++ )
+    {
+        wan_bloque_t eBloque = ( wan_bloque_t ) i;
+
+        if( !wan_conf_pedido( pxFlags, eBloque ) )
+        {
+            continue;
+        }
+
+        xprintf( "\r\n--- %s ---\r\n", wan_conf_clase( eBloque ) );
+
+        uint16_t usLargo = wan_frame_conf_bloque( pcFrame, sizeof( pcFrame ), eBloque );
+
+        if( usLargo == 0U )
+        {
+            continue;
+        }
+
+        if( !prvLteTxRx( pcFrame, usLargo, pcRta, sizeof( pcRta ) ) )
+        {
+            continue;
+        }
+
+        snprintf( pcEsperado, sizeof( pcEsperado ), "CLASS=%s", wan_conf_clase( eBloque ) );
+
+        if( strstr( pcRta, pcEsperado ) == NULL )
+        {
+            xprintf( "[!] la respuesta no es de %s: se descarta\r\n", wan_conf_clase( eBloque ) );
+            continue;
+        }
+
+        switch( wan_conf_aplicar( eBloque, pcRta ) )
+        {
+            case wanCONF_OK:
+                xprintf( "CONFIG=OK: este bloque ya coincide\r\n" );
+                break;
+
+            case wanCONF_RECONFIGURAR:
+                bAlgo = true;
+                break;
+
+            case wanCONF_DESCONOCIDO:
+                xprintf( "[!] el servidor NO RECONOCE al equipo\r\n" );
+                break;
+
+            default:
+                xprintf( "[!] no se aplico nada de este bloque\r\n" );
+                break;
+        }
+    }
+
+    xprintf( "\r\n" );
+
+    if( !bAlgo )
+    {
+        xprintf( "no cambio nada: no se graba la EEPROM\r\n" );
+        return;
+    }
+
+    /* Con la configuración nueva puede aparecer lo de siempre: dos canales con
+       el mismo nombre. Se avisa, no se impide — igual que en `config save`. */
+    ( void ) cfg_nvm_chequear_nombres();
+
+    if( cfg_nvm_save_all() )
+    {
+        xprintf( "configuracion nueva GRABADA en la EEPROM\r\n" );
+        xprintf( "verificar los hashes con 'config' y repetir 'lte conf'\r\n" );
+    }
+    else
+    {
+        xprintf( "ERROR: no se pudo grabar la configuracion en la EEPROM !!\r\n" );
+    }
+}
+//------------------------------------------------------------------------------
+/*
+ * `CONF_ALL`: manda un hash por bloque y el servidor contesta cuáles quiere
+ * reconfigurar. Es el paso donde el contrato del hash se prueba de verdad.
+ *
+ * ⚠ **ASUME modo TRANSPARENTE**, igual que `lte ping`.
+ *
+ * Y si pide algo, sigue con los `CONF_*`: le pregunta bloque por bloque y
+ * **aplica lo que conteste**, grabando una sola vez al final. Es la secuencia
+ * completa de configuración, la misma que va a correr sola la FSM del paso 5c.
+ */
+static void prvLteConfAll( void )
+{
+    static char pcFrame[ WAN_FRAME_BUFFER_SIZE ];
+    static char pcRta  [ WAN_FRAME_BUFFER_SIZE ];
+
+    if( !prvLteListo() )
+    {
+        return;
+    }
+
+    if( !wan_csq_valido() )
+    {
+        /*
+         * Se avisa pero NO se aborta: el frame sale igual con CSQ=0, y que el
+         * servidor conteste prueba que el enlace está aunque la señal no se haya
+         * podido medir. Abortar acá escondería el resultado que se vino a ver.
+         */
+        xprintf( "[!] el CSQ leido no es una medida (99 = desconocido, >=31 = todavia\r\n" );
+        xprintf( "    no campo en la red). Correr 'lte esc' + 'lte info' para refrescarlo.\r\n" );
+    }
+
+    uint16_t usLargo = wan_frame_conf_all( pcFrame, sizeof( pcFrame ) );
+
+    if( usLargo == 0U )
+    {
+        return;
+    }
+
+    if( !prvLteTxRx( pcFrame, usLargo, pcRta, sizeof( pcRta ) ) )
+    {
+        return;
+    }
+
+    wan_conf_flags_t xFlags;
+
+    switch( wan_frame_conf_all_rta( pcRta, &xFlags ) )
+    {
+        case wanCONF_OK:
+            xprintf( "CONFIG=OK: la configuracion del equipo coincide con la del servidor\r\n" );
+            break;
+
+        case wanCONF_DESCONOCIDO:
+            /*
+             * El AVR ante esto se reconfigura solo: pasa a DISCRETO con los
+             * timers en 1 hora. Es la política correcta —si el servidor no te
+             * reconoce, insistir cada minuto sólo gasta batería y tráfico— pero
+             * **acá todavía no se hace**: que un comando de banco cambie la
+             * configuración del equipo por lo bajo sería peor que el problema.
+             * Entra con la FSM, en el paso 5c.
+             */
+            xprintf( "[!] el servidor NO RECONOCE al equipo (CONFIG=ERROR / FAIL).\r\n" );
+            xprintf( "    hay que dar de alta el IMEI %s en el servidor.\r\n", wan_imei() );
+            break;
+
+        case wanCONF_RECONFIGURAR:
+            xprintf( "el servidor pide reconfigurar:%s%s%s%s%s%s\r\n",
+                     xFlags.bBase        ? " BASE"     : "",
+                     xFlags.bAinputs     ? " AINPUT"   : "",
+                     xFlags.bCounter     ? " COUNTER"  : "",
+                     xFlags.bModbus      ? " MODBUS"   : "",
+                     xFlags.bConsigna    ? " PRESION"  : "",
+                     xFlags.bFlowcontrol ? " FLOWC"    : "" );
+
+            if( xFlags.bFlowcontrol )
+            {
+                /* Esperado y acordado: no mandamos FH, así que el servidor toma
+                   uno por defecto y lo pide siempre. Se ignora a propósito. */
+                xprintf( "  (FLOWC se pide SIEMPRE porque no mandamos su hash: se ignora)\r\n" );
+            }
+
+            prvLteConfBloques( &xFlags );
+            break;
+
+        default:
+            xprintf( "respuesta no reconocida\r\n" );
+            break;
+    }
 }
 //------------------------------------------------------------------------------
 /*
@@ -2518,6 +2768,16 @@ static void prvLteInfo( void )
         if( ( pcVal != NULL ) && ( pcVal[ 7 ] >= '0' ) && ( pcVal[ 7 ] <= '9' ) )
         {
             bSimOk = true;
+            wan_iccid_set( pcVal + 7 );
+        }
+
+        /* El CSQ también se cachea: el frame de configuración lo lleva, y leerlo
+           acá evita otra entrada a modo comando justo antes de transmitir. */
+        pcVal = strstr( pcRta, "+CSQ:" );
+
+        if( pcVal != NULL )
+        {
+            wan_csq_set( ( uint8_t ) atoi( pcVal + 5 ) );
         }
 
         pcVal = strstr( pcRta, "+CIP:" );
@@ -2550,6 +2810,28 @@ static void prvLteInfo( void )
     else
     {
         xprintf( "SIM y red OK: se puede transmitir ('lte exit' y despues 'lte ping')\r\n" );
+    }
+
+    /*
+     * ⚠ El CSQ crudo tiene DOS valores que no son medidas, y uno de ellos costó
+     * una tarde el 2026-09-09 porque se lee como "señal excelente":
+     *
+     *   99   = desconocido / no detectable (3GPP)
+     *   >=31 = lo que devuelve el modulo ANTES de campar en la red
+     *
+     * El AVR ya lo tenía documentado —le pasó en mayo de 2026— junto con el
+     * `+CME ERROR:50` de `AT+CIP?` que viene detrás. Decirlo acá cierra el
+     * despiste en vez de dejarlo para la próxima.
+     */
+    if( !wan_csq_valido() )
+    {
+        xprintf( "[!] el CSQ leido NO es una medida: 99 = desconocido, >=31 = todavia\r\n" );
+        xprintf( "    no campo en la red. Un 31 se lee como señal excelente y no lo es.\r\n" );
+    }
+    else
+    {
+        xprintf( "señal: %u dBm negativos (CSQ del frame = %u)\r\n",
+                 ( unsigned ) wan_csq(), ( unsigned ) wan_csq() );
     }
 
     xprintf( "(queda en MODO COMANDO: 'lte exit' para volver a transparente)\r\n" );
@@ -2661,6 +2943,12 @@ static void cmdLte( void )
         if( strcmp( argv[ 1 ], "bridge" ) == 0 )
         {
             prvLteBridge();
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "conf" ) == 0 )
+        {
+            prvLteConfAll();
             return;
         }
 
@@ -2902,6 +3190,7 @@ static void prvConfigUso( void )
     xprintf( "uso:\r\n" );
     xprintf( "  config                          muestra todo, con los hashes\r\n" );
     xprintf( "  config save | load | default\r\n" );
+    xprintf( "  config hash                     los STRINGS que se hashean (diagnostico)\r\n" );
     xprintf( "\r\n" );
     xprintf( "  config timerpoll <s>            periodo de muestreo\r\n" );
     xprintf( "  config timerdial <s>            periodo de disque (modo discreto)\r\n" );
@@ -2940,6 +3229,38 @@ static void cmdConfig( void )
     if( strcmp( argv[ 1 ], "save" ) == 0 )
     {
         ( void ) cfg_nvm_save_all();
+        return;
+    }
+
+    /*
+     * `config hash`: los STRINGS sobre los que se calcula cada hash.
+     *
+     * ⭐ Es el diagnóstico del contrato, y no hay otra forma de hacerlo. El
+     * servidor compara su hash con el nuestro; si difieren, pide reconfigurar
+     * ese bloque **en todas las sesiones, para siempre**, y el valor del hash no
+     * dice en qué carácter está la diferencia. El string, sí.
+     *
+     * Se imprime desde `cfg_hash_string()`, o sea que es **lo que entra al
+     * Pearson** y no una reimpresión que podría diferir justo en el decimal que
+     * se vino a mirar.
+     */
+    if( strcmp( argv[ 1 ], "hash" ) == 0 )
+    {
+        xprintf( "los strings que se hashean, bloque por bloque:\r\n" );
+
+        cfg_hash_verbose( true );
+
+        xprintf( "BASE     " );  uint8_t ucB = cfg_base_hash();
+        xprintf( "AINPUTS  " );  uint8_t ucA = cfg_ainputs_hash();
+        xprintf( "COUNTER  " );  uint8_t ucC = cfg_counter_hash();
+        xprintf( "MODBUS   " );  uint8_t ucM = cfg_modbus_hash();
+        xprintf( "CONSIGNA " );  uint8_t ucP = cfg_consigna_hash();
+
+        cfg_hash_verbose( false );
+
+        xprintf( "\r\nBH=0x%02X AH=0x%02X CH=0x%02X MH=0x%02X PH=0x%02X\r\n",
+                 ( unsigned ) ucB, ( unsigned ) ucA, ( unsigned ) ucC,
+                 ( unsigned ) ucM, ( unsigned ) ucP );
         return;
     }
 

@@ -195,6 +195,17 @@ static bool prvParseCodec( const char *pcStr, cfg_modbus_codec_t *peOut )
     return false;
 }
 //------------------------------------------------------------------------------
+/*
+ * ⚠ **Un argumento en NULL significa "no cambiar este campo"**, y el ÚNICO
+ * obligatorio es el nombre. No es una comodidad: es la regla del AVR
+ * (`modbus_config_channel()`), y **el servidor la usa**. El 2026-09-11 contestó
+ * `C0=FALSE,X,1.0,CAUDAL` —cuatro campos de los seis— y exigirlos todos hacía
+ * que el bloque entero se descartara.
+ *
+ * Los que vengan se validan **contra los que ya están**, y recién si el
+ * conjunto completo cierra se escribe: así un campo suelto no puede dejar la
+ * configuración en un estado que ninguna validación aprobó.
+ */
 bool cfg_modbus_set_canal( uint8_t ucCh, const char *pcEnable, const char *pcName,
                            const char *pcSlaveAddr, const char *pcRegAddr,
                            const char *pcNroRegs, const char *pcFcode,
@@ -206,40 +217,40 @@ bool cfg_modbus_set_canal( uint8_t ucCh, const char *pcEnable, const char *pcNam
         return false;
     }
 
-    if( ( pcEnable == NULL ) || ( pcName == NULL ) || ( pcSlaveAddr == NULL ) ||
-        ( pcRegAddr == NULL ) || ( pcNroRegs == NULL ) || ( pcFcode == NULL ) ||
-        ( pcTipo == NULL ) || ( pcCodec == NULL ) || ( pcDivisor == NULL ) )
+    if( pcName == NULL )
     {
         return false;
     }
 
-    bool bEnable;
+    const cfg_modbus_canal_t *pxAct = &xCfgModbus.xCanal[ ucCh ];
 
-    if( !cfg_str2bool( pcEnable, &bEnable ) )
+    bool bEnable = pxAct->bEnabled;
+
+    if( ( pcEnable != NULL ) && !cfg_str2bool( pcEnable, &bEnable ) )
     {
         return false;
     }
 
-    cfg_modbus_tipo_t  eTipo;
-    cfg_modbus_codec_t eCodec;
+    cfg_modbus_tipo_t  eTipo  = pxAct->eTipo;
+    cfg_modbus_codec_t eCodec = pxAct->eCodec;
 
-    if( !prvParseTipo( pcTipo, &eTipo ) )
+    if( ( pcTipo != NULL ) && !prvParseTipo( pcTipo, &eTipo ) )
     {
         xprintf( "ERROR: tipo invalido (U16|I16|U32|I32|FLOAT)\r\n" );
         return false;
     }
 
-    if( !prvParseCodec( pcCodec, &eCodec ) )
+    if( ( pcCodec != NULL ) && !prvParseCodec( pcCodec, &eCodec ) )
     {
         xprintf( "ERROR: codec invalido (C0123|C1032|C3210|C2301)\r\n" );
         return false;
     }
 
-    long lSlave   = atol( pcSlaveAddr );
-    long lReg     = atol( pcRegAddr );
-    long lNroRegs = atol( pcNroRegs );
-    long lFcode   = atol( pcFcode );
-    long lDivisor = atol( pcDivisor );
+    long lSlave   = ( pcSlaveAddr != NULL ) ? atol( pcSlaveAddr ) : ( long ) pxAct->ucSlaveAddress;
+    long lReg     = ( pcRegAddr   != NULL ) ? atol( pcRegAddr   ) : ( long ) pxAct->usRegAddress;
+    long lNroRegs = ( pcNroRegs   != NULL ) ? atol( pcNroRegs   ) : ( long ) pxAct->ucNroRegs;
+    long lFcode   = ( pcFcode     != NULL ) ? atol( pcFcode     ) : ( long ) pxAct->ucFcode;
+    long lDivisor = ( pcDivisor   != NULL ) ? atol( pcDivisor   ) : ( long ) pxAct->ucDivisorP10;
 
     if( ( lSlave < 1 ) || ( lSlave > 247 ) )
     {

@@ -1867,7 +1867,8 @@ decisión de diseño: es un dato. Está relevado completo en la memoria del proy
 
 - Transporte **HTTP GET** con query string (`AT+WKMOD=HTTPD`), respuestas **envueltas en HTML**.
 - Prefijo de todo frame: `ID=<imei>&HW=..&TYPE=..&VER=..&CLASS=..`. En el equipo nuevo:
-  **`HW="SPQ_ARM_R1"`, `TYPE="FWDLGARM_R1"`, `VER=` la versión del firmware** (Pablo, 2026-09-07).
+  **`HW="SPQ_ARM_R1"`, `TYPE="FWDLGARM"`, `VER=` la versión del firmware** (Pablo, 2026-09-07;
+  el `TYPE` corregido el 2026-09-11: **va sin la revisión de placa**, igual que `FWDLGX` en el AVR).
 - Frame de datos: `CLASS=DATA` + `DATE`/`TIME` + un campo por canal **habilitado**, con **el nombre que
   dice la configuración** + `V0` (válvula) + `bt3v3` + `bt12v`. Precisiones distintas y deliberadas:
   analógicas `%0.2f`, contador y modbus `%0.3f`.
@@ -2012,7 +2013,7 @@ tres.** El de 9 canales da 212 bytes, lo que confirma de paso por qué el AVR de
 buffer era de 255 y con nombres largos no alcanza. Acá son 512.
 
 ```
-ID=000000000000000&HW=SPQ_ARM_R1&TYPE=FWDLGARM_R1&VER=0.0.21&CLASS=DATA&DATE=260908&TIME=140533
+ID=000000000000000&HW=SPQ_ARM_R1&TYPE=FWDLGARM&VER=0.0.21&CLASS=DATA&DATE=260908&TIME=140533
 &pA=3.14&pB=7.50&CAU0=12.345&PRE1=4.200&V0=1&bt3v3=3.281&bt12v=12.150
 ```
 
@@ -2308,7 +2309,7 @@ lte set server 192.168.0.20 5000
 lte save                           <- graba y REINICIA el modulo
 lte exit                           <- vuelve a transparente
 lte ping
--> ID=860909055244702&HW=SPQ_ARM_R1&TYPE=FWDLGARM_R1&VER=0.0.36&CLASS=PING
+-> ID=860909055244702&HW=SPQ_ARM_R1&TYPE=FWDLGARM&VER=0.0.36&CLASS=PING
 <- "<html>CLASS=PONG</html>"
 ```
 
@@ -2383,6 +2384,270 @@ lugar equivocado.
 `CLASS=CONF_ALL&CONFIG=ERROR` — *"El servidor no reconoce al datalogger"*. Para el `PING` no importa,
 pero **antes de probar los frames de configuración hay que dar de alta ese IMEI en el servidor**.
 
+### Paso 5b-1: el frame `CONF_ALL`
+
+Comando **`lte conf`**. Manda un hash por bloque y el servidor contesta cuáles quiere reconfigurar.
+**Por ahora sólo informa**: aplicar la configuración es el 5b-2, y verla antes de escribir el parseo
+dice qué manda este servidor de verdad y con qué formato.
+
+#### Van CINCO hashes, no seis — y el servidor va a pedir `FLOWC` siempre
+
+El AVR manda además `FH`, el de *flowcontrol*, que en este equipo no existe. Pablo lo autorizó
+(2026-09-11): *"puede no mandar el FH, pero el servidor tomará uno por defecto y mandará en la
+respuesta que debe pedir reconfigurar el flowcontrol. Luego si el datalogger no lo hace, no pasa
+nada"*.
+
+⚠ **La consecuencia de diseño**: `CONF_ALL` **nunca va a responder `CONFIG=OK`**, así que la FSM
+tiene que pasar a transmitir datos igual. Si esperara ese `OK`, el equipo no mandaría una sola
+muestra.
+
+Por suerte la estructura del AVR ya lo tolera y hay que copiarla tal cual: **sólo `conf_base` aborta
+si falla**; los demás bloques, si no se configuran, simplemente no suman y `wan_state_online_config()`
+termina en `WAN_ONLINE_DATA` igual.
+
+`FLOWC` **se parsea aunque no se use**: verlo en la consola explica por qué la configuración nunca
+cierra. Sin eso parecería un error.
+
+#### ⚠ El `CSQ` del frame no es el `rssi`, y dos valores del `rssi` no son medidas
+
+Lo tenía documentado el AVR y **es lo que nos despistó el 2026-09-09**:
+
+```c
+/* csq queda con el |dBm| de la senal ( dBm = -113 + 2*rssi ).
+ *  - rssi == 99 : "desconocido / no detectable" (3GPP).
+ *  - rssi >= 31 : centinela que devuelve el modem ANTES de campar en red
+ *    0515-0516 ("+CSQ: 31,0" -> luego "+CME ERROR:50" en AT+CIP?).       */
+```
+
+O sea que **`CSQ: 31,0` nunca fue "señal excelente"**: es el centinela de *todavía no registrado*, y
+le sigue el `+CME ERROR:50` de `AT+CIP?` — exactamente la secuencia que vimos. El AVR se había comido
+el mismo despiste en mayo de 2026.
+
+En el frame viaja **`|dBm| = 113 − 2·rssi`** (por eso el AVR manda `73` con `20,99`), y `lte info`
+ahora **interpreta** el valor en vez de sólo mostrarlo.
+
+#### `UID` y `WDG`: distintos del AVR, y está bien
+
+| Campo | AVR | Acá | Confirmado por Pablo (2026-09-11) |
+|---|---|---|---|
+| `UID` | 32 chars (128 bits) | **24 chars** — el STM32L4 tiene 96 bits | *"el servidor no valida el largo y de hecho no lo está usando"* |
+| `WDG` | bits crudos de su registro de reset | **código enumerado** (`3 = IWDG`, `5 = BOR`, …) | *"es sólo informativo… tampoco sería problema que mande un código enumerado"* |
+
+El equipo se identifica por el **IMEI**; los otros dos son diagnóstico.
+
+#### Si el servidor no nos reconoce, el equipo se espacia solo
+
+Ante `CONFIG=ERROR` (no conoce al datalogger) o `FAIL` (no conoce el frame), el AVR **se reconfigura**:
+`PWR_DISCRETO` con `timerdial` y `timerpoll` en 3600. Es la política correcta —insistir cada minuto
+contra un servidor que no te va a contestar sólo gasta batería y tráfico— y hay que portarla.
+
+⏳ **Pero todavía NO se hace**: que un comando de banco cambie la configuración del equipo por lo bajo
+sería peor que el problema. Entra con la FSM, en el 5c.
+
+### ✅ Paso 5b-2: los `CONF_*` — parsear lo que manda el servidor y aplicarlo
+
+`lte conf` dejó de ser un informe: después del `CONF_ALL`, por cada bloque que el servidor pidió le
+manda su hash, **aplica la configuración que conteste** y graba **una sola vez al final**. Es la
+secuencia completa, la misma que va a correr sola la FSM del 5c.
+
+Los formatos —relevados de `wan_process_rsp_config*()` del AVR— están en `wan_frame.h`. Lo que hay
+que saber de este paso:
+
+#### ⚠ `CONF_BASE` lleva la identidad del equipo y los otros cuatro NO
+
+Es una asimetría del AVR que no tiene explicación aparente y que hay que reproducir igual, porque es
+el contrato:
+
+```
+CLASS=CONF_BASE&UID=..&ICCID=..&CSQ=..&WDG=..&HASH=0x..     <- con identidad
+CLASS=CONF_AINPUTS&HASH=0x..                                <- sólo el hash
+```
+
+#### ⛔ El servidor manda MENOS campos de los que parsea el AVR, y falta uno es NORMAL
+
+Encontrado en banco el **2026-09-11**, en la primera corrida contra el servidor real. La respuesta fue:
+
+```
+CLASS=CONF_COUNTERS&C0=FALSE,X,1.0,CAUDAL          <- CUATRO campos, no seis
+```
+
+O sea que el comentario del AVR —que muestra cuatro— describe **lo que manda el servidor**, y su
+código parsea seis porque **tolera que falten**. La primera versión los exigía todos y descartó el
+bloque entero.
+
+**La regla, y es la del AVR en los tres bloques** (`counter_config_channel`, `ainputs_config_channel`,
+`modbus_config_channel`): **el único campo obligatorio es el NOMBRE; cualquier otro en `NULL` quiere
+decir "dejá ese campo como está"**. Los setters de `Application/config/` la implementan ahora igual,
+validando los que vienen **contra los que ya están** y escribiendo sólo si el conjunto completo
+cierra — así un campo suelto no puede dejar la configuración en un estado que ninguna validación
+aprobó.
+
+#### ⛔ Un campo que entra en el hash y NO viene en la respuesta no cierra nunca
+
+Es el modo de falla que apareció el **2026-09-11**, y conviene entenderlo como regla general porque
+se repite con cualquier campo:
+
+```
+el campo entra en el hash  +  el servidor no lo manda
+    -> el equipo se queda con SU valor
+    -> el hash sigue distinto del suyo
+    -> pide reconfigurar ese bloque en TODAS las sesiones
+```
+
+Es exactamente el "tráfico infinito en campo" contra el que advierte `cfg_hash.h`, pero por una causa
+que no está en el formato: está en **qué campos viajan**.
+
+Los dos que lo dispararon:
+
+| Bloque | El campo | Estado |
+|---|---|---|
+| `ainputs` | **`PST`** (`[PST:%03d]`) | ✅ **cerrado** — el formato SÍ lo incluye (`…&PST=15&A0=…`); la respuesta que llegó en banco no lo traía. El equipo ya lo parsea y lo aplica. |
+| `counter` | **`QMAX` y `ALPHA`** (`[C0:…,%.2f,%.2f]`) | ⏳ la respuesta corta en el modo (`C0=FALSE,X,1.0,CAUDAL`). Falta el cálculo del servidor para confirmarlo igual que ainputs. |
+
+**Cuánto pesa el `PST`**: no es un ajuste fino, **cambia el hash entero**, así que con el default en
+0 no hay ninguna chance de coincidir con un servidor que tiene 15.
+
+##### ⭐ El hash de `ainputs` quedó verificado CONTRA EL SERVIDOR (2026-09-11)
+
+Pablo pasó el `get_ainputs_hash_from_config()` del servidor, y se corrió su lógica **literal** en
+Python —con la tabla de Pearson sacada del propio `cfg_hash.c`— contra el C del equipo compilado para
+el host. Los strings y los hashes son **idénticos**:
+
+```
+[PST:015]
+[A0:FALSE,PPR,4,20,0.00,10.00,0.00]
+[A1:FALSE,X,4,20,0.00,25.00,0.00]
+[A2:FALSE,X,4,20,0.00,60.00,0.00]      ->  AH = 0xD7  en los dos lados
+```
+
+| `PST` | servidor | equipo |
+|---|---|---|
+| 0 | `0x3F` | `0x3F` |
+| 10 | `0xC1` | `0xC1` |
+| **15** | **`0xD7`** | **`0xD7`** |
+| 20 | `0x8D` | `0x8D` |
+
+⭐ **Esto es más fuerte que la validación contra el AVR**: aquella probaba que copiamos bien el
+firmware viejo; ésta prueba que coincidimos con **la otra punta del contrato**, que es lo que
+realmente importa.
+
+⚠ **La única diferencia estructural que queda** —y hoy no se puede disparar, pero conviene saberla—:
+el equipo **trunca a 64 bytes** (`CFG_HASH_BUFFER_SIZE`, heredado del AVR) y **el servidor no**. Con
+`CFG_PARAMNAME_LENGTH = 12` el string más largo posible de un canal son **50 bytes**, así que hay
+margen; el día que alguien agrande el nombre o agregue un campo, ese margen es lo primero a
+recalcular.
+
+#### ⭐ `config hash`: los STRINGS, que es lo único comparable
+
+Para eso se agregó. Imprime, bloque por bloque, **el string sobre el que se calcula el Pearson**:
+
+```
+cmd>config hash
+AINPUTS  [PST:005]
+         [A0:FALSE,PPR,4,20,0.00,10.00,0.00]
+         …
+BH=0x66 AH=0x74 …
+```
+
+Dos cosas por las que está hecho así:
+
+- **Lo imprime `cfg_hash_string()`**, o sea **lo que entra al Pearson**, no una reimpresión aparte.
+  Una copia podría diferir justo en el decimal que uno vino a mirar, y el diagnóstico mentiría sobre
+  lo único que interesa.
+- El **valor** del hash no dice en qué carácter está la diferencia; el string, sí. Con el bloque
+  impreso a un lado y la configuración del servidor al otro, la comparación es a ojo.
+
+Campos que el servidor manda y **el equipo ignora a propósito** porque no están en el hash ni en el
+AVR: `SAMPLES` y `ALMLEVEL` en `CONF_BASE`. Ignorarlos es correcto — si entraran en el hash, el AVR
+en producción tampoco cerraría.
+
+#### El parseo no usa `strsep`, y es mejor que el del AVR en un punto concreto
+
+`strsep()` y `strlcpy()` son de BSD y newlib no las trae, así que hay una sola función,
+`prvCampo( rta, "CLAVE=", nro_de_token, … )`, que parsea **en el lugar**. La diferencia que importa:
+el AVR copiaba **64 bytes** desde el campo a un buffer global y tokenizaba ahí, de modo que **un
+campo largo se truncaba y los últimos tokens salían `NULL`** — un canal modbus con nombres largos
+perdía el `pow10` en silencio. Acá cada token se acota por separado.
+
+⚠ **Eso NO toca el contrato.** El contrato es lo que se **manda** —el hash sobre el string
+formateado, con su buffer de 64 bytes, que sigue igual—; cómo se lee la respuesta es asunto nuestro.
+
+Los delimitadores sí son los del AVR, `&,;:=><`, y los `<>` están porque **la respuesta viene
+envuelta en HTML**: sin ellos el último valor se llevaría puesto el `</html>`. De yapa se corta
+también en cualquier carácter de control, que el AVR no hacía: un CRLF al final dejaba el `\r` pegado
+al valor y el setter lo rechazaba por una razón que desde afuera no se entiende.
+
+#### Tres reglas del aplicado
+
+- **Un campo que el servidor no mandó se deja como está.** No hay valor por omisión: si la clave no
+  aparece, no hay nada que aplicar.
+- **Un canal se aplica entero o no se aplica.** Se leen los 7 tokens de una analógica (9 de un
+  modbus, 6 del contador) **antes** de tocar nada: una calibración a medio configurar es una
+  calibración inventada, y encima pasaría el checksum.
+- **Se verifica que la respuesta sea de ESE bloque** antes de aplicarla — el `wan_check_response()`
+  del AVR. Con el módulo en transparente, una respuesta demorada del frame anterior llega igual, y
+  aplicar la configuración de un bloque leyendo la respuesta de otro escribiría basura con toda
+  naturalidad.
+
+#### ⚠ Lo que este paso deliberadamente NO hace
+
+- **No aborta la secuencia si un bloque falla.** Sigue con los demás, igual que el AVR (en
+  `wan_state_online_config()` **sólo `conf_base` aborta**). Es lo que permite que el `FLOWC` que el
+  servidor va a pedir siempre —porque no mandamos su hash— no deje al equipo sin transmitir una sola
+  muestra.
+- **No actúa el `CONFIG=ERROR`.** La política de "si el servidor no nos reconoce, pasar a `DISCRETO`
+  con los timers en 1 h" sigue siendo del 5c: que un comando de banco cambie el modo de operación del
+  equipo por lo bajo sería peor que el problema.
+- **No adopta un `PWRMODO` que no sabe ejecutar.** `PWR_RTU` y `PWR_SILENT` existen en el AVR y acá
+  están fuera de alcance (Pablo, 2026-09-07): el setter los rechaza, se avisa, y el equipo queda con
+  el modo que tenía.
+
+#### Grabar una sola vez, al final
+
+`wan_conf_aplicar()` toca **sólo la RAM**; el `cfg_nvm_save_all()` lo hace el llamador, y únicamente
+si algún bloque cambió algo. Grabar bloque por bloque serían cinco escrituras de las que cuatro
+podrían quedar a medias si la sesión se corta. De paso se corre `cfg_nvm_chequear_nombres()`, porque
+la configuración que manda el servidor puede traer dos canales con el mismo nombre igual que la que
+tipea un técnico.
+
+### ✅ Paso 5b VALIDADO EN BANCO (2026-09-11): el contrato del hash CIERRA
+
+⭐ **El criterio de aceptación no era que la configuración se aplicara: era que en la sesión
+SIGUIENTE el servidor dejara de pedir los bloques.** Eso es lo único que prueba que nuestros strings
+del hash son idénticos a los suyos. Y pasó:
+
+```
+cmd>lte conf                      <- primera sesion: aplica los cinco bloques
+…
+CFG:: configuracion grabada
+
+cmd>lte conf                      <- segunda sesion
+-> …&BH=0x8D&AH=0xD7&CH=0xFA&MH=0xBB&PH=0x28
+<- "<html>CLASS=CONF_ALL&FLOWC</html>"
+el servidor pide reconfigurar: FLOWC
+no cambio nada: no se graba la EEPROM
+```
+
+| Criterio | Resultado |
+|---|---|
+| `CONF_BASE` | ✅ los cinco campos (`PWRON=0630`, con el cero adelante, incluido) |
+| `CONF_AINPUTS` | ✅ `PST` + los 3 canales |
+| `CONF_COUNTERS` | ✅ los 6 campos |
+| `CONF_MODBUS` | ✅ `ENABLE`, `LOCALADDR` y los 5 canales |
+| `CONF_CONSIGNA` | ✅ |
+| Grabado único al final | ✅ una sola vez, y **la segunda sesión no graba nada** |
+| ⭐ **Los cinco hashes** | ✅ **el servidor los acepta**: sólo queda `FLOWC`, que se ignora a propósito |
+
+⭐ **`AH=0xD7` era el valor PREDICHO** por el test del host antes de tocar el equipo. La cadena
+completa —predicción en el host, aplicación en el equipo, aceptación del servidor— cerró sin
+sorpresas.
+
+Los hashes de referencia de esta configuración, que sirven para verificar de un vistazo que nada se
+movió: **`BH=0x8D AH=0xD7 CH=0xFA MH=0xBB PH=0x28`**.
+
+⚠ **Lo que hizo falta fue tocar el SERVIDOR, no el firmware**: mandar el `PST` en la respuesta de
+`CONF_AINPUTS` y los seis campos en la de `CONF_COUNTERS`. El firmware ya los parseaba.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -2399,9 +2664,10 @@ Los tres campos que identifican al equipo viven juntos en `main.h`, bloque *USER
 viajan en el frame:
 
 ```c
-#define FW_NOMBRE   "FWDLGARM_R1"       /* = TYPE en el frame */
-#define FW_VERSION  "0.0.15"            /* = VER              */
-#define FW_HW       "SPQ_ARM_R1"        /* = HW, la PLACA     */
+#define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
+#define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
+#define FW_VERSION  "0.0.43"        /* = VER                                 */
+#define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
 `status` los imprime tal cual van a viajar, así se verifica de un vistazo con qué identidad se
@@ -2419,7 +2685,8 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **4** | Almacenamiento: FS circular sobre la EEPROM | ✅ **validado el 2026-09-09** |
 | **4b** | La microSD como extensión: la EEPROM es una VENTANA | ✅ **validado el 2026-09-09** |
 | **5a** | **La sesión mínima: configurar el módulo y el `PING`** | ✅ **validado el 2026-09-09** |
-| 5b | Los frames de configuración (`CONF_ALL` + `CONF_*`) | |
+| **5b-1** | `CONF_ALL`: los hashes y qué pide el servidor | ✅ **validado el 2026-09-11** |
+| **5b-2** | Los `CONF_*`: parsear y aplicar la configuración | ✅ **validado el 2026-09-11** — el hash cierra en la 2.ª sesión |
 | 5c | Los frames de datos y el vaciado | |
 | 5d | Los modos continuo / discreto / mixto | |
 | 6 | Modbus | |

@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+#include "frtos-io.h"
 #include "cfg_hash.h"
 
 static const uint8_t pucHashTable[ 256 ] = {
@@ -49,8 +50,21 @@ uint8_t cfg_hash_char( uint8_t ucSeed, char cCh )
     return pucHashTable[ ucEntry ];
 }
 //------------------------------------------------------------------------------
+static bool bVerbose = false;
+
+//------------------------------------------------------------------------------
+void cfg_hash_verbose( bool bOn )
+{
+    bVerbose = bOn;
+}
+//------------------------------------------------------------------------------
 uint8_t cfg_hash_string( uint8_t ucSeed, const char *pcStr )
 {
+    if( bVerbose && ( pcStr != NULL ) )
+    {
+        xprintf( "  %s\r\n", pcStr );
+    }
+
     uint8_t ucHash = ucSeed;
 
     if( pcStr == NULL )

@@ -68,40 +68,53 @@ uint8_t cfg_counter_hash( void )
     return cfg_hash_string( 0U, pcBuf );
 }
 //------------------------------------------------------------------------------
+/*
+ * ⚠ **Un argumento en NULL significa "no cambiar este campo"**, y el ÚNICO
+ * obligatorio es el nombre. No es una comodidad: es la regla del AVR
+ * (`counter_config_channel()`), y **el servidor la usa**. El 2026-09-11 contestó
+ * `C0=FALSE,X,1.0,CAUDAL` —cuatro campos de los seis— y exigirlos todos hacía
+ * que el bloque entero se descartara.
+ *
+ * Los que vengan se validan **contra los que ya están**, y recién si el
+ * conjunto completo cierra se escribe: así un campo suelto no puede dejar la
+ * configuración en un estado que ninguna validación aprobó.
+ */
 bool cfg_counter_set( const char *pcEnable, const char *pcName, const char *pcMagPP,
                       const char *pcModo, const char *pcQmax, const char *pcAlpha )
 {
-    if( ( pcEnable == NULL ) || ( pcName == NULL ) || ( pcMagPP == NULL ) ||
-        ( pcModo == NULL )   || ( pcQmax == NULL ) || ( pcAlpha == NULL ) )
+    if( pcName == NULL )
     {
         return false;
     }
 
-    bool bEnable;
+    bool bEnable = xCfgCounter.bEnabled;
 
-    if( !cfg_str2bool( pcEnable, &bEnable ) )
+    if( ( pcEnable != NULL ) && !cfg_str2bool( pcEnable, &bEnable ) )
     {
         return false;
     }
 
-    cfg_counter_modo_t eModo;
+    cfg_counter_modo_t eModo = xCfgCounter.eModoMedida;
 
-    if( strcasecmp( pcModo, "caudal" ) == 0 )
+    if( pcModo != NULL )
     {
-        eModo = CFG_CNT_CAUDAL;
-    }
-    else if( strcasecmp( pcModo, "pulsos" ) == 0 )
-    {
-        eModo = CFG_CNT_PULSOS;
-    }
-    else
-    {
-        return false;
+        if( strcasecmp( pcModo, "caudal" ) == 0 )
+        {
+            eModo = CFG_CNT_CAUDAL;
+        }
+        else if( strcasecmp( pcModo, "pulsos" ) == 0 )
+        {
+            eModo = CFG_CNT_PULSOS;
+        }
+        else
+        {
+            return false;
+        }
     }
 
-    float fMagPP = ( float ) atof( pcMagPP );
-    float fQmax  = ( float ) atof( pcQmax );
-    float fAlpha = ( float ) atof( pcAlpha );
+    float fMagPP = ( pcMagPP != NULL ) ? ( float ) atof( pcMagPP ) : xCfgCounter.fMagPP;
+    float fQmax  = ( pcQmax  != NULL ) ? ( float ) atof( pcQmax  ) : xCfgCounter.fQmax;
+    float fAlpha = ( pcAlpha != NULL ) ? ( float ) atof( pcAlpha ) : xCfgCounter.fAlpha;
 
     /* magpp es el divisor de la conversión pulsos->magnitud: en cero o negativo
        no significa nada, y en cero además dividiría por cero. */
