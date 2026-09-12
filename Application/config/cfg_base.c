@@ -40,6 +40,8 @@ const char *cfg_base_pwrmodo_str( void )
         case PWR_CONTINUO: return "CONTINUO";
         case PWR_DISCRETO: return "DISCRETO";
         case PWR_MIXTO:    return "MIXTO";
+        case PWR_RTU:      return "RTU";
+        case PWR_SILENT:   return "SILENT";
         default:           return "???";
     }
 }
@@ -54,6 +56,23 @@ void cfg_base_print( void )
     {
         xprintf( "  pwron    : %04u\r\n", ( unsigned ) xCfgBase.usPwrHhmmOn );
         xprintf( "  pwroff   : %04u\r\n", ( unsigned ) xCfgBase.usPwrHhmmOff );
+    }
+
+    /*
+     * Los dos modos nuevos cambian algo que no se ve mirando los números, así
+     * que lo dice el texto. Sobre todo el SILENT: que los datos dependan de que
+     * haya una tarjeta puesta no puede quedar implícito.
+     */
+    if( xCfgBase.ePwrModo == PWR_RTU )
+    {
+        xprintf( "             el modem queda SIEMPRE encendido\r\n" );
+        xprintf( "             [!] sin enlace, el dato se DESCARTA: no se guarda\r\n" );
+    }
+
+    if( xCfgBase.ePwrModo == PWR_SILENT )
+    {
+        xprintf( "             el modem NO se enciende nunca: no transmite\r\n" );
+        xprintf( "             [!] los datos terminan en la microSD: SIN TARJETA SE PIERDEN\r\n" );
     }
 }
 //------------------------------------------------------------------------------
@@ -168,7 +187,29 @@ bool cfg_base_set_pwrmodo( const char *pcVal )
         return true;
     }
 
+    if( ( strcasecmp( pcVal, "rtu" ) == 0 ) )
+    {
+        xCfgBase.ePwrModo = PWR_RTU;
+        return true;
+    }
+
+    if( ( strcasecmp( pcVal, "silent" ) == 0 ) )
+    {
+        xCfgBase.ePwrModo = PWR_SILENT;
+        return true;
+    }
+
     return false;
+}
+//------------------------------------------------------------------------------
+bool cfg_base_modo_sin_modem( void )
+{
+    return ( xCfgBase.ePwrModo == PWR_SILENT );
+}
+//------------------------------------------------------------------------------
+bool cfg_base_modo_sin_memoria( void )
+{
+    return ( xCfgBase.ePwrModo == PWR_RTU );
 }
 //------------------------------------------------------------------------------
 /* Una hora en formato HHMM. Se valida como hora de verdad y no sólo como número

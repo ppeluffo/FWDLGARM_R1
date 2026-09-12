@@ -2207,6 +2207,20 @@ static void cmdEv( void )
    respuesta del servidor. Por eso es mucho más largo que un AT. */
 #define LTE_PING_TIMEOUT_MS 15000U
 
+/*
+ * Cuántos frames se mandan sin esperar respuesta antes de pedir confirmación.
+ * Es el valor del AVR y se mantiene: cuanto más grande, más rápido el vaciado,
+ * pero más registros se retransmiten si la sesión se corta.
+ */
+#define LTE_DATA_VENTANA    10U
+
+/*
+ * ⚠ La pausa entre frames, y **no es opcional**: el DTU delimita cada trama por
+ * SILENCIO en la serie (su `ftime`, configurado en 250 ms). Sin esta espera dos
+ * frames se le juntan en un solo GET. Va con margen sobre el `ftime`.
+ */
+#define LTE_DATA_MS_ENTRE_FRAMES    500U
+
 static int16_t prvLteEscuchar( uint32_t ulMs );
 static void    prvLteBridge  ( void );
 
@@ -2222,6 +2236,7 @@ static void prvLteUso( void )
     xprintf( "  lte exit            SALE del modo comando, vuelve a transparente\r\n" );
     xprintf( "  lte ping            manda un PING al servidor (en modo TRANSPARENTE)\r\n" );
     xprintf( "  lte conf            CONF_ALL + los CONF_* que pida, y los APLICA\r\n" );
+    xprintf( "  lte data            vacia la ventana: transmite y borra lo confirmado\r\n" );
     xprintf( "  lte at <cmd>        manda <cmd>+CR y muestra la respuesta\r\n" );
     xprintf( "  lte tx <texto>      manda el texto CRUDO, sin CR, y escucha\r\n" );
     xprintf( "  lte rx <ms>         solo escucha\r\n" );
@@ -2525,6 +2540,181 @@ static void prvLteConfAll( void )
 }
 //------------------------------------------------------------------------------
 /*
+ * El vaciado de la VENTANA (la EEPROM): transmite los registros guardados y los
+ * borra **recién cuando el servidor confirmó**.
+ *
+ * ⚠ **ASUME modo TRANSPARENTE**, igual que `lte ping` y `lte conf`.
+ *
+ * La estructura es la del AVR (`wan_send_from_memory`): se mandan bloques de
+ * `LTE_DATA_VENTANA` frames con `CLASS=DATANR` —sin esperar respuesta— y el que
+ * cierra el bloque va como `CLASS=DATA`, que sí espera. Confirmado ése, se dan
+ * por buenos todos los del bloque.
+ *
+ * ⛔ **Pero el borrado NO es el del AVR, y la diferencia importa.** Aquel usa
+ * `FS_readRcd()`, que **consume el registro antes de transmitirlo**: si la
+ * sesión se corta, esos datos ya se perdieron. Acá se lee con
+ * `fs_datos_peek( dr, offset )` y se llama `fs_datos_pop( n )` **sólo tras la
+ * confirmación** — que es para lo que esas dos funciones se separaron en el
+ * paso 4. Si se corta, no se pierde nada; a lo sumo se retransmiten hasta
+ * `LTE_DATA_VENTANA` registros, y como el servidor los indexa por la fecha que
+ * viaja adentro del frame, un duplicado es inofensivo.
+ *
+ * ⚠ **El `count` se congela al entrar**, como en el AVR: los registros que
+ * `tkSys` grabe durante el vaciado quedan para el ciclo siguiente. Sin eso, con
+ * un `timerpoll` corto el vaciado no terminaría nunca.
+ */
+static void prvLteData( void )
+{
+    static char pcFrame[ WAN_FRAME_BUFFER_SIZE ];
+    static char pcRta  [ WAN_FRAME_BUFFER_SIZE ];
+    dataRcd_t   xDr;
+
+    fs_datos_stats_t xStats;
+    uint16_t         usPendientes;
+    uint16_t         usSinConfirmar = 0U;
+    uint16_t         usEnviados     = 0U;
+
+    if( !prvLteListo() )
+    {
+        return;
+    }
+
+    fs_datos_stats( &xStats );
+    usPendientes = xStats.usCount;
+
+    if( usPendientes == 0U )
+    {
+        xprintf( "la ventana esta vacia: no hay nada que transmitir\r\n" );
+        return;
+    }
+
+    xprintf( "vaciando la ventana: %u registros\r\n", ( unsigned ) usPendientes );
+
+    while( usPendientes > 0U )
+    {
+        /*
+         * El offset es lo que ya se mandó y todavía no se confirmó: el registro
+         * 0 sigue siendo el más viejo hasta que el `pop()` lo saque.
+         */
+        if( !fs_datos_peek( &xDr, usSinConfirmar ) )
+        {
+            xprintf( "ERROR: no se pudo leer el registro %u\r\n",
+                     ( unsigned ) usSinConfirmar );
+            break;
+        }
+
+        /* El último del bloque —y el último de todos— piden confirmación. */
+        bool bConfirmar = ( ( usSinConfirmar + 1U ) >= LTE_DATA_VENTANA ) ||
+                          ( usPendientes == 1U );
+
+        uint16_t usLargo = wan_frame_data( pcFrame, sizeof( pcFrame ), &xDr, bConfirmar );
+
+        if( usLargo == 0U )
+        {
+            break;
+        }
+
+        xprintf( "-> " );
+        ( void ) frtos_write( fdTERM, pcFrame, usLargo );
+        xprintf( "\r\n" );
+
+        if( bConfirmar )
+        {
+            drv_lte_flush();
+        }
+
+        if( drv_lte_write( pcFrame, usLargo ) != ( int16_t ) usLargo )
+        {
+            xprintf( "ERROR: no se pudo transmitir\r\n" );
+            break;
+        }
+
+        usSinConfirmar++;
+        usPendientes--;
+        usEnviados++;
+
+        if( !bConfirmar )
+        {
+            /*
+             * ⚠ **La pausa entre frames es OBLIGATORIA y tiene que ser
+             * explícita.** El DTU delimita cada trama por SILENCIO en la serie
+             * (su `ftime`, 250 ms acá): dos frames seguidos sin pausa se le
+             * juntan en un solo GET y del otro lado llega un frame corrupto.
+             *
+             * ⛔ El AVR no tiene ninguna espera acá — le funciona porque imprime
+             * el frame por la consola a 9600 antes de mandarlo, y eso son ~150 ms
+             * de pausa ACCIDENTAL. Depender de eso es depender de que el log
+             * esté encendido y de la velocidad de la terminal; en campo, con el
+             * log apagado, los frames se pegarían.
+             */
+            vTaskDelay( pdMS_TO_TICKS( LTE_DATA_MS_ENTRE_FRAMES ) );
+            continue;
+        }
+
+        /* ---- Toca confirmar: se espera la respuesta del servidor ---- */
+
+        int16_t sRet = drv_lte_read( pcRta, sizeof( pcRta ) - 1U, LTE_PING_TIMEOUT_MS );
+
+        if( sRet <= 0 )
+        {
+            xprintf( "sin respuesta en %u ms: quedan %u sin confirmar\r\n",
+                     ( unsigned ) LTE_PING_TIMEOUT_MS, ( unsigned ) usSinConfirmar );
+            break;
+        }
+
+        pcRta[ sRet ] = '\0';
+
+        xprintf( "<- " );
+        ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+        xprintf( "\r\n" );
+
+        wan_data_ordenes_t xOrdenes;
+
+        if( wan_frame_data_rta( pcRta, &xOrdenes ) != wanDATA_ACEPTADO )
+        {
+            xprintf( "[!] la respuesta no es de un frame de datos: se corta\r\n" );
+            break;
+        }
+
+        /* ⭐ Recién acá se borran: el servidor los tiene. */
+        uint16_t usBorrados = fs_datos_pop( usSinConfirmar );
+
+        xprintf( "OK: %u registros confirmados y borrados de la ventana\r\n",
+                 ( unsigned ) usBorrados );
+
+        usSinConfirmar = 0U;
+
+        if( xOrdenes.bReset )
+        {
+            /*
+             * Se atiende DESPUÉS del `pop()`: reiniciar antes dejaría los
+             * registros confirmados sin borrar, y el equipo los retransmitiría
+             * enteros al volver.
+             */
+            xprintf( "el servidor pide RESET: reiniciando...\r\n" );
+            vTaskDelay( pdMS_TO_TICKS( 2000 ) );
+            NVIC_SystemReset();
+        }
+
+        if( usPendientes > 0U )
+        {
+            vTaskDelay( pdMS_TO_TICKS( LTE_DATA_MS_ENTRE_FRAMES ) );
+        }
+    }
+
+    fs_datos_stats( &xStats );
+
+    xprintf( "\r\ntransmitidos %u, quedan %u en la ventana\r\n",
+             ( unsigned ) usEnviados, ( unsigned ) xStats.usCount );
+
+    if( usSinConfirmar > 0U )
+    {
+        xprintf( "[!] %u quedaron SIN confirmar: no se borraron, se reintentan\r\n",
+                 ( unsigned ) usSinConfirmar );
+    }
+}
+//------------------------------------------------------------------------------
+/*
  * El PING: la primera pregunta de toda sesión, "¿estás ahí?".
  *
  * ⚠ **ASUME el modo TRANSPARENTE**, al revés que `info` y `set`. Es coherente
@@ -2718,6 +2908,20 @@ static void prvLteInfo( void )
         "AT+HTPSV?",    /* IP y puerto del servidor               */
         "AT+HTPURL?",   /* el prefijo del GET                     */
         "AT+HTPTP?",    /* GET o POST                             */
+        /*
+         * ⚠ EL TIEMPO DE SILENCIO QUE DELIMITA CADA TRAMA.
+         *
+         * En modo transparente el módulo no tiene terminador: arma el GET con lo
+         * que recibió cuando la serie se queda callada `ftime` milisegundos. O
+         * sea que **este número fija cuánto hay que esperar entre dos frames
+         * seguidos**; si se manda más rápido, los dos se le juntan en un solo
+         * GET y del otro lado llega basura.
+         *
+         * Está en 250 ms (Pablo, 2026-09-11) y por eso `LTE_DATA_MS_ENTRE_FRAMES`
+         * son 500. Se consulta para poder verificarlo, no para ajustarse solo:
+         * si alguien lo cambia en el módulo, hay que ver el número acá.
+         */
+        "AT+FTIME?",    /* el silencio que delimita la trama      */
     };
 
     if( !prvLteListo() )
@@ -2943,6 +3147,12 @@ static void cmdLte( void )
         if( strcmp( argv[ 1 ], "bridge" ) == 0 )
         {
             prvLteBridge();
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "data" ) == 0 )
+        {
+            prvLteData();
             return;
         }
 
@@ -3194,7 +3404,9 @@ static void prvConfigUso( void )
     xprintf( "\r\n" );
     xprintf( "  config timerpoll <s>            periodo de muestreo\r\n" );
     xprintf( "  config timerdial <s>            periodo de disque (modo discreto)\r\n" );
-    xprintf( "  config pwrmodo <continuo|discreto|mixto>\r\n" );
+    xprintf( "  config pwrmodo <continuo|discreto|mixto|rtu|silent>\r\n" );
+    xprintf( "     rtu    = transmite si hay enlace; SIN enlace DESCARTA el dato\r\n" );
+    xprintf( "     silent = no enciende el modem nunca; los datos van a la microSD\r\n" );
     xprintf( "  config pwron <hhmm>             solo en mixto\r\n" );
     xprintf( "  config pwroff <hhmm>            solo en mixto\r\n" );
     xprintf( "\r\n" );
@@ -3492,6 +3704,7 @@ static void prvFsUso( void )
     xprintf( "  fs sd              estado de la microSD y sus lotes\r\n" );
     xprintf( "  fs sd list         lista los archivos de la tarjeta\r\n" );
     xprintf( "  fs sd dump         vuelca la ventana a un lote AHORA\r\n" );
+    xprintf( "  fs sd retirar      vuelca el remanente y dice si ya se puede sacar\r\n" );
     xprintf( "  fs sd ver <arch>   muestra las primeras lineas de un lote\r\n" );
     xprintf( "  fs sd format borrar   FORMATEA la tarjeta en FAT (BORRA TODO)\r\n" );
     xprintf( "\r\n" );
@@ -3577,6 +3790,57 @@ static void cmdFs( void )
         if( strcmp( argv[ 2 ], "list" ) == 0 )
         {
             fs_sd_listar();
+            return;
+        }
+
+        /*
+         * `fs sd retirar`: el procedimiento para LLEVARSE la tarjeta.
+         *
+         * Existe por el modo `SILENT` (Pablo, 2026-09-12), donde los datos no se
+         * transmiten nunca y la única forma de sacarlos es leyendo la microSD en
+         * una PC. Antes de retirarla hay que volcar lo que quedó en la ventana,
+         * que si no se pierde.
+         *
+         * ⚠ **No es un alias de `dump`, y la diferencia es el VEREDICTO.** Un
+         * volcado fallido —tarjeta llena, error de escritura— deja la ventana
+         * intacta a propósito… pero si el técnico saca la tarjeta igual, se
+         * lleva datos incompletos **y no se entera hasta que abre los archivos
+         * en la oficina**. Acá se le dice, en una línea, si puede sacarla o no.
+         *
+         * Que después sea seguro sacarla no es casualidad: `prvDesmontar()`
+         * desmonta y **corta la alimentación** de la tarjeta al terminar cada
+         * operación, así que al volver el prompt ya está fría.
+         */
+        if( strcmp( argv[ 2 ], "retirar" ) == 0 )
+        {
+            fs_datos_stats_t xVent;
+
+            fs_datos_stats( &xVent );
+
+            xprintf( "volcando el remanente de la ventana (%u registros)...\r\n",
+                     ( unsigned ) xVent.usCount );
+
+            bool bOk = fs_sd_volcar_ventana();
+
+            fs_datos_stats( &xVent );
+
+            if( bOk && ( xVent.usCount == 0U ) )
+            {
+                fs_sd_stats_t xSd;
+
+                fs_sd_stats( &xSd );
+
+                xprintf( "\r\nLISTO: la ventana quedo vacia y la tarjeta esta apagada.\r\n" );
+                xprintf( "       YA PUEDE RETIRAR LA MICROSD (%u lotes guardados).\r\n",
+                         ( unsigned ) xSd.usLotes );
+            }
+            else
+            {
+                xprintf( "\r\n[!] NO RETIRE LA TARJETA: quedan %u registros sin volcar.\r\n",
+                         ( unsigned ) xVent.usCount );
+                xprintf( "    revisar con 'fs sd' si hay tarjeta y si le queda lugar.\r\n" );
+            }
+
             return;
         }
 

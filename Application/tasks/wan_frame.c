@@ -10,6 +10,7 @@
 #include "wan_frame.h"
 #include "cfg_nvm.h"
 #include "tkCmd.h"
+#include "drv_rtc79410.h"
 #include "frtos-io.h"
 #include "main.h"
 
@@ -558,10 +559,12 @@ static wan_conf_rta_t prvAplicarBase( const char *pcRta )
         else
         {
             /*
-             * ⚠ Acá se va a caer `PWR_RTU` y `PWR_SILENT`, que existen en el AVR
-             * y en este equipo NO (fuera de alcance por decisión de Pablo,
-             * 2026-09-07). El equipo queda con el modo que tenía, que es lo
-             * seguro: adoptar un modo que no sabe ejecutar sería peor.
+             * El equipo queda con el modo que tenía, que es lo seguro: adoptar
+             * un modo que no sabe ejecutar sería peor.
+             *
+             * ℹ Los cinco modos del AVR están soportados desde el 2026-09-12
+             * (`RTU` y `SILENT` entraron a pedido de Pablo), así que acá ya sólo
+             * caen valores realmente desconocidos.
              */
             xprintf( "WAN:: ERROR: PWRMODO desconocido (%s), queda el anterior\r\n", pcVal );
         }
@@ -887,5 +890,163 @@ wan_conf_rta_t wan_conf_aplicar( wan_bloque_t eBloque, const char *pcRta )
     }
 
     return xBloques[ eBloque ].pfAplicar( pcRta );
+}
+//------------------------------------------------------------------------------
+
+/*==============================================================================
+ * LA RESPUESTA A UN FRAME DE DATOS (paso 5c)
+ *============================================================================*/
+
+/*------------------------------------------------------------------------------
+ * `CLOCK=YYMMDDhhmm`: el servidor pone en hora al equipo.
+ *
+ * ⭐ **No es un adorno: es cómo el equipo se pone en hora solo en campo.** Y
+ * como `drv_rtc_escribir()` escribe además la firma de la SRAM, esto **saca al
+ * MCP79410 de un arranque en frío sin que nadie vaya al sitio** — que con el
+ * porta pila fallando de forma intermitente no es un caso hipotético.
+ *
+ * ⚠ **El umbral de 90 segundos es del AVR y hay que conservarlo** (su comentario
+ * lo fecha en 2021-12-14): sin él, con `timerpoll` corto el reloj se reajusta en
+ * cada poleo y la hora del equipo se mueve todo el tiempo.
+ *
+ * ⛔ **Pero el AVR sólo compara la HORA DEL DÍA, y ése es un agujero que acá sí
+ * importa.** Su cuenta es `hour*3600 + min*60 + sec` de los dos lados: un equipo
+ * que arrancó frío en `2001-01-01 10:30` contra un servidor en
+ * `2026-09-11 10:30` da diferencia CERO, así que **no ajustaría nunca** y el
+ * equipo quedaría estampando 2001 para siempre. Es exactamente el escenario que
+ * este equipo tiene abierto por el porta pila.
+ *
+ * Por eso acá se ajusta **siempre** en dos casos más, antes de mirar los 90 s:
+ *
+ *   - la firma del RTC dice que la hora NO es confiable (arranque en frío), o
+ *   - la FECHA difiere — y ahí no hay nada que dosificar: una fecha distinta no
+ *     es deriva del cristal, es que uno de los dos está equivocado.
+ *----------------------------------------------------------------------------*/
+static bool prvAplicarClock( const char *pcValor )
+{
+    RtcTimeType_t xNueva;
+    RtcTimeType_t xActual;
+    uint8_t       i;
+
+    /* Diez dígitos, ni uno menos: con el string corto se leería basura de los
+       campos siguientes y quedaría una hora plausible e inventada. */
+    for( i = 0U; i < 10U; i++ )
+    {
+        if( ( pcValor[ i ] < '0' ) || ( pcValor[ i ] > '9' ) )
+        {
+            xprintf( "WAN:: ERROR: CLOCK mal formado (%s)\r\n", pcValor );
+            return false;
+        }
+    }
+
+    #define DOS_DIGITOS( n )  ( ( uint8_t ) ( ( pcValor[ n ] - '0' ) * 10 + \
+                                              ( pcValor[ n + 1 ] - '0' ) ) )
+
+    memset( &xNueva, 0, sizeof( xNueva ) );
+    xNueva.year  = DOS_DIGITOS( 0 );
+    xNueva.month = DOS_DIGITOS( 2 );
+    xNueva.day   = DOS_DIGITOS( 4 );
+    xNueva.hour  = DOS_DIGITOS( 6 );
+    xNueva.min   = DOS_DIGITOS( 8 );
+    xNueva.sec   = 0U;      /* el servidor no los manda; el AVR hace lo mismo */
+
+    #undef DOS_DIGITOS
+
+    /*
+     * El AVR toma además un 11.º carácter como día de la semana —y lee un byte
+     * de más para hacerlo—. Acá no hace falta: `drv_rtc_escribir()` lo calcula
+     * con Sakamoto, que es un dato DERIVADO de la fecha y no algo que convenga
+     * recibir de afuera.
+     */
+
+    if( ( xNueva.month < 1U ) || ( xNueva.month > 12U ) ||
+        ( xNueva.day   < 1U ) || ( xNueva.day   > 31U ) ||
+        ( xNueva.hour > 23U ) || ( xNueva.min > 59U ) )
+    {
+        xprintf( "WAN:: ERROR: CLOCK fuera de rango (%s)\r\n", pcValor );
+        return false;
+    }
+
+    bool bForzar = ( drv_rtc_validez() != rtcHORA_VALIDA );
+
+    if( !drv_rtc_leer( &xActual ) )
+    {
+        /* Sin poder leer la hora actual no hay con qué comparar, así que se
+           escribe: tener la del servidor es mejor que no tener ninguna. */
+        bForzar = true;
+    }
+    else if( ( xActual.year  != xNueva.year  ) ||
+             ( xActual.month != xNueva.month ) ||
+             ( xActual.day   != xNueva.day   ) )
+    {
+        bForzar = true;
+    }
+
+    if( !bForzar )
+    {
+        long lActual = ( long ) xActual.hour * 3600L + ( long ) xActual.min * 60L +
+                       ( long ) xActual.sec;
+        long lNueva  = ( long ) xNueva.hour * 3600L + ( long ) xNueva.min * 60L;
+        long lDiff   = ( lActual > lNueva ) ? ( lActual - lNueva ) : ( lNueva - lActual );
+
+        if( lDiff <= 90L )
+        {
+            return false;   /* dentro de la tolerancia: no se toca */
+        }
+    }
+
+    if( !drv_rtc_escribir( &xNueva ) )
+    {
+        xprintf( "WAN:: ERROR: no se pudo poner en hora el RTC\r\n" );
+        return false;
+    }
+
+    xprintf( "WAN:: RTC en hora desde el servidor: %02u/%02u/%02u %02u:%02u\r\n",
+             ( unsigned ) xNueva.day, ( unsigned ) xNueva.month,
+             ( unsigned ) xNueva.year, ( unsigned ) xNueva.hour,
+             ( unsigned ) xNueva.min );
+
+    return true;
+}
+//------------------------------------------------------------------------------
+wan_data_rta_t wan_frame_data_rta( const char *pcRta, wan_data_ordenes_t *pxOrdenes )
+{
+    char pcVal[ 16 ];
+
+    if( pxOrdenes != NULL )
+    {
+        memset( pxOrdenes, 0, sizeof( wan_data_ordenes_t ) );
+    }
+
+    if( ( pcRta == NULL ) || ( pcRta[ 0 ] == '\0' ) )
+    {
+        return wanDATA_SIN_RESPUESTA;
+    }
+
+    if( strstr( pcRta, "CLASS=DATA" ) == NULL )
+    {
+        return wanDATA_OTRA_CLASE;
+    }
+
+    if( pxOrdenes == NULL )
+    {
+        return wanDATA_ACEPTADO;
+    }
+
+    if( prvCampo( pcRta, "CLOCK=", 0U, pcVal, sizeof( pcVal ) ) )
+    {
+        pxOrdenes->bClock = prvAplicarClock( pcVal );
+    }
+
+    /*
+     * ⚠ `RESET` se busca como palabra suelta y eso alcanza porque el servidor la
+     * manda así. No se usa `prvCampo()` porque no lleva `=`.
+     */
+    if( strstr( pcRta, "RESET" ) != NULL )
+    {
+        pxOrdenes->bReset = true;
+    }
+
+    return wanDATA_ACEPTADO;
 }
 //------------------------------------------------------------------------------

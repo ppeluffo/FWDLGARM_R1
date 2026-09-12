@@ -36,6 +36,11 @@ static TickType_t xTicksProximoPoll;
    volcado, más abajo: el margen que queda es para poder reintentar. */
 #define TKSYS_UMBRAL_VOLCADO_PCT   90U
 
+/* Cuántos registros se descartaron por estar en modo RTU sin enlace. Ver el
+   comentario en el lazo de la tarea: es la única pérdida deliberada de datos
+   del equipo, y por eso se cuenta. */
+static uint32_t ulDescartadosRtu = 0UL;
+
 /*
  * El año en que se compiló este binario, en dos dígitos. `__DATE__` tiene la
  * forma "Sep  8 2026", así que los dos últimos caracteres son el año.
@@ -395,10 +400,36 @@ void tkSys( void *pvParameters )
          *
          * ⏳ En el paso 5, tkWan va a leer de acá: en modo CONTINUO transmite y
          * borra enseguida, en DISCRETO acumula hasta que toque discar.
+         *
+         * ⛔ **La excepción es el modo RTU**, que descarta lo que no puede
+         * transmitir (Pablo, 2026-09-12): es una unidad remota, no un
+         * datalogger. Ver `cfg_base.h`.
          */
-        if( !fs_datos_write( &xUltimo ) )
+        if( cfg_base_modo_sin_memoria() )
+        {
+            /*
+             * ⏳ **Hoy descarta SIEMPRE**, porque quien decide si hay enlace es
+             * `tkWan` y todavía no existe (paso 5d). Cuando exista, el dato se
+             * le entrega y sólo se descarta si el enlace está caído.
+             *
+             * ⚠ El contador NO es cosmético: descartar es la única situación en
+             * la que este equipo pierde datos a propósito, y un RTU con el
+             * enlace caído se ve exactamente igual que uno funcionando salvo por
+             * este número. Es el mismo criterio que `ulPisados` de la ventana y
+             * que el centinela -9999: **hacer visible lo que se perdió**.
+             */
+            ulDescartadosRtu++;
+
+            xprintf( "tkSys:: modo RTU sin enlace: registro DESCARTADO (van %lu)\r\n",
+                     ( unsigned long ) ulDescartadosRtu );
+        }
+        else if( !fs_datos_write( &xUltimo ) )
         {
             xprintf( "tkSys:: [!] no se pudo guardar el registro\r\n" );
+        }
+        else
+        {
+            /* guardado */
         }
 
         /*
@@ -421,7 +452,17 @@ void tkSys( void *pvParameters )
 
         if( xStFs.usCount >= ( ( xStFs.usLength * TKSYS_UMBRAL_VOLCADO_PCT ) / 100U ) )
         {
-            ( void ) fs_sd_volcar_ventana();
+            /*
+             * ⛔ En modo SILENT la microSD **deja de ser una extensión y pasa a
+             * ser el destino final**: no hay transmisión que vacíe la ventana,
+             * así que siempre se llega acá. Si el volcado falla —no hay tarjeta—
+             * los datos se van a perder cuando la ventana dé la vuelta, y eso
+             * hay que decirlo fuerte y en el momento, no descubrirlo después.
+             */
+            if( !fs_sd_volcar_ventana() && cfg_base_modo_sin_modem() )
+            {
+                xprintf( "tkSys:: ⛔ SILENT sin microSD: los datos SE VAN A PERDER\r\n" );
+            }
         }
 
         /*

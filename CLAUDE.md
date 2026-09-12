@@ -2648,6 +2648,83 @@ movió: **`BH=0x8D AH=0xD7 CH=0xFA MH=0xBB PH=0x28`**.
 ⚠ **Lo que hizo falta fue tocar el SERVIDOR, no el firmware**: mandar el `PST` en la respuesta de
 `CONF_AINPUTS` y los seis campos en la de `CONF_COUNTERS`. El firmware ya los parseaba.
 
+### 🔨 Paso 5c: los frames de datos y el vaciado
+
+Comando **`lte data`**: transmite los registros de la ventana y los borra **recién cuando el servidor
+confirmó**. ⚠ Asume modo TRANSPARENTE, igual que `lte ping` y `lte conf`.
+
+La estructura es la del AVR (`wan_send_from_memory`): bloques de **10** frames `CLASS=DATANR` —que no
+esperan respuesta— y el que cierra el bloque va como `CLASS=DATA`, que sí espera. Confirmado ése, se
+dan por buenos los diez.
+
+#### ⛔ El borrado NO es el del AVR, y ésa es la diferencia que importa
+
+El AVR usa `FS_readRcd()`, que **consume el registro antes de transmitirlo**: si la sesión se corta,
+esos datos ya se perdieron. Acá se lee con `fs_datos_peek( dr, offset )` y se llama `fs_datos_pop( n )`
+**sólo tras la confirmación** — que es exactamente para lo que esas dos funciones se separaron en el
+paso 4.
+
+Si la sesión se corta no se pierde nada; a lo sumo se retransmiten hasta 10 registros, y como el
+servidor los indexa por la fecha que viaja **adentro** del frame, un duplicado es inofensivo. Es el
+mismo razonamiento que permite mandar los lotes de la SD después de la ventana sin respetar el orden
+cronológico.
+
+**El `count` se congela al entrar**, como en el AVR: los registros que `tkSys` grabe durante el
+vaciado quedan para el ciclo siguiente. Sin eso, con un `timerpoll` corto el vaciado no termina nunca.
+
+#### ⚠ La pausa entre frames es OBLIGATORIA, y el AVR la tiene por accidente
+
+En modo transparente el módulo **no tiene terminador**: arma el GET con lo que recibió cuando la serie
+se queda callada `ftime` milisegundos. O sea que ese número fija cuánto hay que esperar entre dos
+frames seguidos — si se manda más rápido, **los dos se le juntan en un solo GET** y del otro lado
+llega un frame corrupto.
+
+⛔ **El AVR no tiene ninguna espera ahí.** Le funciona porque imprime el frame por la consola a 9600
+antes de mandarlo, y eso son **~150 ms de pausa accidental**. Depender de eso es depender de que el
+log esté encendido y de la velocidad de la terminal: en campo, con el log apagado, los frames se
+pegarían. Acá la espera es explícita — `LTE_DATA_MS_ENTRE_FRAMES`, 500 ms contra un `ftime` de 250
+(Pablo, 2026-09-11), y `lte info` consulta `AT+FTIME?` para poder verificarlo.
+
+#### La respuesta a `DATA` trae órdenes: por ahora `CLOCK` y `RESET`
+
+El AVR atiende además `VOPEN`/`VCLOSE` y `EXT_V0/V1_*`, que **van con el paso 7** (acordado con Pablo,
+2026-09-11): mueven válvulas, y esa política vive allá.
+
+`RESET` **no se ejecuta dentro del parseo**: se informa y lo hace el llamador, **después del
+`pop()`**. Reiniciar antes dejaría los registros confirmados sin borrar y el equipo los retransmitiría
+enteros al volver.
+
+#### ⛔ `CLOCK=`: el AVR sólo compara la HORA DEL DÍA, y acá eso es un agujero
+
+`CLOCK=YYMMDDhhmm` pone en hora el equipo, y **no es un adorno**: es cómo se pone en hora solo en
+campo. Como `drv_rtc_escribir()` escribe además la firma de la SRAM, **saca al MCP79410 de un arranque
+en frío sin que nadie vaya al sitio** — con el porta pila fallando de forma intermitente, ése es el
+caso que más va a aparecer.
+
+**El umbral de 90 segundos se conserva** (el AVR lo fecha en 2021-12-14): sin él, con `timerpoll`
+corto el reloj se reajusta en cada poleo y la hora se mueve todo el tiempo.
+
+⛔ **Pero la cuenta del AVR es `hour*3600 + min*60 + sec` de los dos lados, y sólo eso.** Un equipo que
+arrancó frío en `2001-01-01 10:30` contra un servidor en `2026-09-11 10:30` da diferencia **cero**:
+no ajustaría nunca y el equipo quedaría estampando 2001 para siempre. Es precisamente el escenario
+que este equipo tiene abierto.
+
+Por eso acá se ajusta **siempre**, antes de mirar los 90 s, en dos casos más:
+
+- **la firma del RTC dice que la hora no es confiable** (arranque en frío), o
+- **la FECHA difiere** — y ahí no hay nada que dosificar: una fecha distinta no es deriva del
+  cristal, es que uno de los dos está equivocado.
+
+El día de la semana **no se toma del servidor** aunque el AVR lo haga (y lea un byte de más para
+conseguirlo): `drv_rtc_escribir()` lo calcula con Sakamoto, que es un dato derivado de la fecha.
+
+Validado sin hardware con stubs del RTC: **11 casos**, incluidos los cuatro strings malformados —que
+nunca escriben— y el `2001-01-01` con la misma hora del día, que ahora sí ajusta.
+
+⏳ **Falta la segunda mitad del paso**: los lotes de la microSD. Van después de la ventana, son frames
+de texto ya armados —se mandan tal cual— y el archivo **se borra recién cuando se confirmó completo**,
+sin puntero de línea persistente: si se corta, se retransmite entero (acordado con Pablo, 2026-09-11).
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -2666,7 +2743,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.43"        /* = VER                                 */
+#define FW_VERSION  "0.0.46"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -2687,15 +2764,101 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5a** | **La sesión mínima: configurar el módulo y el `PING`** | ✅ **validado el 2026-09-09** |
 | **5b-1** | `CONF_ALL`: los hashes y qué pide el servidor | ✅ **validado el 2026-09-11** |
 | **5b-2** | Los `CONF_*`: parsear y aplicar la configuración | ✅ **validado el 2026-09-11** — el hash cierra en la 2.ª sesión |
-| 5c | Los frames de datos y el vaciado | |
+| **5c** | Los frames de datos y el vaciado | 🔨 **la ventana escrita**; faltan los lotes de la SD |
 | 5d | Los modos continuo / discreto / mixto | |
 | 6 | Modbus | |
 | 7 | Consigna (`tkCtlPres`) | |
 | 8 | Watchdog cooperativo + `tkCtl` definitivo | |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo | |
 
-**Fuera de alcance por decisión de Pablo (2026-09-07)**: `tkFlow`/flowcontrol y los modos `PWR_RTU` y
-`PWR_SILENT`. Existen en el AVR; acá no entran todavía.
+**Fuera de alcance por decisión de Pablo (2026-09-07)**: `tkFlow`/flowcontrol. ✅ Los modos `PWR_RTU`
+y `PWR_SILENT` **entraron el 2026-09-12**, a pedido de Pablo — ver la sección de abajo.
+
+### ✅ Los cinco modos de energía: entran `RTU` y `SILENT` (2026-09-12)
+
+A pedido de Pablo. Estaban fuera de alcance desde el 2026-09-07 y **sus números quedaron reservados
+en el enum justamente para poder agregarlos sin invalidar nada** — cosa que resultó ser exactamente
+lo necesario:
+
+#### ⚠ El hash lleva el NÚMERO del modo, no su nombre
+
+`base_hash()` del AVR emite **`[PWRMODO:%d]`**, así que `RTU` tiene que valer **3** y `SILENT` **4**,
+igual que allá. Reordenar ese enum cambiaría el hash de todos los equipos y el servidor pediría
+reconfigurar para siempre. Con los números correctos, **agregar los dos modos no invalida ninguna
+configuración guardada ni mueve ningún hash existente**.
+
+Predicho con la réplica del cálculo del servidor, sobre la configuración de banco (`TPOLL=60`,
+`TDIAL=3600`, `PWRON=0630`, `PWROFF=1800`):
+
+| `pwrmodo` | valor | `BH` |
+|---|---|---|
+| `CONTINUO` | 0 | `0x8D` ← el que informó el equipo |
+| `DISCRETO` | 1 | `0x66` ← el que tenía antes de configurarse |
+| `MIXTO` | 2 | `0x41` |
+| **`RTU`** | **3** | **`0xDF`** |
+| **`SILENT`** | **4** | **`0xD4`** |
+
+Que los dos primeros coincidan con lo que ya se vio en banco es lo que da confianza en los otros tres.
+
+#### Qué hace cada uno
+
+| Modo | Modem | Almacenamiento |
+|---|---|---|
+| **`RTU`** | **siempre encendido** ("(RTU) continuo" en el AVR) | ⛔ **ninguno: si no hay enlace, el dato se DESCARTA** |
+| **`SILENT`** | **nunca se enciende** — el AVR entra en `APAGADO` y se queda ahí para siempre | la microSD |
+
+#### ⛔ `RTU` es la única pérdida deliberada de datos del equipo, así que se CUENTA
+
+Descartar una muestra va contra todo lo demás que hace este firmware —el centinela `-9999`, la firma
+del RTC, el `estado_asumido` de la válvula—, y acá es correcto porque **un RTU es una unidad remota,
+no un datalogger**. Pero un RTU con el enlace caído **se ve exactamente igual que uno funcionando**:
+no hay ningún síntoma. Por eso los descartes se cuentan y se informan por consola, con el mismo
+criterio que `ulPisados` de la ventana: *hacer visible lo que se perdió*.
+
+⏳ **Hoy descarta siempre**, porque quien decide si hay enlace es `tkWan` y todavía no existe (5d).
+
+#### En `SILENT` la microSD deja de ser una extensión y pasa a ser el DESTINO
+
+Decisión de implementación (2026-09-12): **se sigue usando la ventana de la EEPROM como buffer**, no
+se escribe la SD en cada muestra. Con `timerpoll` de 60 s eso serían ~1440 ciclos de
+encender/montar/escribir/desmontar/apagar por día contra **uno cada 33 horas**, y FAT es frágil justo
+ante el corte de alimentación — es el razonamiento entero del paso 4b, que no cambia porque cambie el
+modo.
+
+El resultado observable es el mismo que pidió Pablo —los datos terminan en la microSD— porque en este
+modo **la ventana no se vacía nunca por transmisión**, así que siempre llega al umbral y siempre
+vuelca.
+
+⛔ **Pero hay una diferencia real y hay que gritarla: sin tarjeta, en `SILENT` los datos SE PIERDEN**
+cuando la ventana da la vuelta. En los otros modos la microSD es una extensión y el equipo degrada
+bien sin ella; acá es el único camino. Por eso `tkSys` avisa en el momento en que un volcado falla
+estando en este modo, y `config` lo dice al imprimir el modo — que los datos dependan de que haya una
+tarjeta puesta no puede quedar implícito.
+
+#### `fs sd retirar`: el procedimiento para llevarse la tarjeta
+
+En `SILENT` la única forma de sacar los datos es **leer la microSD en una PC**, y al momento de ir a
+buscarla siempre hay un remanente en la ventana que todavía no llegó al umbral del 90 %. Ese
+remanente se pierde si alguien saca la tarjeta y listo. El comando lo vuelca y **da un veredicto**
+(pedido de Pablo, 2026-09-12):
+
+```
+cmd>fs sd retirar
+volcando el remanente de la ventana (37 registros)...
+SD:: 37 registros volcados a LOTE0004.DAT
+
+LISTO: la ventana quedo vacia y la tarjeta esta apagada.
+       YA PUEDE RETIRAR LA MICROSD (4 lotes guardados).
+```
+
+⚠ **No es un alias de `fs sd dump`, y la diferencia es justamente el veredicto.** Un volcado fallido
+—tarjeta llena, error de escritura— deja la ventana intacta a propósito, pero si el técnico saca la
+tarjeta igual **se lleva datos incompletos y no se entera hasta que abre los archivos en la oficina**.
+Acá se le dice en una línea si puede sacarla o no.
+
+Que después sea seguro retirarla no es casualidad: `prvDesmontar()` desmonta **y corta la
+alimentación** de la tarjeta al terminar cada operación, así que cuando vuelve el prompt ya está
+fría.
 
 ### ⚠ El hash de configuración: la trampa del paso 1
 

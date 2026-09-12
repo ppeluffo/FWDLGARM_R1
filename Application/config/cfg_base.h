@@ -22,12 +22,52 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/*
+ * ⚠ **Los NÚMEROS son parte del contrato, no los nombres.** El hash de `base`
+ * lleva `[PWRMODO:%d]` —el valor del enum— así que `RTU` tiene que ser 3 y
+ * `SILENT` 4, igual que en el AVR. Reordenar este enum cambia el hash de todos
+ * los equipos y el servidor pediría reconfigurar para siempre.
+ *
+ * `RTU` y `SILENT` entraron el **2026-09-12**, a pedido de Pablo; hasta entonces
+ * estuvieron fuera de alcance y sus números quedaron reservados justamente para
+ * poder agregarlos sin invalidar nada.
+ */
 typedef enum {
     PWR_CONTINUO = 0,
-    PWR_DISCRETO,
-    PWR_MIXTO
-    /* 3 = PWR_RTU y 4 = PWR_SILENT en el AVR: no reutilizar esos números. */
+    PWR_DISCRETO = 1,
+    PWR_MIXTO    = 2,
+    /*
+     * Polea y transmite **si hay enlace**; si no lo hay, **descarta el dato: no
+     * lo guarda nunca**. Es una unidad remota, no un datalogger — el modem queda
+     * permanentemente encendido ("(RTU) continuo" en el AVR).
+     *
+     * ⚠ Descartar es la única situación en la que este equipo pierde datos a
+     * propósito, así que el descarte **se cuenta y se informa**: un RTU con el
+     * enlace caído se ve igual que uno andando salvo por ese contador.
+     */
+    PWR_RTU      = 3,
+    /*
+     * Polea y **almacena**; el modem **no se enciende nunca** y no se transmite
+     * nada. En el AVR la tarea WAN entra en APAGADO y se queda ahí para siempre.
+     *
+     * Acá los datos terminan en la **microSD**: se sigue usando la ventana de la
+     * EEPROM como buffer —escribir la SD en cada muestra serían ~1440 ciclos de
+     * montaje por día contra uno cada 33 h, y FAT es frágil justo ante el corte—
+     * y como en este modo la ventana no se vacía nunca por transmisión, **siempre
+     * llega al umbral y siempre vuelca**.
+     *
+     * ⛔ **Sin tarjeta, en este modo los datos SE PIERDEN** cuando la ventana da
+     * la vuelta: es el único modo donde la microSD deja de ser una extensión y
+     * pasa a ser el destino final.
+     */
+    PWR_SILENT   = 4
 } pwr_modo_t;
+
+/* true si en este modo el equipo NUNCA enciende el modem. */
+bool cfg_base_modo_sin_modem( void );
+
+/* true si en este modo un dato que no se pudo transmitir se DESCARTA. */
+bool cfg_base_modo_sin_memoria( void );
 
 /*
  * ⚠ El `checksum` va SIEMPRE último: se calcula sobre `sizeof(struct) - 1`, o

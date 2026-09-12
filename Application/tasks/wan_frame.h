@@ -245,6 +245,37 @@ uint16_t wan_frame_conf_bloque( char *pcBuf, uint16_t usSize, wan_bloque_t eBloq
 wan_conf_rta_t wan_conf_aplicar( wan_bloque_t eBloque, const char *pcRta );
 
 /*------------------------------------------------------------------------------
+ * LA RESPUESTA A UN FRAME DE DATOS
+ *
+ * El servidor contesta `CLASS=DATA` y **puede agregar órdenes**. De las que
+ * conoce el AVR, acá se implementan dos (acordado con Pablo, 2026-09-11):
+ *
+ *   CLOCK=YYMMDDhhmm   pone en hora el equipo
+ *   RESET              reiniciar
+ *
+ * ⏳ `VOPEN`/`VCLOSE` y `EXT_V0/V1_*` mueven válvulas y **van con el paso 7**,
+ * que es donde vive esa política. Acá se ignoran.
+ *----------------------------------------------------------------------------*/
+typedef enum {
+    wanDATA_ACEPTADO = 0,   /* el servidor contestó `CLASS=DATA`              */
+    wanDATA_OTRA_CLASE,     /* contestó algo, pero no es de este frame        */
+    wanDATA_SIN_RESPUESTA
+} wan_data_rta_t;
+
+/*
+ * `bReset` NO se ejecuta acá: se informa y lo hace el llamador. Reiniciar en
+ * medio del procesamiento de una respuesta dejaría a medias todo lo que venga
+ * después —incluido el `pop()` de los registros ya confirmados—, y el equipo
+ * volvería a transmitir lo mismo después del reset.
+ */
+typedef struct {
+    bool bClock;    /* vino un `CLOCK=` válido y se aplicó */
+    bool bReset;    /* el servidor pide reiniciar          */
+} wan_data_ordenes_t;
+
+wan_data_rta_t wan_frame_data_rta( const char *pcRta, wan_data_ordenes_t *pxOrdenes );
+
+/*------------------------------------------------------------------------------
  * El frame de PING, que es el primero de toda sesión: pregunta si el servidor
  * está del otro lado. La respuesta esperada es `CLASS=PONG`.
  *
