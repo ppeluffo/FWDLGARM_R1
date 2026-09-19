@@ -2233,6 +2233,7 @@ static void prvLteUso( void )
     xprintf( "  lte key <ms>        pulso de <ms> y lo suelta\r\n" );
     xprintf( "  lte esc             ENTRA AL MODO COMANDO (+++ / a / a / +ok)\r\n" );
     xprintf( "  lte info            como esta configurado el MODULO (lo lee de el)\r\n" );
+    xprintf( "  lte clock [set]     la hora del modulo (NTP); 'set' pone en hora el RTC\r\n" );
     xprintf( "  lte exit            SALE del modo comando, vuelve a transparente\r\n" );
     xprintf( "  lte ping            manda un PING al servidor (en modo TRANSPARENTE)\r\n" );
     xprintf( "  lte conf            CONF_ALL + los CONF_* que pida, y los APLICA\r\n" );
@@ -2669,10 +2670,35 @@ static void prvLteData( void )
         xprintf( "\r\n" );
 
         wan_data_ordenes_t xOrdenes;
+        wan_data_rta_t     eRta = wan_frame_data_rta( pcRta, &xOrdenes );
 
-        if( wan_frame_data_rta( pcRta, &xOrdenes ) != wanDATA_ACEPTADO )
+        if( eRta != wanDATA_ACEPTADO )
         {
-            xprintf( "[!] la respuesta no es de un frame de datos: se corta\r\n" );
+            /*
+             * Se corta el vaciado en los tres casos: si el servidor no confirma,
+             * seguir mandando cientos de registros que no se van a poder borrar
+             * sólo gasta batería y tráfico. **Los datos quedan intactos.**
+             *
+             * Pero el mensaje distingue las causas, porque mandan a mirar lugares
+             * distintos.
+             */
+            if( eRta == wanDATA_VACIA )
+            {
+                xprintf( "[!] el servidor CONTESTO PERO VACIO (sin CLASS=).\r\n" );
+                xprintf( "    o sea que el frame LLEGO y lo rechazo por su CONTENIDO:\r\n" );
+                xprintf( "    mirar el log del SERVIDOR, y revisar la fecha del frame\r\n" );
+                xprintf( "    (con el RTC en arranque frio viaja DATE=0101xx, que el\r\n" );
+                xprintf( "     servidor no puede indexar). 'rtc' dice si la hora es confiable.\r\n" );
+            }
+            else if( eRta == wanDATA_OTRA_CLASE )
+            {
+                xprintf( "[!] llego una respuesta de OTRA clase: se descarta\r\n" );
+            }
+            else
+            {
+                xprintf( "[!] sin respuesta del servidor\r\n" );
+            }
+
             break;
         }
 
@@ -2868,6 +2894,158 @@ static void prvLteGrabar( void )
 }
 //------------------------------------------------------------------------------
 /*
+ * `lte clock`: lee la hora del MÓDULO, que la sincroniza por NTP contra la red.
+ *
+ * ⭐ **Es una fuente de hora independiente del servidor Y de la pila del
+ * MCP79410**, o sea la salida de fondo al porta pila intermitente: el equipo
+ * puede ponerse en hora al abrir una sesión, **antes** de transmitir, en vez de
+ * esperar el `CLOCK=` que viene en la respuesta a un frame de datos.
+ *
+ * La diferencia no es cosmética: hoy, con el RTC en arranque frío, los registros
+ * se guardan con `DATE=0101xx` y **ya salen mal grabados**. El `CLOCK=` del
+ * servidor llega tarde para esos — corrige el reloj, no los datos que ya se
+ * tomaron.
+ *
+ * ⚠ **ASUME modo AT**, igual que `info`/`set`/`save`.
+ *
+ * ⚠ **`set` NO se hace solo todavía, y es a propósito**: falta decidir si el
+ * módulo entrega hora LOCAL o UTC. El `+32` del ejemplo del manual son cuartos
+ * de hora de huso (UTC+8), así que el dato viene con huso — pero **quién lo
+ * aplica depende de la red**, y si el equipo estampara UTC donde el AVR estampa
+ * local, todos los registros quedarían corridos 3 horas contra los de FWDLGX.
+ * Eso rompería la comparación en campo justo donde no se vería: los datos serían
+ * plausibles y estarían mal.
+ */
+static void prvLteClock( bool bAplicar )
+{
+    char    pcRta[ 96 ];
+    int16_t sRet;
+
+    if( !prvLteListo() )
+    {
+        return;
+    }
+
+    sRet = drv_lte_at( "AT+CCLK?", pcRta, sizeof( pcRta ), 2000U );
+
+    if( sRet <= 0 )
+    {
+        xprintf( "sin respuesta: el modulo esta en modo AT? ('lte esc')\r\n" );
+        return;
+    }
+
+    xprintf( "%s\r\n", pcRta );
+
+    /*
+     * Formato: +CCLK: "20/06/19,20:05:19+32"
+     * El primer dígito de la fecha es el que sigue a la comilla; se busca ésa y
+     * no una posición fija, porque el eco y el CRLF corren todo.
+     */
+    const char *p = strchr( pcRta, '"' );
+
+    if( p == NULL )
+    {
+        p = strstr( pcRta, "+CCLK:" );
+        p = ( p != NULL ) ? ( p + 6 ) : NULL;
+
+        while( ( p != NULL ) && ( *p == ' ' ) )
+        {
+            p++;
+        }
+    }
+    else
+    {
+        p++;
+    }
+
+    if( ( p == NULL ) || ( strlen( p ) < 17U ) )
+    {
+        xprintf( "[!] no se pudo interpretar la respuesta\r\n" );
+        return;
+    }
+
+    /* "YY/MM/DD,hh:mm:ss" — se validan los separadores antes de creerle. */
+    if( ( p[2] != '/' ) || ( p[5] != '/' ) || ( p[8] != ',' ) ||
+        ( p[11] != ':' ) || ( p[14] != ':' ) )
+    {
+        xprintf( "[!] formato inesperado: se esperaba YY/MM/DD,hh:mm:ss\r\n" );
+        return;
+    }
+
+    #define DOSD( n )   ( ( uint8_t ) ( ( p[ n ] - '0' ) * 10 + ( p[ n + 1 ] - '0' ) ) )
+
+    RtcTimeType_t xHora;
+
+    memset( &xHora, 0, sizeof( xHora ) );
+    xHora.year  = DOSD( 0 );
+    xHora.month = DOSD( 3 );
+    xHora.day   = DOSD( 6 );
+    xHora.hour  = DOSD( 9 );
+    xHora.min   = DOSD( 12 );
+    xHora.sec   = DOSD( 15 );
+
+    #undef DOSD
+
+    xprintf( "hora del modulo : %02u/%02u/%02u %02u:%02u:%02u\r\n",
+             ( unsigned ) xHora.day, ( unsigned ) xHora.month, ( unsigned ) xHora.year,
+             ( unsigned ) xHora.hour, ( unsigned ) xHora.min, ( unsigned ) xHora.sec );
+
+    /* El huso que informa el módulo, en cuartos de hora. Se MUESTRA para poder
+       decidir si la hora que da es local o UTC — ver el comentario de arriba. */
+    const char *pcHuso = strpbrk( &p[ 17 ], "+-" );
+
+    if( pcHuso != NULL )
+    {
+        int iCuartos = atoi( pcHuso );
+
+        xprintf( "huso informado  : %+d cuartos de hora = UTC%+d\r\n",
+                 iCuartos, iCuartos / 4 );
+    }
+    else
+    {
+        xprintf( "huso informado  : (el modulo no lo dice)\r\n" );
+    }
+
+    RtcTimeType_t xActual;
+
+    if( drv_rtc_leer( &xActual ) )
+    {
+        xprintf( "hora del equipo : %02u/%02u/%02u %02u:%02u:%02u  (%s)\r\n",
+                 ( unsigned ) xActual.day, ( unsigned ) xActual.month,
+                 ( unsigned ) xActual.year, ( unsigned ) xActual.hour,
+                 ( unsigned ) xActual.min, ( unsigned ) xActual.sec,
+                 ( drv_rtc_validez() == rtcHORA_VALIDA ) ? "confiable"
+                                                         : "NO CONFIABLE" );
+    }
+
+    if( !bAplicar )
+    {
+        xprintf( "\r\npara ponerlo en hora: 'lte clock set'\r\n" );
+        return;
+    }
+
+    /* Un año menor al de compilación es imposible: la hora del módulo tampoco
+       sirve. Mismo criterio que `tkSys`. */
+    if( xHora.year < TKSYS_ANIO_COMPILACION )
+    {
+        xprintf( "[!] el modulo informa un anio anterior al de compilacion:\r\n" );
+        xprintf( "    no se aplica (todavia no sincronizo con la red?)\r\n" );
+        return;
+    }
+
+    if( drv_rtc_escribir( &xHora ) )
+    {
+        /* `drv_rtc_escribir()` escribe además la firma de la SRAM, así que esto
+           saca al MCP79410 de un arranque en frío. */
+        xprintf( "RTC puesto en hora desde el modulo. La hora ya es CONFIABLE.\r\n" );
+    }
+    else
+    {
+        xprintf( "ERROR: no se pudo escribir el RTC\r\n" );
+    }
+}
+//------------------------------------------------------------------------------
+/*
  * Muestra cómo está configurado el MÓDULO, leyéndolo de él.
  *
  * ⚠ **La IP, el puerto y la URL del servidor viven en el módulo, no en la
@@ -2909,19 +3087,42 @@ static void prvLteInfo( void )
         "AT+HTPURL?",   /* el prefijo del GET                     */
         "AT+HTPTP?",    /* GET o POST                             */
         /*
-         * ⚠ EL TIEMPO DE SILENCIO QUE DELIMITA CADA TRAMA.
+         * ⚠ LOS DOS CRITERIOS CON LOS QUE EL MÓDULO CIERRA UNA TRAMA.
          *
-         * En modo transparente el módulo no tiene terminador: arma el GET con lo
-         * que recibió cuando la serie se queda callada `ftime` milisegundos. O
-         * sea que **este número fija cuánto hay que esperar entre dos frames
-         * seguidos**; si se manda más rápido, los dos se le juntan en un solo
-         * GET y del otro lado llega basura.
+         * En modo transparente no hay terminador: el módulo arma el GET con lo
+         * que recibió cuando se cumple **lo que pase primero** —
          *
-         * Está en 250 ms (Pablo, 2026-09-11) y por eso `LTE_DATA_MS_ENTRE_FRAMES`
-         * son 500. Se consulta para poder verificarlo, no para ajustarse solo:
-         * si alguien lo cambia en el módulo, hay que ver el número acá.
+         *   `UARTFT`  el puerto se queda callado tantos ms   (10..500, def 50)
+         *   `UARTFL`  se juntaron tantos bytes               (5..4096, def 1024)
+         *
+         * `UARTFT` es el que fija cuánto hay que esperar entre dos frames
+         * seguidos: si se manda más rápido, los dos se le juntan en un solo GET
+         * y del otro lado llega un frame corrupto. Por eso existe
+         * `LTE_DATA_MS_ENTRE_FRAMES`.
+         *
+         * ⛔ **El comando NO se llama `AT+FTIME`** — eso devuelve `+CME ERROR:58`
+         * (no soportado), y así se descubrió en banco el 2026-09-18.
+         *
+         * `UARTFL` se consulta aunque hoy no apriete: con frames de ~150 bytes
+         * nunca se llega a 1024, pero **si alguien lo bajara por debajo del
+         * largo de un frame, el módulo lo partiría en dos GET** — y eso del lado
+         * del servidor se vería como frames corruptos sin que el log del equipo
+         * muestre nada raro.
          */
-        "AT+FTIME?",    /* el silencio que delimita la trama      */
+        "AT+UARTFT?",   /* el silencio que cierra la trama        */
+        "AT+UARTFL?",   /* el largo que tambien la cierra         */
+        /*
+         * ⭐ El RELOJ DEL MÓDULO, que se sincroniza por NTP contra la red.
+         *
+         * Formato: `+CCLK: "20/06/19,20:05:19+32"` — el `+32` son cuartos de
+         * hora de huso (32/4 = UTC+8).
+         *
+         * Es una fuente de hora **independiente del servidor y de la pila del
+         * MCP79410**, o sea la salida de fondo al porta pila intermitente: el
+         * equipo puede ponerse en hora solo al abrir una sesión, sin esperar la
+         * respuesta a un frame de datos y sin que nadie vaya al sitio.
+         */
+        "AT+CCLK?",     /* la hora del modulo, por NTP            */
     };
 
     if( !prvLteListo() )
@@ -3256,6 +3457,13 @@ static void cmdLte( void )
         if( strcmp( argv[ 1 ], "info" ) == 0 )
         {
             prvLteInfo();
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "clock" ) == 0 )
+        {
+            prvLteClock( ( ucArgs >= 2U ) && ( argv[ 2 ] != NULL ) &&
+                         ( strcmp( argv[ 2 ], "set" ) == 0 ) );
             return;
         }
 

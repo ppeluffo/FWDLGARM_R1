@@ -2682,8 +2682,78 @@ llega un frame corrupto.
 ⛔ **El AVR no tiene ninguna espera ahí.** Le funciona porque imprime el frame por la consola a 9600
 antes de mandarlo, y eso son **~150 ms de pausa accidental**. Depender de eso es depender de que el
 log esté encendido y de la velocidad de la terminal: en campo, con el log apagado, los frames se
-pegarían. Acá la espera es explícita — `LTE_DATA_MS_ENTRE_FRAMES`, 500 ms contra un `ftime` de 250
-(Pablo, 2026-09-11), y `lte info` consulta `AT+FTIME?` para poder verificarlo.
+pegarían. Acá la espera es explícita: `LTE_DATA_MS_ENTRE_FRAMES`, **500 ms**.
+
+✅ **Validado en banco el 2026-09-18**: se transmitieron 10 frames seguidos y **el servidor los
+recibió todos**. Era el riesgo principal del paso y quedó descartado.
+
+##### ⛔ El comando NO se llama `AT+FTIME`, y hay DOS criterios de empaquetado
+
+`AT+FTIME?` devuelve **`+CME ERROR:58`** (no soportado) — encontrado en banco el 2026-09-18. Los
+comandos reales son dos, y el módulo cierra la trama con **el que se cumpla primero**:
+
+| Comando | Qué mide | Rango | Default |
+|---|---|---|---|
+| **`AT+UARTFT`** | el silencio que cierra la trama | 10..500 ms | **50 ms** |
+| **`AT+UARTFL`** | el largo que también la cierra | 5..4096 B | 1024 B |
+
+⚠ **El default es 50 ms, no 250**, así que los 500 ms de pausa quedan con holgura de sobra — pero hay
+que **leer el valor real** con `lte info`, que ahora consulta los dos.
+
+⚠ **`UARTFL` importa aunque hoy no apriete**: con frames de ~150 bytes nunca se llega a 1024, pero
+**si alguien lo bajara por debajo del largo de un frame, el módulo lo partiría en dos GET** — y eso
+del lado del servidor se vería como frames corruptos sin que el log del equipo muestre nada raro.
+
+#### ⛔ "El servidor contestó VACÍO" no es lo mismo que "contestó otra cosa"
+
+Primera corrida de `lte data` contra el servidor real (2026-09-18): los 10 frames llegaron, y la
+respuesta al `CLASS=DATA` fue **`<html></html>`** — sin un solo `CLASS=`.
+
+Eso **no es un fallo del enlace**: el servidor recibió el GET y contestó. Lo que rechazó es el
+**contenido** del frame. Por eso `wan_data_rta_t` separa los dos casos, que mandan a mirar lugares
+opuestos:
+
+| | Qué significa | Dónde mirar |
+|---|---|---|
+| **`wanDATA_VACIA`** | contestó sin ningún `CLASS=` | **el log del SERVIDOR** — el frame llegó |
+| `wanDATA_OTRA_CLASE` | contestó con un `CLASS=` que no es `DATA` | cruce de respuestas (la del frame anterior) |
+
+⭐ **El firmware hizo lo correcto: cortó el vaciado y NO borró nada.** Los 10 quedaron sin confirmar y
+se reintentan — que es exactamente para lo que el `pop()` se separó del `peek()`. Si el servidor no
+confirma, seguir mandando cientos de registros que no se van a poder borrar sólo gasta batería y
+tráfico.
+
+⚠ **El sospechoso número uno es la FECHA.** Los frames de esa corrida salieron con `DATE=010101`: el
+MCP79410 estaba en arranque frío —el porta pila otra vez— y **el servidor indexa la base por la fecha
+del frame**. Un registro de 2001 no tiene dónde entrar.
+
+Y ahí hay algo que el `CLOCK=` del servidor **no puede arreglar**: llega en la respuesta a un frame de
+datos, o sea **después** de que esos registros ya se grabaron mal. Corrige el reloj, no los datos ya
+tomados. De ahí la sección siguiente.
+
+#### ⭐ El módulo tiene reloj NTP: `lte clock`
+
+`AT+CCLK?` devuelve la hora que el módulo sincroniza contra la red (`+CCLK: "20/06/19,20:05:19+32"`,
+con el huso en cuartos de hora; el período de recalibración es `AT+NTPTM`, en minutos).
+
+Es **una fuente de hora independiente del servidor Y de la pila del MCP79410**, o sea la salida de
+fondo al porta pila intermitente: el equipo puede ponerse en hora **al abrir la sesión, antes de
+medir**, en vez de esperar la respuesta a un frame de datos.
+
+`lte clock` la muestra junto a la del equipo; `lte clock set` la aplica — y como `drv_rtc_escribir()`
+escribe la firma de la SRAM, eso **saca al chip del arranque en frío sin que nadie vaya al sitio**.
+
+⚠ **`set` NO se hace solo todavía, y es a propósito**: falta decidir si el módulo entrega hora **local
+o UTC**. Si el equipo estampara UTC donde el AVR estampa local, **todos los registros quedarían
+corridos 3 horas contra los de FWDLGX** — plausibles y mal, que es el peor desenlace. Por eso el
+comando **muestra el huso que informa el módulo**: con eso se decide y recién ahí se automatiza.
+
+Se aplica el mismo chequeo que `tkSys`: **un año anterior al de compilación se rechaza** (el módulo
+todavía no sincronizó con la red). `TKSYS_ANIO_COMPILACION` pasó a `tkSys.h` porque ahora lo usan los
+dos lugares con idéntico criterio.
+
+Validado sin hardware: **9 casos** de parseo, incluido el ejemplo literal del manual y los cuatro que
+tienen que rechazarse.
 
 #### La respuesta a `DATA` trae órdenes: por ahora `CLOCK` y `RESET`
 
@@ -2743,7 +2813,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.46"        /* = VER                                 */
+#define FW_VERSION  "0.0.47"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -2768,11 +2838,36 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | 5d | Los modos continuo / discreto / mixto | |
 | 6 | Modbus | |
 | 7 | Consigna (`tkCtlPres`) | |
+| 7b | ⏳ **`tkFlow`/flowcontrol** — volvió al alcance el 2026-09-12; necesita el 2b | |
 | 8 | Watchdog cooperativo + `tkCtl` definitivo | |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo | |
 
-**Fuera de alcance por decisión de Pablo (2026-09-07)**: `tkFlow`/flowcontrol. ✅ Los modos `PWR_RTU`
-y `PWR_SILENT` **entraron el 2026-09-12**, a pedido de Pablo — ver la sección de abajo.
+✅ Los modos `PWR_RTU` y `PWR_SILENT` **entraron el 2026-09-12** — ver la sección de los cinco modos.
+
+### ⭐ El objetivo es SUSTITUIR a FWDLGX, así que el criterio es PARIDAD FUNCIONAL
+
+Dicho por Pablo el **2026-09-12**: *"la idea que tengo es terminar con este firmware y probarlo en
+campo para poder estar seguros de sustituir al FWDLGX sin problemas. Luego vemos si agregamos mqtt.
+Aún falta consignas, modbus, flowcontrol, etc."*
+
+Dos consecuencias que cambian lo que estaba anotado:
+
+1. ⚠ **`tkFlow`/flowcontrol vuelve al alcance.** Estaba afuera desde el 2026-09-07; si el equipo tiene
+   que reemplazar al AVR en campo, tiene que hacer lo mismo que él. **Depende del paso 2b** (el
+   caudal), que es su insumo.
+2. ⚠ **Entonces el `FH` deja de ser una omisión permanente.** Hoy mandamos cinco hashes y el servidor
+   pide `FLOWC` en todas las sesiones; cuando flowcontrol exista, se manda el sexto y eso se termina.
+   **La regla de que la FSM pase a transmitir datos aunque queden bloques pedidos sigue valiendo
+   igual** —es lo correcto ante cualquier bloque que no se pueda configurar—, pero deja de ser el
+   único motivo por el que la configuración nunca cierra.
+
+⏳ **MQTT queda para DESPUÉS de campo.** El módulo lo soporta nativo (sección 5.4 de su manual, desde
+la versión de firmware 1.3.25) y `wan_frame.c` ya está desacoplado del transporte —arma strings, no
+habla con el modem—, así que el hash y los frames sobrevivirían intactos. Lo que cambia es el modelo
+de sesión: HTTP es request/response síncrono y MQTT es asíncrono. **Rinde en `RTU` con alimentación
+externa, no en `DISCRETO`**: lo que aporta es que el servidor pueda *empujar* órdenes en segundos en
+vez de esperar a que el equipo pregunte. A batería, una sesión MQTT persistente no cierra por
+consumo.
 
 ### ✅ Los cinco modos de energía: entran `RTU` y `SILENT` (2026-09-12)
 

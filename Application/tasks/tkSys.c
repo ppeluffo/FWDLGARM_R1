@@ -41,13 +41,6 @@ static TickType_t xTicksProximoPoll;
    del equipo, y por eso se cuenta. */
 static uint32_t ulDescartadosRtu = 0UL;
 
-/*
- * El año en que se compiló este binario, en dos dígitos. `__DATE__` tiene la
- * forma "Sep  8 2026", así que los dos últimos caracteres son el año.
- */
-#define TKSYS_ANIO_COMPILACION  ( ( uint8_t ) ( ( ( __DATE__[ 9 ] - '0' ) * 10 ) + \
-                                                  ( __DATE__[ 10 ] - '0' ) ) )
-
 //------------------------------------------------------------------------------
 /*
  * ⚠ EL CANAL DEL INA NO ES EL NÚMERO DE LA ENTRADA: EL MAPEO ESTÁ INVERTIDO.

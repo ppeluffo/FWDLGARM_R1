@@ -36,6 +36,23 @@
 #ifndef APPLICATION_TASKS_TKSYS_H_
 #define APPLICATION_TASKS_TKSYS_H_
 
+/*------------------------------------------------------------------------------
+ * El año en que se compiló este binario, en dos dígitos. `__DATE__` tiene la
+ * forma "Sep  8 2026", así que los dos últimos caracteres son el año.
+ *
+ * ⭐ **No es una heurística del tipo "el año parece viejo": es una
+ * imposibilidad.** Una muestra no puede ser anterior a la compilación del
+ * firmware que la tomó, y por lo tanto tampoco puede serlo una hora que alguien
+ * proponga como válida. A diferencia de cualquier constante de fecha, esto **no
+ * envejece**: se recalcula en cada build.
+ *
+ * Vive en el header porque lo usan dos lugares con el mismo criterio: `tkSys`
+ * al estampar una muestra, y `tkCmd` al aceptar la hora que informa el módulo
+ * LTE (`lte clock set`).
+ *----------------------------------------------------------------------------*/
+#define TKSYS_ANIO_COMPILACION  ( ( uint8_t ) ( ( ( __DATE__[ 9 ] - '0' ) * 10 ) + \
+                                                  ( __DATE__[ 10 ] - '0' ) ) )
+
 #include <stdbool.h>
 #include <stdint.h>
 

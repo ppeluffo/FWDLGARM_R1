@@ -1025,7 +1025,10 @@ wan_data_rta_t wan_frame_data_rta( const char *pcRta, wan_data_ordenes_t *pxOrde
 
     if( strstr( pcRta, "CLASS=DATA" ) == NULL )
     {
-        return wanDATA_OTRA_CLASE;
+        /* Sin ningún `CLASS=` el servidor contestó pero no dijo nada: ver el
+           comentario del enum, porque la causa es otra. */
+        return ( strstr( pcRta, "CLASS=" ) == NULL ) ? wanDATA_VACIA
+                                                     : wanDATA_OTRA_CLASE;
     }
 
     if( pxOrdenes == NULL )

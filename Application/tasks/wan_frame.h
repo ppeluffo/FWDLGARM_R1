@@ -258,7 +258,23 @@ wan_conf_rta_t wan_conf_aplicar( wan_bloque_t eBloque, const char *pcRta );
  *----------------------------------------------------------------------------*/
 typedef enum {
     wanDATA_ACEPTADO = 0,   /* el servidor contestó `CLASS=DATA`              */
-    wanDATA_OTRA_CLASE,     /* contestó algo, pero no es de este frame        */
+    /*
+     * ⚠ **`VACIA` y `OTRA_CLASE` apuntan a causas OPUESTAS**, y por eso están
+     * separadas (banco, 2026-09-18):
+     *
+     *  - **VACIA**: llegó `<html></html>` sin un solo `CLASS=`. El servidor
+     *    **recibió y contestó**, o sea que el enlace y el GET están bien: lo
+     *    que rechazó es el CONTENIDO del frame. Hay que mirar el log del
+     *    servidor, no el del equipo.
+     *  - **OTRA_CLASE**: contestó con un `CLASS=` que no es `DATA`. Eso es un
+     *    cruce de respuestas — típicamente la respuesta demorada del frame
+     *    anterior.
+     *
+     * Confundirlas manda a buscar al lugar equivocado, que es exactamente lo
+     * que ya costó una tarde con el `CSQ 31`.
+     */
+    wanDATA_VACIA,
+    wanDATA_OTRA_CLASE,
     wanDATA_SIN_RESPUESTA
 } wan_data_rta_t;
 
