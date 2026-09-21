@@ -3058,8 +3058,8 @@ todavía para no mover dos cosas a la vez.
 
 ### 🔨 Paso 5d: `tkWan`, la máquina de estados — el equipo transmite SOLO
 
-`Application/tasks/tkWan.{h,c}`, portada de `FWDLGX_tkWAN.c`. **Escrita el 2026-09-21, sin probar
-todavía en banco.** Con esto el equipo deja de depender de que alguien tipee `lte data`: abre la
+`Application/tasks/tkWan.{h,c}`, portada de `FWDLGX_tkWAN.c`. **Escrita el 2026-09-21; la primera corrida en banco encontró
+un bug y está corregido — ver abajo.** Con esto el equipo deja de depender de que alguien tipee `lte data`: abre la
 sesión, se configura, transmite y se apaga por su cuenta.
 
 Los cuatro estados son los del AVR, y **cualquier fallo vuelve a `APAGADO`**:
@@ -3113,6 +3113,77 @@ reestablece: apaga, prende, reentra en modo AT, reespera el registro y rehace el
 ⚠ **Lo que NO cambió es el borrado**: un vaciado interrumpido deja los registros sin confirmar en la
 ventana, igual que antes. Eso ya estaba resuelto en el 5c y es por lo que `peek()` y `pop()` están
 separados.
+
+#### ⛔ Primera corrida: el `AT+ENTM` NUNCA SE MANDÓ (banco, 2026-09-21)
+
+La FSM arrancó sola y llegó hasta el `PING`, y ahí se quedó dando vueltas:
+
+```
+tkWan:: OFFLINE
+tkWan:: IMEI 860909055244702, senal 53 dBm negativos
+-> ID=860909055244702&HW=SPQ_ARM_R1&TYPE=FWDLGARM&VER=0.0.57&CLASS=PING
+<- ID=860909055244702&HW=SPQ_ARM_R1&TYPE=FWDLGARM&VER=0.0.57&CLASS=PING
++CME ERROR:58
+tkWan:: sin PONG: apago y reintento despues
+```
+
+**La causa es de una línea, y el `(void)` la tapaba:**
+
+```c
+( void ) drv_lte_at( "AT+ENTM", NULL, 0U, 0U );     /* vuelta a transparente */
+```
+
+`drv_lte_at()` **rechaza `pcRta == NULL` devolviendo −1 antes de escribir un byte**. O sea que el
+comando no salió nunca y el módulo siguió en **modo AT** — donde no transmite nada.
+
+##### ⭐ La firma que lo identifica en un vistazo: EL ECO
+
+Vale la pena aprenderla, porque el síntoma manda a buscar a la red y el problema está en el firmware:
+
+| Lo que se ve | Qué significa |
+|---|---|
+| **la respuesta es el frame IDÉNTICO al que se mandó** | el módulo **ecoa** (`AT+E`), y eso **sólo pasa en modo comando**: en transparente los bytes se van a la red |
+| **`+CME ERROR:58`** | *comando no soportado* — `ID=…&CLASS=PING` no es un AT válido. Es el mismo código que dio `AT+FTIME?` |
+
+⚠ **`+CME ERROR:58` NO es "no registrado en la red"; ése es el `50`** (el que devuelve `AT+CIP?`
+cuando no hay atache — ver el diagnóstico del 2026-09-09). Confundirlos manda a mirar la cobertura
+cuando el problema es de modo.
+
+Y hay una prueba adicional en la misma traza: `wan_sesion_identificar()` había devuelto **true**, o
+sea que `AT+CIP?` contestó con IP. El módulo **estaba** atacheado.
+
+**Corregido en `prvSalirDeModoAt()`**, que manda el `AT+ENTM` con buffer, **exige el `OK`** y aborta
+la sesión si no lo ve. Mandar un frame sin haber salido de modo AT no puede funcionar nunca, así que
+seguir adelante sólo gasta los cinco intentos de PING.
+
+#### ⭐ El PING se reintenta, y los reintentos SON la espera del atache
+
+Criterio de Pablo (2026-09-21): *"En el AVR se reintentan 3 PINGS con un espacio entre ellos. Esto
+hace que los primeros puedan fallar pero luego el modem se atachea a la red y el ultimo conecta"*.
+
+Portado de `wan_process_frame_ping()`, que usa **`PING_TRYES = 5`** — se dejaron los cinco del AVR.
+
+⚠ **No hay espera entre intentos, y no hace falta: el espaciado lo da el propio timeout.** Cada
+intento se queda hasta `LTE_PING_TIMEOUT_MS` (15 s) esperando el PONG, así que cinco son **75 s de
+ventana**. El AVR hace lo mismo con su lazo de 15 esperas de 1 s adentro, y su comentario lo dice:
+*"intento durante 2 minutos mandando un ping cada 10s"*.
+
+**Esto NO reemplaza al chequeo de `AT+CIP?`**, y las dos esperas son distintas aunque miren el mismo
+fenómeno: el `CIP` evita gastar el ciclo entero —incluido encender el modem— cuando el módulo ni
+siquiera tiene IP; los PINGs cubren el tramo en que ya la tiene pero la red todavía no lo deja salir.
+El AVR también tiene las dos.
+
+#### ⚠ Un fallo impone una espera larga, aunque el modo sea CONTINUO
+
+`WAN_SEG_TRAS_FALLO`, **120 s**. En la corrida de arriba se vio el problema en vivo: en `CONTINUO` la
+espera de `APAGADO` es de **1 segundo**, así que el equipo se pasó la tarde prendiendo y apagando el
+modem sin ninguna chance de converger.
+
+Y no es sólo consumo: **cada ciclo le corta la alimentación a un módulo que estaba arrancando**, que
+es exactamente lo que puede corromperle la flash interna (ver la advertencia de `drv_lte_power()`).
+
+Los cinco caminos de error pasan ahora por `prvFalloVolverAApagado()`, que marca el fallo además de
+volver al estado. En `DISCRETO` y `MIXTO` no cambia nada: ahí la espera normal ya es larga.
 
 #### Qué hace cada modo, y dónde se decide
 
@@ -3219,7 +3290,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.57"        /* = VER                                 */
+#define FW_VERSION  "0.0.58"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 

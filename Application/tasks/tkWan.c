@@ -24,6 +24,7 @@ StaticTask_t tkWan_TCB;
 StackType_t  tkWan_Stack[ tkWan_STACK_SIZE ];
 
 static wan_estado_t eEstado    = wanAPAGADO;
+static bool         bSesionFallo = false;   /* la última sesión terminó mal */
 static bool         bHayEnlace = false;
 static bool         bMatada    = false;
 
@@ -47,6 +48,21 @@ static bool bDiscarYa = true;
    de `prvEstadoOffline()`. */
 #define WAN_INTENTOS_RED              3U
 #define WAN_MS_ENTRE_RED          5000U
+
+/* Los intentos de PING. Es el `PING_TRYES` del AVR, y con los 15 s de timeout
+   de cada uno dan **75 s de ventana de atache**. Ver `prvPingConReintentos()`. */
+#define WAN_INTENTOS_PING             5U
+
+/*
+ * ⚠ Cuánto esperar cuando una sesión FALLÓ, aun en modo continuo.
+ *
+ * Sin esto el equipo **martilla**: en `CONTINUO` la espera de `APAGADO` es de
+ * 1 s, así que un módulo que todavía no se atachó se prende y se apaga una vez
+ * por minuto sin ninguna chance de converger — y encima cada ciclo le corta la
+ * alimentación a un módulo que estaba arrancando, que es justo lo que puede
+ * corromperle la flash. Se vio en banco el 2026-09-21.
+ */
+#define WAN_SEG_TRAS_FALLO          120UL
 
 /* A cuánto se espacia el equipo cuando el servidor no lo reconoce. Es el valor
    del AVR: una hora. */
@@ -1314,6 +1330,13 @@ static void prvEstadoApagado( void )
                      ( unsigned long ) ulEspera );
             prvEsperar( ulEspera );
         }
+        else if( bSesionFallo )
+        {
+            /* Continuo, PERO la sesión anterior falló: ver WAN_SEG_TRAS_FALLO. */
+            xprintf( "tkWan:: la sesion anterior fallo: espero %lu s antes de reintentar\r\n",
+                     ( unsigned long ) WAN_SEG_TRAS_FALLO );
+            prvEsperar( WAN_SEG_TRAS_FALLO );
+        }
         else
         {
             /* Modo continuo: una pausa corta para no girar. */
@@ -1321,8 +1344,91 @@ static void prvEstadoApagado( void )
         }
     }
 
-    bDiscarYa = false;
-    eEstado   = wanOFFLINE;
+    bDiscarYa    = false;
+    bSesionFallo = false;
+    eEstado      = wanOFFLINE;
+}
+//------------------------------------------------------------------------------
+/*
+ * Vuelve a `APAGADO` **marcando que fue por un fallo**, para que la espera de
+ * allá sea la larga y no la de un ciclo normal. Ver `WAN_SEG_TRAS_FALLO`.
+ */
+static void prvFalloVolverAApagado( const char *pcMotivo )
+{
+    xprintf( "tkWan:: %s: apago y reintento despues\r\n", pcMotivo );
+    bSesionFallo = true;
+    bHayEnlace   = false;
+    eEstado      = wanAPAGADO;
+}
+//------------------------------------------------------------------------------
+/*
+ * Saca al módulo del modo comando y **verifica que salió**.
+ *
+ * ⚠ Devuelve false sólo si el módulo contestó algo que no es `OK`, o no
+ * contestó: en los dos casos no se puede afirmar que esté en transparente, y
+ * mandar un frame ahí es tirar la sesión (ver el comentario del llamador).
+ */
+static bool prvSalirDeModoAt( void )
+{
+    static char pcRta[ 64 ];
+
+    int16_t sRet = drv_lte_at( "AT+ENTM", pcRta, sizeof( pcRta ), 2000U );
+
+    if( ( sRet > 0 ) && ( strstr( pcRta, "OK" ) != NULL ) )
+    {
+        vTaskDelay( pdMS_TO_TICKS( 500 ) );     /* que el cambio se asiente */
+        return true;
+    }
+
+    xprintf( "tkWan:: el modulo NO confirmo el paso a transparente (AT+ENTM sin OK)\r\n" );
+    xprintf( "        en modo comando no transmite: apago y reintento despues\r\n" );
+    return false;
+}
+//------------------------------------------------------------------------------
+/*
+ * ⭐ EL PING SE REINTENTA, Y LOS REINTENTOS SON LA ESPERA DEL ATACHE
+ *
+ * Criterio de Pablo (2026-09-21), que es el del AVR: *"se reintentan PINGS con
+ * un espacio entre ellos. Esto hace que los primeros puedan fallar pero luego
+ * el modem se atachea a la red y el ultimo conecta"*.
+ *
+ * ⚠ **No hace falta una espera entre intentos, y por eso no la hay:** el
+ * espaciado lo da el propio timeout. Cada intento se queda hasta
+ * `LTE_PING_TIMEOUT_MS` (15 s) esperando el PONG, así que cinco intentos son
+ * **75 segundos de ventana** para que el módulo termine de campar en la red.
+ * Es exactamente la estructura de `wan_process_frame_ping()` del AVR
+ * —`PING_TRYES = 5`, con su lazo de 15 esperas de 1 s adentro—, que documenta
+ * la intención como *"intento durante 2 minutos mandando un ping cada 10 s"*.
+ *
+ * ⚠ Esto NO reemplaza al chequeo de `AT+CIP?`: aquél evita gastar el ciclo
+ * entero cuando el módulo ni siquiera tiene IP, y éste cubre el tramo en que ya
+ * la tiene pero la red todavía no lo deja salir. Son dos esperas distintas
+ * sobre el mismo fenómeno, y el AVR también tiene las dos.
+ */
+static bool prvPingConReintentos( void )
+{
+    uint8_t i;
+
+    for( i = 0U; i < WAN_INTENTOS_PING; i++ )
+    {
+        if( i > 0U )
+        {
+            xprintf( "tkWan:: PING, intento %u de %u\r\n",
+                     ( unsigned ) ( i + 1U ), ( unsigned ) WAN_INTENTOS_PING );
+        }
+
+        if( wan_sesion_ping_ok() )
+        {
+            return true;
+        }
+
+        if( bMatada )
+        {
+            return false;
+        }
+    }
+
+    return false;
 }
 //------------------------------------------------------------------------------
 /*
@@ -1360,27 +1466,47 @@ static void prvEstadoOffline( void )
 
     if( !bAt )
     {
-        xprintf( "tkWan:: no se pudo entrar en modo AT: apago y reintento despues\r\n" );
-        eEstado = wanAPAGADO;
+        prvFalloVolverAApagado( "no se pudo entrar en modo AT" );
         return;
     }
 
     /* ---- quiénes somos, si hay red, y qué hora es ---- */
     if( !wan_sesion_identificar() )
     {
-        xprintf( "tkWan:: el modem no llego a registrarse: apago y reintento despues\r\n" );
-        eEstado = wanAPAGADO;
+        prvFalloVolverAApagado( "el modem no llego a registrarse" );
         return;
     }
 
-    ( void ) drv_lte_at( "AT+ENTM", NULL, 0U, 0U );     /* vuelta a transparente */
-    vTaskDelay( pdMS_TO_TICKS( 500 ) );
+    /*
+     * ---- De vuelta a TRANSPARENTE, y VERIFICADO ----
+     *
+     * ⛔ Acá había un bug que costó la primera corrida en banco (2026-09-21):
+     * esta llamada pasaba `NULL` como buffer de respuesta, y `drv_lte_at()`
+     * **rechaza `pcRta == NULL` devolviendo -1 sin escribir un byte**. O sea
+     * que el `AT+ENTM` NUNCA SE MANDÓ, el `(void)` se comía el error y el
+     * módulo seguía en modo comando.
+     *
+     * El síntoma es engañoso y conviene saber reconocerlo: el frame del PING
+     * **vuelve ecoado** —con `AT+E` activo el módulo ecoa lo que recibe en modo
+     * comando— seguido de `+CME ERROR:58`, o sea *comando no soportado*, porque
+     * `ID=...&CLASS=PING` no es un AT válido. Desde afuera parece un problema
+     * de red, y no lo es: **en modo transparente el módulo NO ecoa nada**, manda
+     * los bytes a la red. El eco es la firma de que seguimos en modo comando.
+     *
+     * Por eso ahora se verifica el `OK` y se aborta si no está: mandar el PING
+     * sin haber salido de modo AT no puede funcionar nunca, y se llevaría los
+     * cinco intentos puestos.
+     */
+    if( !prvSalirDeModoAt() )
+    {
+        prvFalloVolverAApagado( "el modulo sigue en modo comando" );
+        return;
+    }
 
     /* ---- ¿está el servidor del otro lado? ---- */
-    if( !wan_sesion_ping_ok() )
+    if( !prvPingConReintentos() )
     {
-        xprintf( "tkWan:: sin PONG: apago y reintento despues\r\n" );
-        eEstado = wanAPAGADO;
+        prvFalloVolverAApagado( "sin PONG en los 5 intentos" );
         return;
     }
 
@@ -1425,9 +1551,7 @@ static void prvEstadoOnlineData( void )
          * vuelve al principio— porque un módulo a mitad de una sesión fallida
          * está en un estado que desde afuera no se puede saber.
          */
-        xprintf( "tkWan:: el vaciado fallo: el enlace se cayo. Vuelvo a APAGADO.\r\n" );
-        bHayEnlace = false;
-        eEstado    = wanAPAGADO;
+        prvFalloVolverAApagado( "el vaciado fallo: el enlace se cayo" );
         return;
     }
 
