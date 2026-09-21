@@ -3056,10 +3056,10 @@ los nombres quedan raros.
 si la pila falló, todo el estado de la SRAM es sospechoso, no sólo la FAT. Queda anotado; no se tocó
 todavía para no mover dos cosas a la vez.
 
-### 🔨 Paso 5d: `tkWan`, la máquina de estados — el equipo transmite SOLO
+### ✅ Paso 5d: `tkWan`, la máquina de estados — el equipo transmite SOLO
 
-`Application/tasks/tkWan.{h,c}`, portada de `FWDLGX_tkWAN.c`. **Escrita el 2026-09-21; la primera corrida en banco encontró
-un bug y está corregido — ver abajo.** Con esto el equipo deja de depender de que alguien tipee `lte data`: abre la
+`Application/tasks/tkWan.{h,c}`, portada de `FWDLGX_tkWAN.c`. **Validada en banco el 2026-09-21** (`0.0.58`): la primera
+corrida encontró un bug, y con él corregido el equipo hizo la vuelta entera solo. Con esto el equipo deja de depender de que alguien tipee `lte data`: abre la
 sesión, se configura, transmite y se apaga por su cuenta.
 
 Los cuatro estados son los del AVR, y **cualquier fallo vuelve a `APAGADO`**:
@@ -3272,6 +3272,86 @@ Release antes de campo.
 verdad. Hoy no aprieta —las cuatro tareas son estáticas y no tocan el heap— pero FatFs y cualquier
 cosa que entre después sí lo usan.
 
+### ✅ Paso 5d VALIDADO EN BANCO (2026-09-21): el equipo transmite SOLO
+
+⭐ **El criterio de aceptación era una vuelta entera sin que nadie tipeara nada**, y se cumplió con
+`0.0.58`:
+
+```
+tkWan arrancando (modo CONTINUO)
+tkWan:: APAGADO
+tkWan:: OFFLINE
+tkWan:: IMEI 860909055244702, senal 67 dBm negativos
+-> …&CLASS=PING
+<- "<html>CLASS=PONG</html>"
+
+tkWan:: ONLINE_CONFIG
+-> …&CLASS=CONF_ALL&UID=…&ICCID=…&CSQ=…&WDG=…&BH=…&AH=…&CH=…&MH=…&PH=…
+<- "<html>CLASS=CONF_ALL&FLOWC</html>"
+el servidor pide reconfigurar: FLOWC
+  (FLOWC se pide SIEMPRE porque no mandamos su hash: se ignora)
+no cambio nada: no se graba la EEPROM
+
+tkWan:: ONLINE_DATA
+vaciando la ventana: 48 registros
+…
+OK: 48 de 48 confirmados y borrados; quedan 0
+transmitidos 48, quedan 1 en la ventana
+```
+
+| Criterio | Resultado |
+|---|---|
+| ⭐ **La vuelta entera, sola** | ✅ `APAGADO → OFFLINE → ONLINE_CONFIG → ONLINE_DATA` sin intervención |
+| El `PING` | ✅ **al primer intento** — los 5 reintentos no hicieron falta esta vez |
+| ⭐ **El hash sigue cerrando dentro de la FSM** | ✅ el servidor pide **sólo `FLOWC`**, igual que a mano en el 5b |
+| El vaciado | ✅ **48 de 48** en 5 bloques de 10 |
+| Los acuses rezagados | ✅ 3-4 descartados por bloque — el mecanismo del 5c anda igual acá |
+| El `count` congelado | ✅ `transmitidos 48, quedan 1`: el que `tkSys` grabó durante el vaciado |
+| El progreso `OK: N de M` | ✅ pedido de Pablo el 2026-09-18, validado de paso |
+| En `CONTINUO` no reabre la sesión | ✅ queda en `ONLINE_DATA` esperando `timerpoll` |
+
+#### Los números de RAM, con el equipo corriendo
+
+```
+heap libre   : 2992 bytes
+  tkCmd :  888 de 1024        tkCtl :  497 de 512
+  tkSys :  814 de 1024        tkWan : 1784 de 2048   (estado: ONLINE_DATA)
+```
+
+**`tkWan` usó 264 palabras de las 2048**, o sea el 13 %, y es la que más trabaja: arma frames, habla
+con FatFs y con el modem. Los stacks quedaron holgados **a propósito** (ver arriba), y como Debug con
+`-O0` usa **más** stack que Release, estos números son el techo.
+
+⏳ **Corrección del pendiente del heap**: decía que había que subir `configTOTAL_HEAP_SIZE` de 3000 y
+**el dato real lo desmiente como urgencia** — quedan **2992 de 3000 libres**, o sea que se usaron
+**8 bytes**: las cuatro tareas son estáticas, FatFs está con `_USE_LFN = 0` y nada más pide memoria.
+Sigue siendo razonable subirlo cuando se toque CubeMX, pero no bloquea nada.
+
+#### ⚠ Un frame que se ve CORTADO puede ser la terminal, no el firmware
+
+Pasó en esta misma corrida y costó una revisión del código: el `CONF_ALL` aparecía terminando justo
+después del `ICCID`, sin los cinco hashes. **Era el ajuste de línea del minicom** (Pablo,
+2026-09-21): sin *line wrap*, lo que excede el ancho de la terminal no se muestra.
+
+⭐ **Lo que lo descartó sin tocar nada fue la respuesta del servidor**: contestó pidiendo **sólo
+`FLOWC`**, y eso únicamente puede pasar si los cinco hashes llegaron y coincidieron. Es otra vez el
+mismo método —**la otra punta es la que cierra el diagnóstico**— aplicado al revés: acá sirvió para
+*descartar* un bug en vez de encontrarlo.
+
+⚠ No confundirlo con el truncamiento **real** que sí existe y está documentado más arriba: `xprintf`
+formatea en 160 bytes y corta de verdad. La diferencia es dónde mirar: si el frame viaja bien, es la
+terminal; si el servidor lo rechaza, es el buffer.
+
+#### ⏳ Lo que esta corrida NO probó
+
+Todo lo anterior es el camino feliz en modo `CONTINUO`. Quedan sin ejercitar:
+
+- **`kill wan`** y el trabajo manual del módulo después.
+- **Los lotes de la microSD dentro de la FSM** — la ventana nunca llegó al 90 %, así que no había
+  lotes que mandar. El camino está validado a mano en el 5c.
+- **Los modos `DISCRETO`, `MIXTO`, `RTU` y `SILENT`** en la FSM (`BH` de referencia: `0xDF` y `0xD4`).
+- **El camino de fallo con el backoff de 120 s**, que entró en esta misma versión.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3312,7 +3392,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5b-1** | `CONF_ALL`: los hashes y qué pide el servidor | ✅ **validado el 2026-09-11** |
 | **5b-2** | Los `CONF_*`: parsear y aplicar la configuración | ✅ **validado el 2026-09-11** — el hash cierra en la 2.ª sesión |
 | **5c** | Los frames de datos y el vaciado | ✅ **VALIDADO el 2026-09-21**: ventana y lotes |
-| **5d** | **`tkWan`: la FSM. El equipo transmite solo** | 🔨 **escrita, sin probar** |
+| **5d** | **`tkWan`: la FSM. El equipo transmite solo** | ✅ **VALIDADO el 2026-09-21** |
 | 6 | Modbus | |
 | 7 | Consigna (`tkCtlPres`) | |
 | 7b | ⏳ **`tkFlow`/flowcontrol** — volvió al alcance el 2026-09-12; necesita el 2b | |
