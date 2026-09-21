@@ -313,7 +313,11 @@ uint16_t wan_frame_datos( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr )
         {
             if( xCfgModbus.xCanal[ i ].bEnabled )
             {
-                FRAME_APPEND( "&%s=%0.3f", xCfgModbus.xCanal[ i ].pcName, pxDr->fModbus[ i ] );
+                float fValor = ( pxDr->usInvalidos & ( uint16_t ) ( dataINVALIDO_MODBUS0 << i ) )
+                               ? WAN_CENTINELA_SIN_DATO
+                               : pxDr->fModbus[ i ];
+
+                FRAME_APPEND( "&%s=%0.3f", xCfgModbus.xCanal[ i ].pcName, fValor );
             }
         }
     }

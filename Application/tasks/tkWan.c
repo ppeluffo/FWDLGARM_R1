@@ -1205,7 +1205,7 @@ static void prvMatarse( void )
  * continuo, y lo único que lo distingue es que descarta lo que no puede
  * transmitir. Acá se hace explícito en vez de depender de un default.
  */
-static uint32_t prvSegundosApagado( void )
+uint32_t wan_segundos_apagado( void )
 {
     switch( xCfgBase.ePwrModo )
     {
@@ -1220,8 +1220,25 @@ static uint32_t prvSegundosApagado( void )
             break;      /* abajo */
 
         case PWR_SILENT:
+            /*
+             * ⛔ SILENT tiene que devolver algo DISTINTO DE CERO, y esto salió
+             * recién al enganchar el Modbus (2026-09-21).
+             *
+             * `tkWan` nunca consulta esta función en SILENT —se queda en su lazo
+             * de `APAGADO`— así que el `0` de antes no le hacía nada. Pero
+             * `tkSys` la usa para otra pregunta: **"¿el equipo va a dormir hasta
+             * el próximo ciclo?"**, y con un 0 dejaba el riel del caudalímetro
+             * **encendido para siempre** en el único modo donde el equipo está
+             * a batería y no transmite nunca. Justo al revés de lo que hace
+             * falta.
+             *
+             * Devolver `timerdial` es literalmente cierto —en SILENT el modem va
+             * a seguir apagado ese tiempo y todos los que vengan— y es lo que
+             * las dos preguntas necesitan.
+             */
+            return ( uint32_t ) xCfgBase.usTimerDial;
+
         default:
-            /* No debería llegar: SILENT ni entra al estado APAGADO. */
             return 0UL;
     }
 
@@ -1322,7 +1339,7 @@ static void prvEstadoApagado( void )
 
     if( !bDiscarYa )
     {
-        uint32_t ulEspera = prvSegundosApagado();
+        uint32_t ulEspera = wan_segundos_apagado();
 
         if( ulEspera > 0UL )
         {
@@ -1555,7 +1572,7 @@ static void prvEstadoOnlineData( void )
         return;
     }
 
-    if( prvSegundosApagado() > 0UL )
+    if( wan_segundos_apagado() > 0UL )
     {
         /* DISCRETO, o MIXTO fuera de su ventana: se apaga hasta la próxima. */
         eEstado = wanAPAGADO;

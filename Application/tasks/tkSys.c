@@ -13,6 +13,8 @@
 #include "drv_ina3221.h"
 #include "drv_pulsos.h"
 #include "drv_valvula.h"
+#include "drv_rs485.h"
+#include "modbus.h"
 #include "drv_rtc79410.h"
 #include "frtos-io.h"
 #include "main.h"
@@ -152,6 +154,104 @@ static void prvPolearRieles( dataRcd_t *pxDr )
     }
 }
 //------------------------------------------------------------------------------
+/*
+ * ⭐ EL RIEL DEL MÓDULO SE PRENDE TEMPRANO, Y ESO NO ES UN DETALLE
+ *
+ * Un caudalímetro tarda segundos en arrancar. El AVR prende `EN_PWR_QMBUS`
+ * **antes** de medir las analógicas, así ese arranque transcurre durante el
+ * barrido de 1,4 s del INA3221: el tiempo total es el mismo pero **no se paga**,
+ * porque se solapa con trabajo que había que hacer igual.
+ *
+ * Acá se hace lo mismo, con una mejora: en vez de esperar "2 s más" como el AVR
+ * —un número que deja de valer si alguien cambia el `sensors_pwr_settle_time`—
+ * se **mide** cuánto pasó desde que se prendió y se espera sólo lo que falte.
+ */
+static TickType_t xTickRielModbus;
+
+static void prvPrenderModuloModbus( void )
+{
+    if( !xCfgModbus.bEnabled )
+    {
+        return;
+    }
+
+    drv_rs485_power( rs485RAIL_QMBUS, true );
+    xTickRielModbus = xTaskGetTickCount();
+}
+//------------------------------------------------------------------------------
+static void prvPolearModbus( dataRcd_t *pxDr )
+{
+    uint8_t i;
+
+    if( !xCfgModbus.bEnabled )
+    {
+        return;
+    }
+
+    /* El transceiver se prende recién ahora: está listo en microsegundos y
+       mientras tanto no tiene sentido tenerlo consumiendo. Prenderlo toma
+       `pwrLOCK_RS485`, que es lo que evita que el tickless se coma bytes de las
+       tramas — Modbus es todo ráfagas de bytes pegados. */
+    drv_rs485_power( rs485RAIL_BUS, true );
+
+    /* Lo que falte del arranque del módulo, descontando lo que ya tardaron las
+       analógicas. Si tardaron más que eso, no se espera nada. */
+    TickType_t xTranscurrido = xTaskGetTickCount() - xTickRielModbus;
+    TickType_t xNecesario    = pdMS_TO_TICKS( MODBUS_MS_ARRANQUE_MODULO );
+
+    if( xTranscurrido < xNecesario )
+    {
+        vTaskDelay( xNecesario - xTranscurrido );
+    }
+
+    for( i = 0U; i < CFG_MODBUS_NRO_CANALES; i++ )
+    {
+        if( !xCfgModbus.xCanal[ i ].bEnabled )
+        {
+            continue;
+        }
+
+        float       fValor = 0.0f;
+        mb_result_t eRes   = mbOK;
+
+        /* La MISMA función que usa el comando `modbus ch`: codecs, tipo,
+           divisor y los 3 reintentos. */
+        if( modbus_leer_canal( &xCfgModbus.xCanal[ i ], &fValor, &eRes ) )
+        {
+            pxDr->fModbus[ i ] = fValor;
+        }
+        else
+        {
+            /*
+             * ⛔ Un canal que no se pudo leer se MARCA, no se rellena con cero.
+             * Un caudal de 0.000 es un valor perfectamente creíble, así que un
+             * cero inventado se mezcla con los buenos y después no hay forma de
+             * separarlos. Es el mismo criterio que las analógicas, el contador y
+             * la firma del RTC: hacer visible lo que no se sabe.
+             */
+            pxDr->fModbus[ i ]  = 0.0f;
+            pxDr->usInvalidos  |= ( uint16_t ) ( dataINVALIDO_MODBUS0 << i );
+
+            xprintf( "MODBUS:: ch%u [%s] SIN DATO: %s\r\n", ( unsigned ) i,
+                     xCfgModbus.xCanal[ i ].pcName, drv_modbus_error_str( eRes ) );
+        }
+    }
+
+    drv_rs485_power( rs485RAIL_BUS, false );
+
+    /*
+     * ⚠ El riel del MÓDULO sólo se apaga si el equipo va a dormir, igual que el
+     * AVR (`if ( u_get_sleep_time(false) > 0 )`). En continuo el poleo vuelve en
+     * `timerpoll` segundos, y apagarlo obligaría a pagar otra vez los 5 s de
+     * arranque en cada vuelta — además de ciclar la alimentación del
+     * caudalímetro una vez por minuto, para siempre.
+     */
+    if( wan_segundos_apagado() > 0UL )
+    {
+        drv_rs485_power( rs485RAIL_QMBUS, false );
+    }
+}
+//------------------------------------------------------------------------------
 bool tkSys_poll( dataRcd_t *pxDr )
 {
     if( pxDr == NULL )
@@ -189,12 +289,16 @@ bool tkSys_poll( dataRcd_t *pxDr )
         pxDr->usInvalidos |= dataINVALIDO_CONTADOR;
     }
 
+    /* ---- 1b. El riel del módulo Modbus, TEMPRANO --------------------- */
+    /* Se prende antes de las analógicas para que arranque mientras el INA3221
+       hace su barrido. Ver `prvPrenderModuloModbus()`. */
+    prvPrenderModuloModbus();
+
     /* ---- 2. Analógicas de 4-20 mA ------------------------------------ */
     prvPolearAnalogicas( pxDr );
 
     /* ---- 3. Modbus --------------------------------------------------- */
-    /* Paso 6. Los canales quedan en cero y NO se marcan inválidos: sin Modbus
-       implementado, marcarlos sólo agregaría ruido a cada registro. */
+    prvPolearModbus( pxDr );
 
     /* ---- 4. Rieles de alimentación ----------------------------------- */
     prvPolearRieles( pxDr );
@@ -280,6 +384,26 @@ void tkSys_print( const dataRcd_t *pxDr )
         }
     }
 
+    if( xCfgModbus.bEnabled )
+    {
+        for( i = 0U; i < CFG_MODBUS_NRO_CANALES; i++ )
+        {
+            if( !xCfgModbus.xCanal[ i ].bEnabled )
+            {
+                continue;
+            }
+
+            if( pxDr->usInvalidos & ( uint16_t ) ( dataINVALIDO_MODBUS0 << i ) )
+            {
+                xprintf( "%s=SIN_DATO;", xCfgModbus.xCanal[ i ].pcName );
+            }
+            else
+            {
+                xprintf( "%s=%0.3f;", xCfgModbus.xCanal[ i ].pcName, pxDr->fModbus[ i ] );
+            }
+        }
+    }
+
     if( xCfgCounter.bEnabled )
     {
         if( pxDr->usInvalidos & dataINVALIDO_CONTADOR )
@@ -334,12 +458,13 @@ void tkSys_print( const dataRcd_t *pxDr )
     /* El detalle sólo cuando hay algo que contar, para no ensuciar cada línea. */
     if( pxDr->usInvalidos != 0U )
     {
-        xprintf( "  [!] campos sin dato (0x%04X):%s%s%s%s%s%s%s\r\n",
+        xprintf( "  [!] campos sin dato (0x%04X):%s%s%s%s%s%s%s%s\r\n",
                  ( unsigned ) pxDr->usInvalidos,
                  ( pxDr->usInvalidos & dataINVALIDO_AIN0     ) ? " a0"       : "",
                  ( pxDr->usInvalidos & dataINVALIDO_AIN1     ) ? " a1"       : "",
                  ( pxDr->usInvalidos & dataINVALIDO_AIN2     ) ? " a2"       : "",
                  ( pxDr->usInvalidos & dataINVALIDO_CONTADOR ) ? " contador" : "",
+                 ( pxDr->usInvalidos & dataINVALIDO_MODBUS_TODOS ) ? " modbus" : "",
                  ( pxDr->usInvalidos & dataINVALIDO_BT12V    ) ? " bt12v"    : "",
                  ( pxDr->usInvalidos & dataINVALIDO_BT3V3    ) ? " bt3v3"    : "",
                  ( pxDr->usInvalidos & dataINVALIDO_RTC      ) ? " rtc"      : "" );

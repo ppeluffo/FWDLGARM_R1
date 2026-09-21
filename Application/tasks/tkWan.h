@@ -82,6 +82,21 @@ const char *wan_estado_str( void );
 bool wan_hay_enlace( void );
 
 /*------------------------------------------------------------------------------
+ * Cuántos segundos va a quedarse apagado el modem tras esta sesión. **0 = no se
+ * apaga** (continuo y RTU). Es `u_get_sleep_time()` del AVR.
+ *
+ * ⭐ Lo consulta `tkSys` para decidir si apaga el riel del módulo Modbus: si el
+ * equipo va a dormir hasta el próximo ciclo, apagarlo ahorra; si no va a dormir,
+ * apagarlo sólo obliga a pagar otra vez los 5 s de arranque en la vuelta
+ * siguiente. Es exactamente lo que hace el AVR en `u_poll_data()`.
+ *
+ * ⚠ En `MIXTO` la respuesta depende de la HORA, así que no se puede deducir del
+ * `pwrmodo` solo — por eso vive acá, donde ya está resuelto el cruce de
+ * medianoche, y no se reimplementa en `tkSys`.
+ *----------------------------------------------------------------------------*/
+uint32_t wan_segundos_apagado( void );
+
+/*------------------------------------------------------------------------------
  * LAS PIEZAS DE LA SESIÓN, que usan la FSM y los comandos de consola.
  *
  * ⚠ Las tres **asumen modo TRANSPARENTE** y que el modem está encendido, igual

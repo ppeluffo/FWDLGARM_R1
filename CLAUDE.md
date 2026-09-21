@@ -3576,6 +3576,69 @@ saberlo por dos razones:
 escribir un holding register puede cambiarle la configuración. Su lugar natural es el paso 7, contra
 el control de presión, que es el dispositivo que se escribe por diseño.
 
+### 🔨 Paso 6b: el Modbus entra al poleo
+
+`prvPolearModbus()` en `tkSys.c`. Los canales habilitados se leen en cada ciclo y quedan en
+`dr->fModbus[]`, de donde los toma el frame.
+
+**Usa `modbus_leer_canal()`, la misma función que el comando `modbus ch`** — no una copia. Mismo
+criterio que `poll` con `tkSys_poll()` y que `lte data` con `wan_sesion_datos()`.
+
+#### ⭐ El riel del módulo se prende TEMPRANO, y eso no es un detalle
+
+Un caudalímetro tarda segundos en arrancar. El AVR prende `EN_PWR_QMBUS` **antes** de medir las
+analógicas, así ese arranque transcurre **durante el barrido de 1,4 s del INA3221**: el tiempo total
+es el mismo pero **no se paga**, porque se solapa con trabajo que había que hacer igual.
+
+Acá se hace lo mismo con una mejora: en vez de esperar "2 s más" como el AVR —un número que deja de
+valer si alguien cambia el `sensors_pwr_settle_time`— se **mide** cuánto pasó desde que se prendió y
+se espera sólo lo que falte. Si las analógicas ya tardaron más que el arranque, no se espera nada.
+
+**El transceiver se prende recién al polear**: está listo en microsegundos, y prenderlo toma
+`pwrLOCK_RS485` — que es lo que evita que el tickless se coma bytes de las tramas. **Modbus es todo
+ráfagas de bytes pegados**, exactamente el caso contra el que se puso ese candado el 2026-08-12.
+
+#### El riel del módulo sólo se apaga si el equipo va a dormir
+
+Es el `if ( u_get_sleep_time(false) > 0 )` del AVR. En continuo el poleo vuelve en `timerpoll`
+segundos, así que apagarlo obligaría a pagar otra vez los 5 s de arranque en cada vuelta — además de
+**ciclar la alimentación del caudalímetro una vez por minuto, para siempre**.
+
+##### ⛔ Y ahí apareció un bug, al juntar las dos tareas
+
+`wan_segundos_apagado()` (el `u_get_sleep_time()` portado) devolvía **0 para `SILENT`**, con el
+comentario *"no debería llegar: SILENT ni entra al estado APAGADO"*. Era cierto **para `tkWan`**, que
+nunca la consulta en ese modo.
+
+Pero `tkSys` la usa para **otra pregunta**: *"¿el equipo va a dormir hasta el próximo ciclo?"*. Y con
+un 0 dejaba el riel del caudalímetro **encendido para siempre**, justo en el único modo donde el
+equipo está a batería y no transmite nunca. Exactamente al revés de lo que hace falta.
+
+⭐ **La lección es sobre la función, no sobre el modo**: una misma función respondiendo dos preguntas
+parecidas —"cuánto duerme el modem" y "¿el equipo duerme?"— tiene un caso donde las respuestas
+divergen, y ese caso es invisible mientras haya un solo llamador. Ahora `SILENT` devuelve
+`timerdial`, que es **literalmente cierto** (el modem va a seguir apagado ese tiempo y todos los que
+vengan) y es lo que las dos preguntas necesitan.
+
+#### Un canal que no se pudo leer viaja como -9999
+
+Decisión de Pablo (2026-09-21), la misma que para las analógicas y el contador. Se marca en
+`usInvalidos` —cinco bits nuevos, consecutivos, indexados con `dataINVALIDO_MODBUS0 << i`— la consola
+dice `SIN_DATO`, y el frame emite **-9999**.
+
+⛔ **Rellenar con cero sería lo peor**: un caudal de `0.000` es un valor perfectamente creíble, así
+que un cero inventado se mezcla con los buenos y después no hay forma de separarlos. Es el mismo
+criterio que la firma del RTC y el `estado_asumido` de la válvula.
+
+Y cuando un canal falla **se dice por qué**, no sólo que falló:
+
+```
+MODBUS:: ch0 [CAU0] SIN DATO: SIN RESPUESTA (timeout)
+```
+
+Hay un `_Static_assert` que verifica que los canales entren en los 16 bits de `usInvalidos`: hoy
+llegan al bit 11.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3594,7 +3657,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.60"        /* = VER                                 */
+#define FW_VERSION  "0.0.61"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -3618,7 +3681,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5c** | Los frames de datos y el vaciado | ✅ **VALIDADO el 2026-09-21**: ventana y lotes |
 | **5d** | **`tkWan`: la FSM. El equipo transmite solo** | ✅ **VALIDADO el 2026-09-21** |
 | **6a** | **Modbus: el motor** (transaccion, codecs, comando) | ✅ **VALIDADO el 2026-09-21** |
-| 6b | Modbus: el enganche al poleo de `tkSys` | |
+| **6b** | Modbus: el enganche al poleo de `tkSys` | 🔨 **escrito, sin probar** |
 | 7 | Consigna (`tkCtlPres`) — ⚠ **es Modbus**: depende del 6a | |
 | 7b | ⏳ **`tkFlow`/flowcontrol** — volvió al alcance el 2026-09-12; necesita el 2b | |
 | 8 | Watchdog cooperativo + `tkCtl` definitivo | |

@@ -77,6 +77,20 @@
 #define dataINVALIDO_BT3V3      ( 1U << 5 )
 #define dataINVALIDO_RTC        ( 1U << 6 )
 
+/* Los 5 canales Modbus, CONSECUTIVOS a propósito: el código los indexa con
+   `dataINVALIDO_MODBUS0 << i`, igual que las analógicas. Con 5 canales llegan
+   hasta el bit 11 y `usInvalidos` es de 16, así que hay lugar de sobra. */
+#define dataINVALIDO_MODBUS0    ( 1U << 7 )
+
+/* Los cinco juntos, para preguntar "¿falló alguno?" sin escribir la máscara a
+   mano. ⚠ Depende de `CFG_MODBUS_NRO_CANALES`: el `_Static_assert` de abajo
+   avisa si alguna vez crecen y se pasan de los 16 bits de `usInvalidos`. */
+#define dataINVALIDO_MODBUS_TODOS \
+        ( ( uint16_t ) ( ( ( 1U << CFG_MODBUS_NRO_CANALES ) - 1U ) << 7 ) )
+
+_Static_assert( ( 7 + CFG_MODBUS_NRO_CANALES ) <= 16,
+                "usInvalidos es de 16 bits y los canales Modbus no entran" );
+
 /*------------------------------------------------------------------------------
  * El registro de medida. **Mismos campos y mismo orden que el `dataRcd_s` del
  * AVR**, porque de acá sale el frame y el frame es el contrato.
