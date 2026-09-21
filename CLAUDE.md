@@ -2922,9 +2922,83 @@ conseguirlo): `drv_rtc_escribir()` lo calcula con Sakamoto, que es un dato deriv
 Validado sin hardware con stubs del RTC: **11 casos**, incluidos los cuatro strings malformados —que
 nunca escriben— y el `2001-01-01` con la misma hora del día, que ahora sí ajusta.
 
-⏳ **Falta la segunda mitad del paso**: los lotes de la microSD. Van después de la ventana, son frames
-de texto ya armados —se mandan tal cual— y el archivo **se borra recién cuando se confirmó completo**,
-sin puntero de línea persistente: si se corta, se retransmite entero (acordado con Pablo, 2026-09-11).
+#### 🔨 La segunda mitad: los lotes de la microSD
+
+Van **después** de la ventana (criterio de Pablo, 2026-09-08). `prvLteLotes()` toma el lote más
+viejo, lo transmite línea por línea con la misma ventana de confirmación, y **lo borra sólo si entró
+entero**.
+
+⚠ **Si la ventana no se pudo vaciar, ni se encienden los lotes**: el enlace está mal y van a fallar
+igual, así que no tiene sentido prender la microSD para descubrirlo.
+
+##### ⭐ En la microSD va SÓLO la parte de datos; el prefijo se construye al transmitir
+
+Decisión de Pablo del **2026-09-21**, a partir de una sola pregunta suya: *"¿qué datos escribimos en
+la microSD? ¿sólo los datos o los frames?"*. Se guardaba el **frame entero**, y eso metía campos de
+**transporte** dentro de un archivo de **datos**:
+
+```
+ID=860909055244702&HW=SPQ_ARM_R1&TYPE=FWDLGARM&VER=0.0.53&CLASS=DATA&DATE=260911&TIME=110138&…
+└────────────────── transporte: se construye al transmitir ─────────┘└──────── el dato ────────┘
+```
+
+⛔ **El que duele es el `ID`: es el IMEI del módulo.** Un lote que quede pendiente y se transmita
+después de **cambiar el módulo LTE saldría con el IMEI viejo**, y el servidor lo atribuiría a otro
+equipo o lo rechazaría. No es hipotético — el módulo de este banco ya se movió a un AVR para una
+prueba.
+
+Y el `CLASS` es una **decisión de transmisión**, no del dato: el mismo registro va como `DATANR` o
+como `DATA` según cierre bloque o no. Guardarlo obligaba a reescribirlo al transmitir —con un
+`memmove`, porque los dos largos difieren—, y esa función desapareció con este cambio.
+
+**Lo que se guarda ahora** (`wan_frame_datos()`) y **lo que se arma al transmitir**
+(`wan_frame_prefijo()` + `&` + la línea):
+
+| | bytes |
+|---|---|
+| antes, el frame entero por línea | 121 |
+| ahora, sólo los datos | **52** |
+| ahorro en un lote de 1984 líneas | **134 KB** |
+
+⭐ **El frame que viaja no cambia en un solo byte** — verificado sin hardware: 4 casos, comparando el
+resultado contra el string exacto de antes. El contrato con el servidor queda intacto.
+
+⭐ Y se conserva **la razón principal** por la que en la SD van frames de texto y no registros
+binarios: los **nombres de los canales** siguen guardados con los que se midió, así que no reaparece
+el problema de "configuración nueva con datos viejos".
+
+⚠ **Los lotes del formato viejo se siguen transmitiendo**: si la línea ya empieza con `ID=`, se manda
+tal cual. Sin eso, una tarjeta con lotes anteriores al cambio saldría con el prefijo duplicado.
+Cuando no queden lotes viejos en ninguna tarjeta, esa rama se puede sacar.
+
+##### Tres decisiones de implementación
+
+- **Se lee una línea ADELANTADA.** El frame que cierra el lote tiene que ir como `CLASS=DATA` para
+  que el servidor confirme, y no hay forma de saber que una línea es la última hasta intentar leer la
+  siguiente. De ahí los dos buffers.
+- **El archivo queda ABIERTO y la tarjeta encendida** durante todo el envío —hasta 1984 líneas y
+  varios minutos—. El argumento es de proporción: mientras se transmite, **el modem consume decenas
+  de mA** contra los 0,2-1 mA de la microSD; remontar cada pocas líneas serían ~200 ciclos de montaje
+  por lote para ahorrar ruido. Leer el lote entero a RAM tampoco es opción: **~300 KB** contra los
+  256 KB del micro.
+- ⚠ **NO se imprime cada frame**, a diferencia de la ventana. Un lote son ~1984 líneas de 153 bytes,
+  y sacarlas por la consola a 9600 son **más de cinco minutos por lote de puro log**. Se informa por
+  bloque confirmado.
+
+##### El borrado pide DOS condiciones
+
+```c
+bBorrar = bCompleto && ( usSinConfirmar == 0U ) && ( ulLineas > 0UL );
+```
+
+`bCompleto` dice que no se cortó; `usSinConfirmar == 0` que el último bloque se dio por bueno. Si
+falta cualquiera, **el lote queda** y se retransmite entero la próxima vez — con duplicados de lo que
+ya había llegado, que son inofensivos porque el servidor indexa por la fecha de cada frame. Es lo
+acordado: un puntero de línea persistente sería un estado más que se puede corromper, para evitar
+algo que no hace daño.
+
+⚠ **Un `RESET` del servidor en medio de un lote NO lo borra**: se cierra sin borrar y se reinicia, así
+que al volver se retransmite entero. Es lo correcto — no se confirmó todo.
 
 ### ⚠ La versión sube en CADA entrega a banco
 
@@ -2944,7 +3018,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.50"        /* = VER                                 */
+#define FW_VERSION  "0.0.53"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -2965,7 +3039,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5a** | **La sesión mínima: configurar el módulo y el `PING`** | ✅ **validado el 2026-09-09** |
 | **5b-1** | `CONF_ALL`: los hashes y qué pide el servidor | ✅ **validado el 2026-09-11** |
 | **5b-2** | Los `CONF_*`: parsear y aplicar la configuración | ✅ **validado el 2026-09-11** — el hash cierra en la 2.ª sesión |
-| **5c** | Los frames de datos y el vaciado | 🔨 **la ventana escrita**; faltan los lotes de la SD |
+| **5c** | Los frames de datos y el vaciado | ✅ **la ventana validada el 2026-09-21**; 🔨 los lotes escritos, sin probar |
 | 5d | Los modos continuo / discreto / mixto | |
 | 6 | Modbus | |
 | 7 | Consigna (`tkCtlPres`) | |

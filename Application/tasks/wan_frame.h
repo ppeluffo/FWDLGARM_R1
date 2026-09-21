@@ -91,6 +91,39 @@ uint16_t wan_frame_data( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr,
                          bool bConRespuesta );
 
 /*------------------------------------------------------------------------------
+ * EL FRAME PARTIDO EN DOS, y por qué (decisión de Pablo, 2026-09-21)
+ *
+ *   wan_frame_prefijo()  ID=<imei>&HW=..&TYPE=..&VER=..&CLASS=..
+ *   wan_frame_datos()    DATE=..&TIME=..&<canales>&V0=..&bt3v3=..&bt12v=..
+ *
+ * `wan_frame_data()` es la concatenación de las dos con un `&` en el medio, y
+ * es lo que se transmite. **El formato que viaja no cambia en un solo byte.**
+ *
+ * ⭐ **La partición existe porque en la microSD se guarda SÓLO la parte de
+ * datos**, y el prefijo se construye al transmitir. Lo que hay en el prefijo no
+ * pertenece al dato, pertenece al transporte:
+ *
+ *  - ⛔ **`ID` es el IMEI del módulo.** Guardándolo, un lote que quede pendiente
+ *    y se transmita después de cambiar el módulo LTE **saldría con el IMEI
+ *    viejo**, y el servidor lo atribuiría a otro equipo o lo rechazaría. No es
+ *    hipotético: el módulo de este banco ya se movió a un AVR para una prueba.
+ *  - **`CLASS` es una decisión de transmisión**, no del dato: el mismo registro
+ *    va como `DATANR` o como `DATA` según cierre bloque o no. Guardarlo obligaba
+ *    a reescribirlo al transmitir.
+ *  - `HW`/`TYPE` no cambian nunca, y `VER` congelado hasta sería deseable — pero
+ *    no valen el precio de los dos primeros.
+ *
+ * De yapa la línea del lote baja de ~120 a ~55 bytes, menos de la mitad.
+ *
+ * ⭐ Y se conserva **la razón principal** por la que en la SD van frames de
+ * texto y no registros binarios: los **nombres de los canales** siguen
+ * guardados con los que se midió, así que no reaparece el problema de
+ * "configuración nueva con datos viejos".
+ *----------------------------------------------------------------------------*/
+uint16_t wan_frame_prefijo( char *pcBuf, uint16_t usSize, bool bConRespuesta );
+uint16_t wan_frame_datos  ( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr );
+
+/*------------------------------------------------------------------------------
  * El IMEI, que es el `ID` con el que el servidor identifica al equipo.
  *
  * ⏳ **HOY DEVUELVE UN IMEI FALSO, Y ES PROVISORIO DE ESTA ETAPA** (acordado con

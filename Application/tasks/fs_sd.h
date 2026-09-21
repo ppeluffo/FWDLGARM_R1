@@ -87,6 +87,32 @@ bool fs_sd_volcar_ventana( void );
  * ventana al principio de la sesión, justo antes de la parte larga.
  *----------------------------------------------------------------------------*/
 bool fs_sd_lote_mas_viejo( char *pcNombre, uint16_t usSize );
+
+/*------------------------------------------------------------------------------
+ * Leer un lote para transmitirlo: abrir / leer línea / cerrar.
+ *
+ * `fs_sd_lote_abrir()` toma **el más viejo** y deja el archivo abierto y la
+ * tarjeta encendida; `fs_sd_lote_leer()` devuelve la línea siguiente **sin el
+ * CRLF** (el frame no lo lleva); `fs_sd_lote_cerrar( bBorrar )` cierra, borra el
+ * archivo si se le dice, y apaga la tarjeta.
+ *
+ * ⚠ **El archivo queda abierto durante todo el envío** —pueden ser 1984 líneas
+ * y varios minutos— y es deliberado: mientras se transmite el **modem consume
+ * decenas de mA** contra los 0,2-1 mA de la microSD, así que remontar la
+ * tarjeta cada pocas líneas sería pagar ~200 ciclos de montaje por lote para
+ * ahorrar ruido. Leer el lote entero a RAM tampoco es opción: son ~300 KB
+ * contra los 256 KB del micro.
+ *
+ * ⚠ **`bBorrar` va en true sólo si el lote ENTERO se confirmó.** Si se corta en
+ * el medio, el archivo queda y se retransmite completo — con duplicados de lo
+ * que ya había llegado, que son inofensivos porque el servidor indexa por la
+ * fecha de cada frame. Es la decisión acordada con Pablo el 2026-09-11: un
+ * puntero de línea persistente sería un estado más que se puede corromper, para
+ * evitar algo que no hace daño.
+ *----------------------------------------------------------------------------*/
+bool fs_sd_lote_abrir ( char *pcNombre, uint16_t usSize );
+bool fs_sd_lote_leer  ( char *pcLinea,  uint16_t usSize );
+void fs_sd_lote_cerrar( bool bBorrar );
 bool fs_sd_borrar_lote   ( const char *pcNombre );
 
 void fs_sd_stats( fs_sd_stats_t *pxStats );

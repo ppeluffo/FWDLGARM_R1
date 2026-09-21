@@ -235,8 +235,7 @@ wan_conf_rta_t wan_frame_conf_all_rta( const char *pcRta, wan_conf_flags_t *pxFl
     return wanCONF_RECONFIGURAR;
 }
 //------------------------------------------------------------------------------
-uint16_t wan_frame_data( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr,
-                         bool bConRespuesta )
+uint16_t wan_frame_datos( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr )
 {
     uint16_t usIdx = 0U;
     bool     bOvf  = false;
@@ -269,15 +268,10 @@ uint16_t wan_frame_data( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr,
             }                                                                       \
         } while( 0 )
 
-    /* ---- Encabezado: quién soy y qué mando --------------------------- */
-    FRAME_APPEND( "ID=%s&HW=%s&TYPE=%s&VER=%s&CLASS=%s",
-                  wan_imei(), FW_HW, FW_TYPE, FW_VERSION,
-                  bConRespuesta ? "DATA" : "DATANR" );
-
     /* ---- Fecha y hora ------------------------------------------------ */
     /* ⚠ DATE es YYMMDD, en ese orden. El año son los dos últimos dígitos: el
        MCP79410 no tiene siglo. */
-    FRAME_APPEND( "&DATE=%02d%02d%02d",
+    FRAME_APPEND( "DATE=%02d%02d%02d",
                   pxDr->xRtc.year, pxDr->xRtc.month, pxDr->xRtc.day );
     FRAME_APPEND( "&TIME=%02d%02d%02d",
                   pxDr->xRtc.hour, pxDr->xRtc.min, pxDr->xRtc.sec );
@@ -332,12 +326,58 @@ uint16_t wan_frame_data( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr,
 
     if( bOvf )
     {
-        xprintf( "WAN:: ERROR: el frame no entra en %u bytes, DESCARTADO !!\r\n",
+        xprintf( "WAN:: ERROR: los datos no entran en %u bytes, DESCARTADOS !!\r\n",
                  ( unsigned ) usSize );
         return 0U;
     }
 
     return usIdx;
+}
+//------------------------------------------------------------------------------
+uint16_t wan_frame_prefijo( char *pcBuf, uint16_t usSize, bool bConRespuesta )
+{
+    if( ( pcBuf == NULL ) || ( usSize == 0U ) )
+    {
+        return 0U;
+    }
+
+    int iN = snprintf( pcBuf, usSize, "ID=%s&HW=%s&TYPE=%s&VER=%s&CLASS=%s",
+                       wan_imei(), FW_HW, FW_TYPE, FW_VERSION,
+                       bConRespuesta ? "DATA" : "DATANR" );
+
+    if( ( iN < 0 ) || ( ( uint16_t ) iN >= usSize ) )
+    {
+        return 0U;
+    }
+
+    return ( uint16_t ) iN;
+}
+//------------------------------------------------------------------------------
+uint16_t wan_frame_data( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr,
+                         bool bConRespuesta )
+{
+    if( ( pcBuf == NULL ) || ( pxDr == NULL ) || ( usSize < 2U ) )
+    {
+        return 0U;
+    }
+
+    uint16_t usIdx = wan_frame_prefijo( pcBuf, usSize, bConRespuesta );
+
+    if( usIdx == 0U )
+    {
+        return 0U;
+    }
+
+    pcBuf[ usIdx++ ] = '&';
+
+    uint16_t usDatos = wan_frame_datos( &pcBuf[ usIdx ], ( uint16_t ) ( usSize - usIdx ), pxDr );
+
+    if( usDatos == 0U )
+    {
+        return 0U;
+    }
+
+    return ( uint16_t ) ( usIdx + usDatos );
 }
 //------------------------------------------------------------------------------
 

@@ -2625,6 +2625,207 @@ static bool prvEsperarRespuestaConClase( char *pcRta, uint16_t usSize,
 }
 //------------------------------------------------------------------------------
 /*
+ * Arma el frame que se va a transmitir a partir de **una línea del lote**, que
+ * trae sólo la parte de datos (`DATE=…`).
+ *
+ *     prefijo construido AHORA          +  '&'  +  la línea del archivo
+ *     ID=..&HW=..&TYPE=..&VER=..&CLASS=..        DATE=..&TIME=..&…
+ *
+ * ⭐ Construir el prefijo en el momento de transmitir es todo el punto del
+ * formato: el `ID` es el **IMEI del módulo que hay hoy**, no el que había cuando
+ * se guardó el lote — si no, cambiar el módulo LTE haría que los lotes
+ * pendientes salieran con el IMEI viejo. Y el `CLASS` sale directamente como
+ * corresponde, sin tener que reescribir nada.
+ *
+ * ⚠ **Tolera los lotes del formato VIEJO**, que guardaban el frame entero: si la
+ * línea ya empieza con `ID=`, se manda tal cual. Sin esto, una tarjeta con lotes
+ * de antes del cambio transmitiría frames con el prefijo duplicado. Cuando no
+ * queden lotes viejos en ninguna tarjeta, esta rama se puede sacar.
+ */
+static uint16_t prvLineaArmarFrame( char *pcDestino, uint16_t usSize,
+                                    const char *pcLinea, bool bConRespuesta )
+{
+    if( ( pcDestino == NULL ) || ( pcLinea == NULL ) || ( usSize < 2U ) )
+    {
+        return 0U;
+    }
+
+    /* Formato viejo: la línea YA es un frame completo. */
+    if( strncmp( pcLinea, "ID=", 3U ) == 0 )
+    {
+        int iN = snprintf( pcDestino, usSize, "%s", pcLinea );
+
+        return ( ( iN > 0 ) && ( ( uint16_t ) iN < usSize ) ) ? ( uint16_t ) iN : 0U;
+    }
+
+    uint16_t usIdx = wan_frame_prefijo( pcDestino, usSize, bConRespuesta );
+
+    if( usIdx == 0U )
+    {
+        return 0U;
+    }
+
+    int iN = snprintf( &pcDestino[ usIdx ], ( size_t ) ( usSize - usIdx ), "&%s", pcLinea );
+
+    if( ( iN < 0 ) || ( ( uint16_t ) iN >= ( uint16_t ) ( usSize - usIdx ) ) )
+    {
+        return 0U;      /* no entra: mejor no transmitir que transmitir cortado */
+    }
+
+    return ( uint16_t ) ( usIdx + ( uint16_t ) iN );
+}
+//------------------------------------------------------------------------------
+/*
+ * La segunda mitad del vaciado: **los lotes de la microSD**.
+ *
+ * Van después de la ventana (criterio de Pablo, 2026-09-08): no es el orden
+ * cronológico y está bien, porque el servidor indexa por la fecha que viaja
+ * adentro de cada frame. De paso, vaciar la ventana primero la libera justo
+ * antes de la parte larga.
+ *
+ * ⚠ **No se imprime cada frame**, a diferencia de la ventana: un lote son hasta
+ * 1984 líneas de ~153 bytes, y sacarlas por la consola a 9600 son **más de
+ * cinco minutos por lote** de puro log. Se informa por bloque confirmado.
+ *
+ * ⚠ **El lote se borra sólo si se transmitió ENTERO.** Si se corta en el medio
+ * queda y se retransmite completo la próxima vez — con duplicados de lo que ya
+ * había llegado, que son inofensivos. Ver `fs_sd.h`.
+ */
+static void prvLteLotes( void )
+{
+    /*
+     * Dos buffers porque hace falta **mirar una línea adelante**: el frame que
+     * cierra el lote tiene que ir como `CLASS=DATA` para que el servidor
+     * confirme, y no hay forma de saber que una línea es la última hasta
+     * intentar leer la siguiente.
+     */
+    static char pcActual   [ WAN_FRAME_BUFFER_SIZE ];
+    static char pcSiguiente[ WAN_FRAME_BUFFER_SIZE ];
+    static char pcFrame    [ WAN_FRAME_BUFFER_SIZE ];   /* prefijo + la línea */
+    static char pcRta      [ WAN_FRAME_BUFFER_SIZE ];
+
+    char     pcNombre[ FS_SD_NOMBRE_LARGO ];
+    uint16_t usLotes = 0U;
+
+    while( fs_sd_lote_abrir( pcNombre, sizeof( pcNombre ) ) )
+    {
+        uint32_t ulLineas       = 0UL;
+        uint32_t ulConfirmadas  = 0UL;
+        uint16_t usSinConfirmar = 0U;
+        bool     bCompleto      = true;
+
+        xprintf( "\r\n--- %s ---\r\n", pcNombre );
+
+        bool bHayActual = fs_sd_lote_leer( pcActual, sizeof( pcActual ) );
+
+        while( bHayActual )
+        {
+            bool bHaySiguiente = fs_sd_lote_leer( pcSiguiente, sizeof( pcSiguiente ) );
+
+            /* La última del lote SIEMPRE pide confirmación: si no, lo que queda
+               del último bloque nunca se daría por bueno y el lote no se podría
+               borrar. */
+            bool bConfirmar = ( !bHaySiguiente ) ||
+                              ( ( usSinConfirmar + 1U ) >= LTE_DATA_VENTANA );
+
+            uint16_t usLargo = prvLineaArmarFrame( pcFrame, sizeof( pcFrame ),
+                                                   pcActual, bConfirmar );
+
+            if( usLargo == 0U )
+            {
+                xprintf( "[!] no se pudo armar el frame de la linea %lu: se salta\r\n",
+                         ( unsigned long ) ( ulLineas + 1UL ) );
+            }
+            else
+            {
+                if( bConfirmar )
+                {
+                    drv_lte_flush();
+                }
+
+                if( drv_lte_write( pcFrame, usLargo ) != ( int16_t ) usLargo )
+                {
+                    xprintf( "ERROR: no se pudo transmitir\r\n" );
+                    bCompleto = false;
+                    break;
+                }
+
+                ulLineas++;
+                usSinConfirmar++;
+
+                if( bConfirmar )
+                {
+                    if( !prvEsperarRespuestaConClase( pcRta, sizeof( pcRta ),
+                                                      LTE_PING_TIMEOUT_MS ) )
+                    {
+                        xprintf( "sin respuesta: el lote queda para la proxima\r\n" );
+                        bCompleto = false;
+                        break;
+                    }
+
+                    wan_data_ordenes_t xOrdenes;
+
+                    if( wan_frame_data_rta( pcRta, &xOrdenes ) != wanDATA_ACEPTADO )
+                    {
+                        xprintf( "[!] respuesta inesperada: el lote queda para la proxima\r\n" );
+                        bCompleto = false;
+                        break;
+                    }
+
+                    ulConfirmadas += usSinConfirmar;
+                    usSinConfirmar = 0U;
+
+                    xprintf( "  %lu lineas confirmadas\r\n",
+                             ( unsigned long ) ulConfirmadas );
+
+                    if( xOrdenes.bReset )
+                    {
+                        /* Igual que en la ventana: el RESET se atiende, pero acá
+                           **sin borrar el lote** — se retransmite entero al
+                           volver, que es lo correcto porque no se confirmó todo. */
+                        xprintf( "el servidor pide RESET: reiniciando...\r\n" );
+                        fs_sd_lote_cerrar( false );
+                        vTaskDelay( pdMS_TO_TICKS( 2000 ) );
+                        NVIC_SystemReset();
+                    }
+                }
+            }
+
+            if( bHaySiguiente )
+            {
+                memcpy( pcActual, pcSiguiente, sizeof( pcActual ) );
+                vTaskDelay( pdMS_TO_TICKS( LTE_DATA_MS_ENTRE_FRAMES ) );
+            }
+
+            bHayActual = bHaySiguiente;
+        }
+
+        /*
+         * ⭐ Se borra SÓLO si se transmitió entero y no quedó nada sin
+         * confirmar. Las dos condiciones: `bCompleto` dice que no se cortó, y
+         * `usSinConfirmar == 0` que el último bloque se dio por bueno.
+         */
+        bool bBorrar = bCompleto && ( usSinConfirmar == 0U ) && ( ulLineas > 0UL );
+
+        fs_sd_lote_cerrar( bBorrar );
+
+        if( !bBorrar )
+        {
+            xprintf( "[!] %s NO se borro: se retransmite entero la proxima vez\r\n",
+                     pcNombre );
+            return;     /* si uno falló, los demás también van a fallar */
+        }
+
+        usLotes++;
+    }
+
+    if( usLotes > 0U )
+    {
+        xprintf( "\r\n%u lote(s) transmitidos y borrados\r\n", ( unsigned ) usLotes );
+    }
+}
+//------------------------------------------------------------------------------
+/*
  * El vaciado de la VENTANA (la EEPROM): transmite los registros guardados y los
  * borra **recién cuando el servidor confirmó**.
  *
@@ -2666,6 +2867,12 @@ static void prvLteData( void )
 
     fs_datos_stats( &xStats );
     usPendientes = xStats.usCount;
+
+    /* El total se congela acá, igual que `usPendientes`: es contra este número
+       que se informa el progreso, y no contra el `count` de la ventana —que
+       sigue creciendo mientras `tkSys` polea—. Si se informara contra el count
+       real, el porcentaje iría para atrás en medio del vaciado. */
+    const uint16_t usTotal = usPendientes;
 
     if( usPendientes == 0U )
     {
@@ -2784,8 +2991,18 @@ static void prvLteData( void )
         /* ⭐ Recién acá se borran: el servidor los tiene. */
         uint16_t usBorrados = fs_datos_pop( usSinConfirmar );
 
-        xprintf( "OK: %u registros confirmados y borrados de la ventana\r\n",
-                 ( unsigned ) usBorrados );
+        xprintf( "OK: %u de %u confirmados y borrados; quedan %u\r\n",
+                 ( unsigned ) usEnviados, ( unsigned ) usTotal,
+                 ( unsigned ) usPendientes );
+
+        if( usBorrados != usSinConfirmar )
+        {
+            /* No debería pasar nunca: se borra exactamente lo que se confirmó.
+               Si el almacén descarta menos de lo pedido, algo no cierra entre lo
+               que se leyó con `peek` y lo que hay — mejor verlo que suponerlo. */
+            xprintf( "[!] se pidio borrar %u y se borraron %u\r\n",
+                     ( unsigned ) usSinConfirmar, ( unsigned ) usBorrados );
+        }
 
         usSinConfirmar = 0U;
 
@@ -2816,7 +3033,14 @@ static void prvLteData( void )
     {
         xprintf( "[!] %u quedaron SIN confirmar: no se borraron, se reintentan\r\n",
                  ( unsigned ) usSinConfirmar );
+
+        /* Si la ventana no se pudo vaciar, el enlace está mal y los lotes van a
+           fallar igual: no tiene sentido encender la SD para descubrirlo. */
+        return;
     }
+
+    /* ---- Y recién ahora los lotes de la microSD ---- */
+    prvLteLotes();
 }
 //------------------------------------------------------------------------------
 /*

@@ -257,7 +257,14 @@ bool fs_sd_volcar_ventana( void )
 
     prvProgresoIniciar();
 
-    /* Un frame por línea, en el mismo formato en que se van a transmitir. */
+    /*
+     * ⭐ Se guarda **sólo la parte de datos**, desde `DATE=` — sin el prefijo
+     * `ID=..&HW=..&TYPE=..&VER=..&CLASS=..`, que se construye al transmitir.
+     *
+     * El motivo de fondo es que el prefijo **no pertenece al dato**: el `ID` es
+     * el IMEI del módulo, así que un lote guardado con el prefijo y transmitido
+     * después de cambiar el módulo saldría con el IMEI viejo. Ver `wan_frame.h`.
+     */
     for( uint16_t i = 0U; i < xSt.usCount; i++ )
     {
         if( !fs_datos_peek( &xDr, i ) )
@@ -265,7 +272,7 @@ bool fs_sd_volcar_ventana( void )
             continue;   /* un registro corrupto no aborta el lote entero */
         }
 
-        uint16_t usLargo = wan_frame_data( pcBufSector, sizeof( pcBufSector ) - 2U, &xDr, true );
+        uint16_t usLargo = wan_frame_datos( pcBufSector, sizeof( pcBufSector ) - 2U, &xDr );
 
         if( usLargo == 0U )
         {
@@ -602,6 +609,130 @@ void fs_sd_ver( const char *pcNombre, uint16_t usLineas )
     }
 
     ( void ) f_close( &xFile );
+    prvDesmontar();
+}
+//------------------------------------------------------------------------------
+
+/*==============================================================================
+ * LEER UN LOTE PARA TRANSMITIRLO (paso 5c, segunda mitad)
+ *
+ * ⚠ **El archivo queda ABIERTO y la tarjeta encendida** durante todo el envío
+ * del lote, que pueden ser 1984 líneas y varios minutos. Es deliberado, y el
+ * argumento es de proporción: mientras se transmite, **el modem está encendido
+ * consumiendo decenas de mA**, contra los 0,2-1 mA de la microSD. Optimizar eso
+ * costaría reabrir y remontar la tarjeta cada pocas líneas —del orden de 200
+ * ciclos por lote— para ahorrar algo que es ruido al lado del modem.
+ *
+ * La alternativa de leer el lote entero a RAM no existe: 1984 líneas de ~153
+ * bytes son **300 KB** contra los 256 KB del micro.
+ *============================================================================*/
+
+static FIL  xLote;
+static bool bLoteAbierto;
+static char pcLoteNombre[ FS_SD_NOMBRE_LARGO ];
+
+//------------------------------------------------------------------------------
+bool fs_sd_lote_abrir( char *pcNombre, uint16_t usSize )
+{
+    if( bLoteAbierto )
+    {
+        /* Abrir dos veces sin cerrar dejaría el `FIL` anterior perdido y la
+           tarjeta encendida para siempre. */
+        fs_sd_lote_cerrar( false );
+    }
+
+    if( !fs_sd_lote_mas_viejo( pcLoteNombre, sizeof( pcLoteNombre ) ) )
+    {
+        return false;   /* no hay lotes, o no hay tarjeta */
+    }
+
+    if( !prvMontar() )
+    {
+        return false;   /* prvMontar() ya explicó por qué */
+    }
+
+    if( f_open( &xLote, pcLoteNombre, FA_READ ) != FR_OK )
+    {
+        xprintf( "SD:: no se pudo abrir %s\r\n", pcLoteNombre );
+        prvDesmontar();
+        return false;
+    }
+
+    bLoteAbierto = true;
+
+    if( ( pcNombre != NULL ) && ( usSize > 0U ) )
+    {
+        ( void ) snprintf( pcNombre, usSize, "%s", pcLoteNombre );
+    }
+
+    return true;
+}
+//------------------------------------------------------------------------------
+bool fs_sd_lote_leer( char *pcLinea, uint16_t usSize )
+{
+    if( !bLoteAbierto || ( pcLinea == NULL ) || ( usSize < 2U ) )
+    {
+        return false;
+    }
+
+    if( f_gets( pcLinea, ( int ) usSize, &xLote ) == NULL )
+    {
+        return false;   /* se terminó el archivo */
+    }
+
+    /*
+     * ⚠ Hay que sacar el CRLF: `f_gets` lo devuelve, el frame no lo lleva, y el
+     * módulo delimita las tramas por SILENCIO. Un `\r\n` al final del payload
+     * viajaría adentro del GET como parte del último campo — del lado del
+     * servidor, `bt12v=7.273\r\n` no es el mismo valor que `bt12v=7.273`.
+     */
+    uint16_t usLargo = ( uint16_t ) strlen( pcLinea );
+
+    while( ( usLargo > 0U ) &&
+           ( ( pcLinea[ usLargo - 1U ] == '\n' ) || ( pcLinea[ usLargo - 1U ] == '\r' ) ) )
+    {
+        pcLinea[ --usLargo ] = '\0';
+    }
+
+    return ( usLargo > 0U );
+}
+//------------------------------------------------------------------------------
+void fs_sd_lote_cerrar( bool bBorrar )
+{
+    if( !bLoteAbierto )
+    {
+        return;
+    }
+
+    ( void ) f_close( &xLote );
+    bLoteAbierto = false;
+
+    /*
+     * ⚠ El borrado va **con la tarjeta todavía montada**, antes de desmontar.
+     * Y sólo si el llamador confirmó que el lote entero llegó: si se corta en el
+     * medio, el archivo queda y se retransmite completo la próxima vez.
+     *
+     * Eso significa **duplicados** de lo que ya había llegado, y es aceptable a
+     * propósito: el servidor indexa por la fecha que viaja adentro de cada
+     * frame, así que un registro repetido se sobrescribe a sí mismo. La
+     * alternativa —un puntero de línea persistente— agregaría un estado más que
+     * se puede corromper, para evitar algo que no hace daño.
+     */
+    if( bBorrar )
+    {
+        if( f_unlink( pcLoteNombre ) == FR_OK )
+        {
+            xprintf( "SD:: %s transmitido y BORRADO\r\n", pcLoteNombre );
+        }
+        else
+        {
+            /* No se pudo borrar: se va a retransmitir entero la próxima vez.
+               Molesto pero inofensivo; lo que no puede pasar es no enterarse. */
+            xprintf( "SD:: [!] no se pudo borrar %s: se va a retransmitir\r\n",
+                     pcLoteNombre );
+        }
+    }
+
     prvDesmontar();
 }
 //------------------------------------------------------------------------------
