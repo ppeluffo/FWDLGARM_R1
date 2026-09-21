@@ -12,6 +12,8 @@
 #include "drv_eeprom.h"
 #include "drv_rtc79410.h"
 #include "drv_rs485.h"
+#include "drv_modbus.h"
+#include "modbus.h"
 #include "drv_ina3221.h"
 #include "drv_sd.h"
 #include "drv_adc.h"
@@ -293,6 +295,7 @@ static void cmdI2c( void );
 static void cmdEe( void );
 static void cmdRtc( void );
 static void cmdRs485( void );
+static void cmdModbus( void );
 static void cmdIna( void );
 static void cmdSd( void );
 static void cmdVin( void );
@@ -314,6 +317,7 @@ static void prvI2cUso  ( void );
 static void prvEeUso   ( void );
 static void prvRtcUso  ( void );
 static void prvRs485Uso( void );
+static void prvModbusUso( void );
 static void prvInaUso  ( void );
 static void prvSdUso   ( void );
 static void prvVinUso  ( void );
@@ -467,6 +471,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "ee",     cmdEe     );
     FRTOS_CMD_register( "rtc",    cmdRtc    );
     FRTOS_CMD_register( "rs485",  cmdRs485  );
+    FRTOS_CMD_register( "modbus", cmdModbus );
     FRTOS_CMD_register( "ina",    cmdIna    );
     FRTOS_CMD_register( "sd",     cmdSd     );
     FRTOS_CMD_register( "vin",    cmdVin    );
@@ -3786,3 +3791,261 @@ static void cmdReset( void )
 //------------------------------------------------------------------------------
 
 #endif  /* TKCMD_MODO_BANCO */
+//------------------------------------------------------------------------------
+static void prvModbusUso( void )
+{
+    xprintf( "modbus                              estado del bus y de la configuracion\r\n" );
+    xprintf( "modbus on | off                     los dos rieles: el SP3485 y el modulo\r\n" );
+    xprintf( "modbus debug on | off               traza hexadecimal de lo que sale y entra\r\n" );
+    xprintf( "modbus ch <0..4>                    lee UN canal de los configurados\r\n" );
+    xprintf( "modbus poll                         lee TODOS los canales habilitados\r\n" );
+    xprintf( "modbus read <sla> <reg> <nregs> <fcode> <tipo> <codec> <p10>\r\n" );
+    xprintf( "                                    poleo generico, sin tocar la configuracion\r\n" );
+    xprintf( "                                    tipo: U16|I16|U32|I32|FLOAT\r\n" );
+    xprintf( "                                    codec: C0123|C1032|C3210|C2301\r\n" );
+    xprintf( "modbus write <sla> <reg> <valor>    escribe UN registro (funcion 06)\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "ej: modbus on ; modbus read 1 0 2 3 FLOAT C3210 0\r\n" );
+}
+//------------------------------------------------------------------------------
+static void prvModbusEstado( void )
+{
+    uint8_t i;
+
+    xprintf( "bus (SP3485) : %s\r\n",
+             drv_rs485_power_estado( rs485RAIL_BUS ) ? "ENCENDIDO" : "apagado" );
+    xprintf( "riel qmbus   : %s\r\n",
+             drv_rs485_power_estado( rs485RAIL_QMBUS ) ? "ENCENDIDO" : "apagado" );
+    xprintf( "debug        : %s\r\n", drv_modbus_debug_estado() ? "on" : "off" );
+    xprintf( "intentos     : %u por canal, %u ms entre ellos\r\n",
+             ( unsigned ) MODBUS_INTENTOS, ( unsigned ) MODBUS_MS_ENTRE_INTENTOS );
+    xprintf( "timeout      : %u ms; silencio de trama: %u ms\r\n",
+             ( unsigned ) DRV_MODBUS_MS_TIMEOUT, ( unsigned ) DRV_MODBUS_MS_SILENCIO );
+
+    xprintf( "\r\nconfiguracion: %s, localaddr=%u\r\n",
+             xCfgModbus.bEnabled ? "habilitado" : "DESHABILITADO",
+             ( unsigned ) xCfgModbus.ucLocalAddr );
+
+    for( i = 0U; i < CFG_MODBUS_NRO_CANALES; i++ )
+    {
+        const cfg_modbus_canal_t *p = &xCfgModbus.xCanal[ i ];
+
+        xprintf( "  ch%u %s %-12s sla=%u reg=%u n=%u fc=%u %s %s /10^%u\r\n",
+                 ( unsigned ) i, p->bEnabled ? "ON " : "off", p->pcName,
+                 ( unsigned ) p->ucSlaveAddress, ( unsigned ) p->usRegAddress,
+                 ( unsigned ) p->ucNroRegs, ( unsigned ) p->ucFcode,
+                 cfg_modbus_tipo_str( p->eTipo ), cfg_modbus_codec_str( p->eCodec ),
+                 ( unsigned ) p->ucDivisorP10 );
+    }
+}
+//------------------------------------------------------------------------------
+/*
+ * Lee un canal y lo informa. Es la MISMA función que va a usar el poleo del
+ * paso 6b (`modbus_leer_canal()`), no una copia de prueba: el mismo criterio
+ * que `poll` con `tkSys_poll()`.
+ */
+static void prvModbusLeerCanal( const cfg_modbus_canal_t *pxCanal, uint8_t ucNro )
+{
+    float       fValor = 0.0f;
+    mb_result_t eRes   = mbOK;
+
+    xprintf( "ch%u [%s] sla=%u reg=%u: ", ( unsigned ) ucNro, pxCanal->pcName,
+             ( unsigned ) pxCanal->ucSlaveAddress,
+             ( unsigned ) pxCanal->usRegAddress );
+
+    if( modbus_leer_canal( pxCanal, &fValor, &eRes ) )
+    {
+        xprintf( "%.3f\r\n", fValor );
+        return;
+    }
+
+    /*
+     * ⭐ El error dice QUÉ pasó, y en el banco eso vale más que el valor: sin
+     * respuesta manda a mirar el cableado y la dirección; un CRC malo, el ruido
+     * y la velocidad; y una excepción dice que el enlace está PERFECTO y el
+     * problema es el registro que pedimos.
+     */
+    xprintf( "ERROR: %s", drv_modbus_error_str( eRes ) );
+
+    if( eRes == mbEXCEPCION )
+    {
+        xprintf( " (codigo %u)", ( unsigned ) drv_modbus_ultima_excepcion() );
+    }
+
+    xprintf( "\r\n" );
+}
+//------------------------------------------------------------------------------
+static void cmdModbus( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        prvModbusEstado();
+        return;
+    }
+
+    /* ---- los rieles ---- */
+    bool bOn  = ( strcmp( argv[ 1 ], "on"  ) == 0 );
+    bool bOff = ( strcmp( argv[ 1 ], "off" ) == 0 );
+
+    if( bOn || bOff )
+    {
+        /*
+         * Atajo de banco: prende el transceiver Y el riel del módulo. No
+         * duplica nada —llama a `drv_rs485_power()`, igual que el comando
+         * `rs485`— y evita el olvido más común, que es prender uno solo y no
+         * entender por qué nadie contesta.
+         */
+        drv_rs485_power( rs485RAIL_BUS,   bOn );
+        drv_rs485_power( rs485RAIL_QMBUS, bOn );
+
+        if( bOn )
+        {
+            /* El SP3485 está listo en microsegundos; el caudalímetro no. Este
+               tiempo es el mismo que espera el AVR antes de polear. */
+            xprintf( "esperando %u ms a que arranque el modulo...\r\n",
+                     ( unsigned ) MODBUS_MS_ARRANQUE_MODULO );
+            vTaskDelay( pdMS_TO_TICKS( MODBUS_MS_ARRANQUE_MODULO ) );
+        }
+
+        prvModbusEstado();
+        return;
+    }
+
+    /* ---- la traza ---- */
+    if( strcmp( argv[ 1 ], "debug" ) == 0 )
+    {
+        if( ( ucArgs < 2U ) || ( argv[ 2 ] == NULL ) )
+        {
+            prvModbusUso();
+            return;
+        }
+
+        drv_modbus_debug( strcmp( argv[ 2 ], "on" ) == 0 );
+        xprintf( "debug %s\r\n", drv_modbus_debug_estado() ? "on" : "off" );
+        return;
+    }
+
+    /* ---- un canal configurado ---- */
+    if( strcmp( argv[ 1 ], "ch" ) == 0 )
+    {
+        if( ( ucArgs < 2U ) || ( argv[ 2 ] == NULL ) )
+        {
+            prvModbusUso();
+            return;
+        }
+
+        long lCh = atol( argv[ 2 ] );
+
+        if( ( lCh < 0 ) || ( lCh >= ( long ) CFG_MODBUS_NRO_CANALES ) )
+        {
+            xprintf( "ERROR: el canal va de 0 a %u\r\n",
+                     ( unsigned ) ( CFG_MODBUS_NRO_CANALES - 1U ) );
+            return;
+        }
+
+        prvModbusLeerCanal( &xCfgModbus.xCanal[ lCh ], ( uint8_t ) lCh );
+        return;
+    }
+
+    /* ---- todos los habilitados ---- */
+    if( strcmp( argv[ 1 ], "poll" ) == 0 )
+    {
+        uint8_t i;
+        uint8_t ucLeidos = 0U;
+
+        for( i = 0U; i < CFG_MODBUS_NRO_CANALES; i++ )
+        {
+            if( xCfgModbus.xCanal[ i ].bEnabled )
+            {
+                prvModbusLeerCanal( &xCfgModbus.xCanal[ i ], i );
+                ucLeidos++;
+            }
+        }
+
+        if( ucLeidos == 0U )
+        {
+            xprintf( "no hay ningun canal habilitado\r\n" );
+        }
+        return;
+    }
+
+    /* ---- poleo genérico: sin tocar la configuración ---- */
+    if( strcmp( argv[ 1 ], "read" ) == 0 )
+    {
+        if( ( ucArgs < 8U ) || ( argv[ 8 ] == NULL ) )
+        {
+            prvModbusUso();
+            return;
+        }
+
+        /*
+         * ⭐ Se arma un canal TEMPORAL y se lee con la misma función que usa el
+         * poleo. Así el comando de diagnóstico ejercita el camino de verdad
+         * —codecs, tipos, divisor, reintentos— en vez de un atajo que podría
+         * comportarse distinto justo en lo que se vino a probar.
+         */
+        cfg_modbus_canal_t xTmp;
+
+        memset( &xTmp, 0, sizeof( xTmp ) );
+        strcpy( xTmp.pcName, "test" );
+
+        if( !cfg_modbus_parse_tipo( argv[ 6 ], &xTmp.eTipo ) )
+        {
+            xprintf( "ERROR: tipo invalido (U16|I16|U32|I32|FLOAT)\r\n" );
+            return;
+        }
+
+        if( !cfg_modbus_parse_codec( argv[ 7 ], &xTmp.eCodec ) )
+        {
+            xprintf( "ERROR: codec invalido (C0123|C1032|C3210|C2301)\r\n" );
+            return;
+        }
+
+        xTmp.bEnabled       = true;
+        xTmp.ucSlaveAddress = ( uint8_t )  atol( argv[ 2 ] );
+        xTmp.usRegAddress   = ( uint16_t ) atol( argv[ 3 ] );
+        xTmp.ucNroRegs      = ( uint8_t )  atol( argv[ 4 ] );
+        xTmp.ucFcode        = ( uint8_t )  atol( argv[ 5 ] );
+        xTmp.ucDivisorP10   = ( uint8_t )  atol( argv[ 8 ] );
+
+        prvModbusLeerCanal( &xTmp, 0U );
+        return;
+    }
+
+    /* ---- escribir un registro ---- */
+    if( strcmp( argv[ 1 ], "write" ) == 0 )
+    {
+        if( ( ucArgs < 4U ) || ( argv[ 4 ] == NULL ) )
+        {
+            prvModbusUso();
+            return;
+        }
+
+        uint8_t     ucSla   = ( uint8_t )  atol( argv[ 2 ] );
+        uint16_t    usReg   = ( uint16_t ) atol( argv[ 3 ] );
+        uint16_t    usValor = ( uint16_t ) atol( argv[ 4 ] );
+        mb_result_t eRes    = drv_modbus_escribir( ucSla, usReg, usValor );
+
+        if( eRes == mbOK )
+        {
+            xprintf( "OK: sla=%u reg=%u <- %u (el esclavo confirmo el eco)\r\n",
+                     ( unsigned ) ucSla, ( unsigned ) usReg, ( unsigned ) usValor );
+        }
+        else
+        {
+            xprintf( "ERROR: %s", drv_modbus_error_str( eRes ) );
+
+            if( eRes == mbEXCEPCION )
+            {
+                xprintf( " (codigo %u)", ( unsigned ) drv_modbus_ultima_excepcion() );
+            }
+
+            xprintf( "\r\n" );
+        }
+        return;
+    }
+
+    prvModbusUso();
+}

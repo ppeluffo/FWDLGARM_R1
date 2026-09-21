@@ -84,4 +84,9 @@ bool cfg_modbus_set_canal( uint8_t ucCh, const char *pcEnable, const char *pcNam
 const char *cfg_modbus_tipo_str ( cfg_modbus_tipo_t  eTipo  );
 const char *cfg_modbus_codec_str( cfg_modbus_codec_t eCodec );
 
+/* El camino inverso, público para que el poleo genérico de la consola use las
+   MISMAS tablas de nombres que la configuración. No distinguen mayúsculas. */
+bool cfg_modbus_parse_tipo ( const char *pcStr, cfg_modbus_tipo_t  *peTipo  );
+bool cfg_modbus_parse_codec( const char *pcStr, cfg_modbus_codec_t *peCodec );
+
 #endif /* APPLICATION_CONFIG_CFG_MODBUS_H_ */

@@ -7,6 +7,10 @@
 #include <strings.h>
 
 #include "cfg_modbus.h"
+
+/* Sólo por `DRV_MODBUS_MAX_REGS`: la configuración no puede admitir algo que el
+   driver no pueda recibir. Es la única dependencia de config hacia un driver. */
+#include "drv_modbus.h"
 #include "cfg_hash.h"
 #include "cfg_utils.h"
 #include "frtos-io.h"
@@ -163,7 +167,7 @@ bool cfg_modbus_set_localaddr( const char *pcVal )
     return true;
 }
 //------------------------------------------------------------------------------
-static bool prvParseTipo( const char *pcStr, cfg_modbus_tipo_t *peOut )
+bool cfg_modbus_parse_tipo( const char *pcStr, cfg_modbus_tipo_t *peOut )
 {
     uint8_t i;
 
@@ -179,7 +183,7 @@ static bool prvParseTipo( const char *pcStr, cfg_modbus_tipo_t *peOut )
     return false;
 }
 //------------------------------------------------------------------------------
-static bool prvParseCodec( const char *pcStr, cfg_modbus_codec_t *peOut )
+bool cfg_modbus_parse_codec( const char *pcStr, cfg_modbus_codec_t *peOut )
 {
     uint8_t i;
 
@@ -234,13 +238,13 @@ bool cfg_modbus_set_canal( uint8_t ucCh, const char *pcEnable, const char *pcNam
     cfg_modbus_tipo_t  eTipo  = pxAct->eTipo;
     cfg_modbus_codec_t eCodec = pxAct->eCodec;
 
-    if( ( pcTipo != NULL ) && !prvParseTipo( pcTipo, &eTipo ) )
+    if( ( pcTipo != NULL ) && !cfg_modbus_parse_tipo( pcTipo, &eTipo ) )
     {
         xprintf( "ERROR: tipo invalido (U16|I16|U32|I32|FLOAT)\r\n" );
         return false;
     }
 
-    if( ( pcCodec != NULL ) && !prvParseCodec( pcCodec, &eCodec ) )
+    if( ( pcCodec != NULL ) && !cfg_modbus_parse_codec( pcCodec, &eCodec ) )
     {
         xprintf( "ERROR: codec invalido (C0123|C1032|C3210|C2301)\r\n" );
         return false;
@@ -271,10 +275,20 @@ bool cfg_modbus_set_canal( uint8_t ucCh, const char *pcEnable, const char *pcNam
     uint8_t ucRegsMin = ( ( eTipo == CFG_MB_U32 ) || ( eTipo == CFG_MB_I32 ) ||
                           ( eTipo == CFG_MB_FLOAT ) ) ? 2U : 1U;
 
-    if( ( lNroRegs < ( long ) ucRegsMin ) || ( lNroRegs > 125 ) )
+    /*
+     * ⛔ El techo NO es el del protocolo (125): es el del BUFFER DE RECEPCIÓN
+     * del driver, y por eso el número sale de `drv_modbus.h`.
+     *
+     * El AVR acepta cualquier valor acá y después, al recibir, trunca la trama e
+     * imprime un error — o sea que la configuración se guarda bien y el canal
+     * falla en campo. Rechazarlo al configurar es la diferencia entre un mensaje
+     * que alguien está mirando y uno que nadie va a leer.
+     */
+    if( ( lNroRegs < ( long ) ucRegsMin ) || ( lNroRegs > ( long ) DRV_MODBUS_MAX_REGS ) )
     {
-        xprintf( "ERROR: %s necesita al menos %u registros\r\n",
-                 cfg_modbus_tipo_str( eTipo ), ( unsigned ) ucRegsMin );
+        xprintf( "ERROR: nro de registros: %s necesita al menos %u, y el maximo es %u\r\n",
+                 cfg_modbus_tipo_str( eTipo ), ( unsigned ) ucRegsMin,
+                 ( unsigned ) DRV_MODBUS_MAX_REGS );
         return false;
     }
 

@@ -3352,6 +3352,183 @@ Todo lo anterior es el camino feliz en modo `CONTINUO`. Quedan sin ejercitar:
 - **Los modos `DISCRETO`, `MIXTO`, `RTU` y `SILENT`** en la FSM (`BH` de referencia: `0xDF` y `0xD4`).
 - **El camino de fallo con el backoff de 120 s**, que entró en esta misma versión.
 
+## 🔨 Paso 6: Modbus RTU
+
+Pablo lo puso **antes que las consignas** (2026-09-21), y es el orden correcto por una razón que
+apareció al relevar: **la consigna del control de presión ES Modbus** —habla por FC03/FC06 con el
+esclavo `0x64`, registro 1—, así que el paso 7 no se puede hacer sin esto.
+
+Partido en dos:
+
+- **6a** — el **motor**: la transacción, los codecs y el comando de diagnóstico. Se valida contra
+  cualquier esclavo, sin saber todavía el mapa del caudalímetro.
+- **6b** — el **enganche al poleo**: los 5 canales configurados → `dr->modbus[]` en `tkSys`, con el
+  riel y su tiempo de arranque. Ahí sí hacen falta los mapas reales.
+
+La **configuración ya estaba** desde el paso 1 (`cfg_modbus`, 5 canales, y su hash `MH` validado
+contra el servidor), el riel `EN_PWR_QMBUS` está en `drv_rs485` desde `v0.0.8`, y el candado de
+energía lo toma `drv_rs485_power()` al prender el bus. Lo que faltaba era sólo el motor.
+
+### ⭐ Se parte en dos capas porque el AVR tiene DOS caminos para hablar Modbus
+
+Es el cambio de diseño del paso, y no es una manía de arquitectura. En FWDLGX conviven:
+
+1. `modbus_io()`, atado a la struct de configuración de un canal.
+2. **`cpres.c`, que arma las tramas byte a byte a mano** —`tx_buffer[0] = 0x64; tx_buffer[1] = 0x03;
+   …`, con su propio llamado a `modbus_CRC16()`— porque lo único que quiere es leer el registro 1 de
+   un esclavo fijo, y para eso el camino 1 no le sirve.
+
+**Lo duplicado es justo lo que arma el CRC y valida la respuesta**, así que cada bug de esa parte
+está en dos lugares y hay que acordarse de arreglar los dos. Acá:
+
+| Capa | Dónde | Qué sabe |
+|---|---|---|
+| `drv_modbus.{h,c}` | `drivers/` | armar el ADU, transmitir, validar la respuesta. **Devuelve bytes crudos** |
+| `modbus.{h,c}` | `tasks/` | codec, tipo y divisor: **de bytes a un float** |
+
+Así el poleo usa la de arriba, **la consigna del paso 7 usa la de abajo sin armar una sola trama a
+mano**, y hay un único sitio donde se arma un ADU. Es el mismo criterio que `wan_sesion_*`.
+
+### ⛔ Lo que el AVR NO valida, y por qué cada una devuelve un número plausible y falso
+
+Aquel da por buena cualquier respuesta con **largo ≥ 3 y CRC correcto**. Eso deja pasar tres cosas:
+
+1. **La respuesta de OTRO esclavo.** Con dos dispositivos en el bus, uno que conteste tarde se toma
+   como respuesta del que se está poleando. **Es el mismo mecanismo que los acuses rezagados de los
+   `DATANR`**, que costó una tarde el 2026-09-18.
+2. **La respuesta a OTRA función.**
+3. ⛔ **Una EXCEPCIÓN Modbus.** El esclavo contesta `fcode | 0x80` más un código de error; eso tiene
+   **CRC válido y largo 5**, así que pasa todos los chequeos del AVR y **el código de excepción se
+   decodifica como si fuera el dato**. Pedir un registro inexistente devuelve un `2` perfectamente
+   creíble. Es del mismo tipo que el signo que perdía el INA3221.
+
+Y una cuarta en la escritura: **el AVR no mira el eco del FC06** (*"No se analiza la respuesta ya que
+es echo"*), así que **una escritura rechazada se ve idéntica a una exitosa**. Importa justo donde más
+duele: la consigna escribe un comando de válvula y después espera a que el equipo diga que terminó;
+si la escritura no entró, lo que se espera no va a pasar nunca.
+
+⭐ **El resultado dice QUÉ falló, no sólo que falló** (`mb_result_t`), y en el banco eso vale más que
+el éxito — el mismo criterio que el `lteESC_SIN_A` / `lteESC_SIN_OK` del modem:
+
+| | A dónde manda a mirar |
+|---|---|
+| `mbSIN_RESPUESTA` | el cableado y la dirección del esclavo |
+| `mbCRC` | el ruido y la velocidad |
+| **`mbEXCEPCION`** | ⭐ **el enlace está PERFECTO**: el problema es el registro que se pidió |
+
+Con `false` a secas, los tres se ven iguales.
+
+### ⭐ La recepción bloquea en el kernel: el AVR poleaba cada 50 ms
+
+`modbus_rcvd_ADU()` mira el contador del buffer **cada 50 ms hasta un segundo**. Es exactamente lo
+que prohíbe el checklist de portación: despertaría al micro 20 veces por segundo y **anularía el
+tickless**.
+
+Acá se usa `drv_rs485_read_frame()`, que bloquea en el kernel y corta por **silencio en la línea** —
+que es, literalmente, la delimitación que define Modbus RTU. Sale más simple *y* más correcto, y
+estaba disponible desde `v0.0.8`.
+
+⚠ El silencio va en **6 ms**: el t3.5 a 9600 son 3,65 ms, pero **el piso de resolución es un tick,
+1,95 ms**, y 6 ms son 3 ticks limpios. A 19200 esto quedaría al límite y habría que ir al registro
+`RTOR` del USART.
+
+### Funciones: 03, 04 y 06, y por qué no el juego completo
+
+Pablo preguntó si convenía implementarlo entero (2026-09-21). **No**, y además de la regla de
+siempre —no escribir código que no se puede validar— hay un argumento concreto:
+
+⛔ **`cfg_modbus_set()` ya acepta `fcode` 3 o 4, pero el AVR sólo implementa el 3.** El 4 cae en
+*"FNCODE no implementado"*, así que **se puede guardar una configuración que el equipo no sabe
+ejecutar** y el canal falla recién al polear. El propio comentario del AVR dice *"Los canales pueden
+ser holding_registers (0x03) o input_registers (0x04)"*: la intención estaba, la implementación no.
+
+Y **la 04 es muy común en caudalímetros**, que suelen exponer las medidas como *input registers*.
+Implementarla es gratis: misma trama salvo el byte del fcode.
+
+| 03 | Read Holding Registers | el poleo |
+| 04 | Read Input Registers | el poleo — **cierra el hueco de la config** |
+| 06 | Write Single Register | la consigna del paso 7 |
+
+El resto —01, 02, 05, 15 y el 16, que el AVR tiene comentado con sus encoders ya escritos— queda
+afuera. Cuando aparezca un dispositivo que pida otra función, se agrega **con ese dispositivo en el
+banco**.
+
+### ⭐ Los cuatro codecs son una TABLA, no cuatro funciones
+
+El AVR tiene cuatro funciones de ~20 líneas con asignaciones byte a byte. Son una permutación, y
+**el nombre del codec es la permutación**: `C3210` manda el byte 0 del payload a `raw[3]`, el 1 a
+`raw[2]`, y así.
+
+```c
+raw[ pucDest[ codec ][ i ] ] = payload[ i ];
+```
+
+⚠ **Pero las tablas de 16 y de 32 bits son distintas y no se puede deducir una de la otra.** Con 16
+bits sólo hay dos permutaciones posibles, así que los cuatro codecs colapsan de a pares, y el AVR
+elige `C3210 == C1032` (invertido) y `C2301 == C0123` (directo). **Eso es contrato con los
+dispositivos que ya están instalados**: "arreglarlo" para que el 16 siga la lógica del 32 haría que
+un caudalímetro configurado con `C3210` empiece a leer al revés.
+
+#### ⭐ Validado sin hardware, contra el AVR y contra el bus
+
+Dos comprobaciones, las dos con el código **extraído de los archivos reales**, no con copias:
+
+- **Los codecs**: la tabla contra una transcripción literal de los cuatro `pv_decoder_f3_c*()`, en
+  **60 casos** (4 codecs × 5 tipos × 3 payloads). **Cero diferencias.** De yapa, `42 C8 00 00` con
+  `C3210` da `100.00`, que es lo que tiene que dar.
+- ⭐ **El CRC16 contra TRAMAS REALES**: las seis capturas de un bus que quedaron documentadas en
+  `cpres.c` (`64 03 00 01 00 01 DC 3F`, `64 06 00 01 00 05 11 FC`, …). Los seis CRC coinciden. Eso
+  es mejor que compararlo contra otra implementación: valida contra lo que de verdad viajó por un
+  cable.
+
+### Los otros tres cambios (acordados con Pablo, 2026-09-21)
+
+- **3 intentos por canal.** El AVR **no reintenta en el poleo** —una transacción y, si falla, NaN—
+  pero sí reintenta 3 veces en `cpres.c`, que es el mismo bus. ⚠ El costo es tiempo con el riel
+  prendido: 5 canales × 3 × 1 s de timeout son **hasta 15 s** en el peor caso.
+  ⚠ **Dos fallas no se reintentan**: una **excepción** es el esclavo diciendo que ese registro no
+  existe —va a contestar lo mismo las tres veces— y un parámetro inválido ni siquiera se transmitió.
+- **`pow(10, n)` → tabla de 10 floats.** Era una llamada de doble precisión para elegir entre diez
+  números conocidos.
+- **`nro_regs` se acota en el SETTER**, contra `DRV_MODBUS_MAX_REGS` (16) y no contra el 125 del
+  protocolo: el techo real es el buffer de recepción. El AVR acepta cualquier valor y después trunca
+  la trama al recibir — o sea que la configuración se guarda bien y **el canal falla en campo**.
+
+### ⛔ El error devuelve `false`, no un NaN
+
+`modbus_leer_canal()` devuelve `bool`. En el AVR el error se codifica como `0xFFFFFFFF`, o sea un
+**NaN flotante**, que después viaja en el `dataRcd`. Eso tiene dos problemas: impreso con `%.3f` sale
+como `nan` —el servidor recibe una palabra donde espera un número— y **un NaN se propaga en silencio**
+por cualquier cuenta que lo toque.
+
+Con un `bool` el llamador está obligado a decidir, que es lo que este firmware hace en todos lados: el
+centinela `-9999`, el `usInvalidos` del registro, la firma del RTC. ⏳ **Qué pone el frame lo define
+el 6b**; lo natural es `-9999` y el `usInvalidos` que ya existe.
+
+### El comando `modbus`
+
+```
+modbus                            estado del bus y de los 5 canales
+modbus on | off                   los dos rieles: el SP3485 y el modulo
+modbus debug on | off             traza hexadecimal de lo que sale y entra
+modbus ch <0..4>                  lee UN canal configurado
+modbus poll                       lee TODOS los habilitados
+modbus read <sla> <reg> <nregs> <fcode> <tipo> <codec> <p10>
+modbus write <sla> <reg> <valor>  funcion 06
+```
+
+⭐ **`read` arma un canal temporal y lo lee con `modbus_leer_canal()`**, o sea el mismo camino que el
+poleo: codecs, tipos, divisor y reintentos. Un atajo propio podría comportarse distinto justo en lo
+que se vino a probar.
+
+`modbus on` prende **los dos** rieles y espera los 5 s de arranque del módulo. No duplica al comando
+`rs485` —llama a la misma `drv_rs485_power()`— y evita el olvido más común del banco, que es prender
+uno solo y no entender por qué nadie contesta.
+
+ℹ️ **De paso**: el AVR prende `EN_PWR_QMBUS` **antes** de medir las analógicas, así el caudalímetro
+arranca durante el barrido de 1,4 s del INA3221. El tiempo total es el mismo pero **no se paga**. El
+poleo del 6b debería repetir el truco.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3370,7 +3547,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.58"        /* = VER                                 */
+#define FW_VERSION  "0.0.59"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -3393,8 +3570,9 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5b-2** | Los `CONF_*`: parsear y aplicar la configuración | ✅ **validado el 2026-09-11** — el hash cierra en la 2.ª sesión |
 | **5c** | Los frames de datos y el vaciado | ✅ **VALIDADO el 2026-09-21**: ventana y lotes |
 | **5d** | **`tkWan`: la FSM. El equipo transmite solo** | ✅ **VALIDADO el 2026-09-21** |
-| 6 | Modbus | |
-| 7 | Consigna (`tkCtlPres`) | |
+| **6a** | **Modbus: el motor** (transaccion, codecs, comando) | 🔨 **escrito, sin probar** |
+| 6b | Modbus: el enganche al poleo de `tkSys` | |
+| 7 | Consigna (`tkCtlPres`) — ⚠ **es Modbus**: depende del 6a | |
 | 7b | ⏳ **`tkFlow`/flowcontrol** — volvió al alcance el 2026-09-12; necesita el 2b | |
 | 8 | Watchdog cooperativo + `tkCtl` definitivo | |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo | |
