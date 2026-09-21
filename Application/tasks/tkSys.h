@@ -63,7 +63,7 @@
 #include "cfg_modbus.h"
 #include "drv_rtc79410.h"
 
-#define tkSys_STACK_SIZE    512                       /* palabras, no bytes */
+#define tkSys_STACK_SIZE    1024                      /* palabras, no bytes */
 #define tkSys_PRIORITY      ( tskIDLE_PRIORITY + 1 )
 
 /*------------------------------------------------------------------------------

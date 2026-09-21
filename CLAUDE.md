@@ -881,6 +881,11 @@ Application/
 │               frtos_cmd.{h,c}         ciclo de comandos
 └── tasks/      tkCtl.{h,c}             control: destello del LED + poleo de TERM_SENSE
                 tkCmd.{h,c}             consola
+                tkSys.{h,c}             el poleo: arma el dataRcd y lo guarda
+                tkWan.{h,c}             la FSM de la sesion con el servidor
+                wan_frame.{h,c}         el CONTRATO: arma y parsea los frames
+                fs_datos.{h,c}          la VENTANA: FS circular sobre la EEPROM
+                fs_sd.{h,c}             los LOTES: la microSD como extension
 ```
 
 **Convención de tareas:** cada una vive en `Application/tasks/` con su propio header, que declara su
@@ -3051,6 +3056,151 @@ los nombres quedan raros.
 si la pila falló, todo el estado de la SRAM es sospechoso, no sólo la FAT. Queda anotado; no se tocó
 todavía para no mover dos cosas a la vez.
 
+### 🔨 Paso 5d: `tkWan`, la máquina de estados — el equipo transmite SOLO
+
+`Application/tasks/tkWan.{h,c}`, portada de `FWDLGX_tkWAN.c`. **Escrita el 2026-09-21, sin probar
+todavía en banco.** Con esto el equipo deja de depender de que alguien tipee `lte data`: abre la
+sesión, se configura, transmite y se apaga por su cuenta.
+
+Los cuatro estados son los del AVR, y **cualquier fallo vuelve a `APAGADO`**:
+
+| Estado | Qué hace |
+|---|---|
+| `APAGADO` | modem sin energía. Acá se decide **cuánto** esperar (es `u_get_sleep_time()`) |
+| `OFFLINE` | enciende, entra en modo AT, lee identidad y red, pone el reloj en hora, sale de AT y prueba con un `PING` |
+| `ONLINE_CONFIG` | `CONF_ALL` y los `CONF_*` que el servidor pida |
+| `ONLINE_DATA` | vacía la ventana de la EEPROM y después los lotes de la microSD |
+
+Volver al principio ante cualquier fallo no es pereza: **un fallo a mitad de sesión deja al módulo en
+un estado que desde afuera no se puede saber** —puede haber quedado en modo AT, con una respuesta a
+medio llegar en el buffer—. Apagarlo y empezar de nuevo es lo único que garantiza un punto de partida
+conocido.
+
+#### ⭐ La sesión de la FSM es la MISMA que hacen los comandos, no una copia
+
+Todo el 5a-5c se validó primero como comandos de consola, uno por uno contra el servidor real. Al
+escribir la FSM ese código **se movió a `tkWan.c`** —875 líneas desde `tkCmd.c`— y los comandos
+`lte ping` / `lte conf` / `lte data` pasaron a llamar a `wan_sesion_ping()`, `wan_sesion_config()` y
+`wan_sesion_datos()`.
+
+Es el mismo criterio que `poll` con `tkSys_poll()`: si fueran dos caminos, **lo que se valida a mano
+dejaría de ser lo que hace el equipo solo**, y el banco perdería su valor como evidencia.
+
+⚠ Al mover 875 líneas entre unidades de compilación, `-fsyntax-only` **no alcanza**: el síntoma de un
+símbolo que quedó del lado equivocado es un `undefined reference`, que sólo aparece al **linkear**.
+Por eso la verificación fue compilar los 42 objetos y linkear el `.elf` entero.
+
+#### ⭐ El reintento de las lecturas AT ES el poll de registro a la red
+
+Es la parte no obvia del `OFFLINE`, y está dicha en el AVR: `ICCID` e `IMEI` salen enseguida porque
+son del propio módulo, pero **`CSQ` y `CIP` dependen de que se haya registrado**, y eso tarda.
+Reintentar con espera *es* esperar el registro.
+
+Y si tras los intentos no hay IP, se vuelve a `APAGADO` sin intentar el `PING`: gastar un ciclo de
+ping que va a fallar igual sólo cuesta batería. Es la misma lectura que cerró el diagnóstico del
+2026-09-09 — **tener señal no es tener conexión**, lo que decide es `AT+CIP?`.
+
+#### ⛔ Detectar la caída no sirve si nadie actúa: `wan_sesion_datos()` devuelve `bool`
+
+Lo trajo Pablo al repasar la FSM (2026-09-21): *"Si cae lo detectamos porque DATA se va por
+timeout"*. Cierto, y ahí estaba el hueco: la primera versión **detectaba** el timeout pero la FSM no
+hacía nada con él — se quedaba en `ONLINE_DATA` reintentando cada `timerpoll` **con el modem
+encendido contra un servidor mudo**, que es el peor consumo posible del equipo.
+
+Ahora el vaciado informa si el enlace se cayó y la FSM vuelve a `APAGADO`, que es lo único que
+reestablece: apaga, prende, reentra en modo AT, reespera el registro y rehace el `PING`.
+
+⚠ **Lo que NO cambió es el borrado**: un vaciado interrumpido deja los registros sin confirmar en la
+ventana, igual que antes. Eso ya estaba resuelto en el 5c y es por lo que `peek()` y `pop()` están
+separados.
+
+#### Qué hace cada modo, y dónde se decide
+
+Todo en `prvSegundosApagado()`, que es `u_get_sleep_time()` del AVR:
+
+| Modo | Espera en `APAGADO` |
+|---|---|
+| `CONTINUO`, **`RTU`** | **0**: no se apaga |
+| `DISCRETO` | `timerdial` |
+| `MIXTO` | 0 dentro de la ventana `PWRON..PWROFF`; si está afuera, **hasta que empiece** |
+| **`SILENT`** | ⛔ no llega acá: el modem **no se enciende nunca** |
+
+⚠ **`RTU` no tiene caso propio en el AVR**: cae en el `default` y su `base_print` lo llama *"(RTU)
+continuo"*. Acá se hace explícito en vez de depender de un default — que un modo de operación dependa
+de dónde cae un `switch` es exactamente el tipo de cosa que se rompe callada al agregar el modo
+siguiente.
+
+**La ventana de `MIXTO` cruza la medianoche cuando `PWRON > PWROFF`**, y ese caso está resuelto: la
+comparación se hace con `||` en vez de `&&`. Y **sin hora válida `MIXTO` elige CONTINUO**, o sea
+transmitir de más: un equipo que no reporta es indistinguible de uno roto.
+
+#### ⭐ Con `tkWan` andando, `RTU` deja de descartar SIEMPRE
+
+`wan_hay_enlace()` es lo que le faltaba a `tkSys` desde el 2026-09-12: en `RTU` una muestra se
+transmite si hay enlace y **se descarta si no lo hay**. Hasta que existió esta tarea no había a quién
+preguntarle, así que descartaba todo.
+
+#### En `CONTINUO` no se reabre la sesión entera en cada vuelta
+
+Tras vaciar, `ONLINE_DATA` **vuelve a sí mismo** esperando `timerpoll`, no a `OFFLINE`. Rehacer modo
+AT, lecturas y `PING` en cada vuelta serían ~50 s de setup para mandar un frame.
+
+#### La espera es troceada, y por dos razones distintas
+
+`prvEsperar()` corta en trozos de 60 s:
+
+1. ⏳ **El watchdog (paso 8) necesita un kick periódico**, y una espera de una hora entera no le daría
+   lugar a ninguno. El lugar del kick ya está marcado en el lazo.
+2. Con el tick a 512 Hz, `pdMS_TO_TICKS( segundos * 1000 )` **desborda un `uint32_t` a partir de
+   ~2,3 h**. Troceando, cada espera es chica y el problema no existe. **El AVR tiene exactamente el
+   mismo comentario**, con su propio número.
+
+#### ✅ `kill wan`: el operador trabaja el módulo a mano, y después RESETEA
+
+Criterio de Pablo (2026-09-21), copiado del AVR: *"Cuando un operador quiere trabajar con un módulo,
+primero 'mata' la tarea que lo usa para no pisarse."*
+
+⭐ **Y el `kill` del AVR saca además a la tarea del watchdog** (`WD_stop_task()`) — ése es el detalle
+que lo hace correcto. Suspender una tarea sin desregistrarla haría que el watchdog la diera por
+colgada y **reseteara el equipo justo mientras el operador está trabajando**, que es el síntoma más
+desconcertante posible. Acá está previsto para cuando el watchdog exista.
+
+⚠ **No hay comando para revivir una tarea, y es a propósito** (Pablo): *"la idea es que luego que un
+operador entro en modo comando para pruebas o diagnóstico, al salir resete el datalogger para que
+entre en modo de funcionamiento 'limpio'"*. Reanudar una tarea que quedó a mitad de una sesión la
+dejaría creyendo cosas que ya no son ciertas.
+
+La muerte es **cooperativa**: `wan_pedir_kill()` levanta una bandera y la tarea se suspende **en su
+propio lazo**, después de apagar el modem y soltar el candado de energía. Un `vTaskSuspend()` desde
+afuera lo dejaría encendido para siempre.
+
+#### ⚠ Los stacks se agrandaron a propósito, y NO se ajustan por los números de Debug
+
+A pedido de Pablo (2026-09-21): *"Dado que tenemos memoria RAM de sobra, si te parece asignale a cada
+tarea y al heap un poco mas asi no quedan justos"*.
+
+| Tarea | Stack (palabras) |
+|---|---|
+| `tkCtl` | 512 |
+| `tkSys` | 1024 |
+| `tkCmd` | 1024 |
+| **`tkWan`** | **2048** — arma frames y habla con FatFs |
+
+La RAM pasó de 35 a **44 KB de 256**. Apretar los stacks no compra nada y cuesta caro: un desborde en
+FreeRTOS **no da un error, corrompe la memoria de al lado**, y el síntoma aparece en cualquier otro
+lugar, horas después.
+
+⚠ **Y hay una razón concreta para no ajustarlos por los *high water mark* de hoy: todo el bring-up
+corre en Debug con `-O0`, que usa bastante MÁS stack que `-Os`.** Los números de Debug son
+conservadores para Release —el cambio va en la dirección segura— pero no son los que van a valer.
+`status` imprime el mínimo libre de las cuatro tareas; hay que volver a mirarlos sobre un binario
+Release antes de campo.
+
+⏳ **Pendiente para Pablo: `configTOTAL_HEAP_SIZE` sigue en 3000 bytes** y se configura desde CubeMX
+(sugerido **16384**). No lo toco desde el `.c` porque desincronizaría el `.ioc`, que es la fuente de
+verdad. Hoy no aprieta —las cuatro tareas son estáticas y no tocan el heap— pero FatFs y cualquier
+cosa que entre después sí lo usan.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3069,7 +3219,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.54"        /* = VER                                 */
+#define FW_VERSION  "0.0.57"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -3091,7 +3241,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5b-1** | `CONF_ALL`: los hashes y qué pide el servidor | ✅ **validado el 2026-09-11** |
 | **5b-2** | Los `CONF_*`: parsear y aplicar la configuración | ✅ **validado el 2026-09-11** — el hash cierra en la 2.ª sesión |
 | **5c** | Los frames de datos y el vaciado | ✅ **VALIDADO el 2026-09-21**: ventana y lotes |
-| 5d | Los modos continuo / discreto / mixto | |
+| **5d** | **`tkWan`: la FSM. El equipo transmite solo** | 🔨 **escrita, sin probar** |
 | 6 | Modbus | |
 | 7 | Consigna (`tkCtlPres`) | |
 | 7b | ⏳ **`tkFlow`/flowcontrol** — volvió al alcance el 2026-09-12; necesita el 2b | |
@@ -3166,7 +3316,8 @@ no un datalogger**. Pero un RTU con el enlace caído **se ve exactamente igual q
 no hay ningún síntoma. Por eso los descartes se cuentan y se informan por consola, con el mismo
 criterio que `ulPisados` de la ventana: *hacer visible lo que se perdió*.
 
-⏳ **Hoy descarta siempre**, porque quien decide si hay enlace es `tkWan` y todavía no existe (5d).
+✅ **Resuelto con el paso 5d**: `wan_hay_enlace()` es quien lo dice. Hasta que existió `tkWan`
+descartaba **siempre**, porque no había a quién preguntarle.
 
 #### En `SILENT` la microSD deja de ser una extensión y pasa a ser el DESTINO
 

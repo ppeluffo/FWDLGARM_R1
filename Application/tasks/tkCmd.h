@@ -12,7 +12,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define tkCmd_STACK_SIZE    512     /* palabras. Necesita lugar para vsnprintf */
+#define tkCmd_STACK_SIZE    1024    /* palabras. Necesita lugar para vsnprintf */
 #define tkCmd_PRIORITY      ( tskIDLE_PRIORITY + 1 )
 
 void tkCmd( void *pvParameters );

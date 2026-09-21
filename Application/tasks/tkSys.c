@@ -8,6 +8,7 @@
 #include "cfg_nvm.h"
 #include "fs_datos.h"
 #include "fs_sd.h"
+#include "tkWan.h"
 #include "drv_adc.h"
 #include "drv_ina3221.h"
 #include "drv_pulsos.h"
@@ -398,12 +399,13 @@ void tkSys( void *pvParameters )
          * transmitir (Pablo, 2026-09-12): es una unidad remota, no un
          * datalogger. Ver `cfg_base.h`.
          */
-        if( cfg_base_modo_sin_memoria() )
+        if( cfg_base_modo_sin_memoria() && !wan_hay_enlace() )
         {
             /*
-             * ⏳ **Hoy descarta SIEMPRE**, porque quien decide si hay enlace es
-             * `tkWan` y todavía no existe (paso 5d). Cuando exista, el dato se
-             * le entrega y sólo se descarta si el enlace está caído.
+             * ✅ Desde el paso 5d se consulta **el enlace real**: `wan_hay_enlace()`
+             * dice si la FSM tiene sesión abierta con el servidor. Hasta que esa
+             * tarea existió, `RTU` descartaba siempre porque no había a quién
+             * preguntarle.
              *
              * ⚠ El contador NO es cosmético: descartar es la única situación en
              * la que este equipo pierde datos a propósito, y un RTU con el

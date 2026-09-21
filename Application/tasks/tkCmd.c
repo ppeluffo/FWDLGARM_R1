@@ -20,10 +20,12 @@
 #include "drv_lte.h"
 #include "cfg_nvm.h"
 #include "cfg_hash.h"
+#include "tkCtl.h"
 #include "tkSys.h"
 #include "wan_frame.h"
 #include "fs_datos.h"
 #include "fs_sd.h"
+#include "tkWan.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_term_sense.h"
@@ -298,6 +300,7 @@ static void cmdCnt( void );
 static void cmdEv( void );
 static void cmdLte( void );
 static void cmdConfig( void );
+static void cmdKill( void );
 static void cmdPoll( void );
 static void cmdFrame( void );
 static void cmdCls( void );
@@ -318,6 +321,7 @@ static void prvCntUso  ( void );
 static void prvEvUso   ( void );
 static void prvLteUso  ( void );
 static void prvConfigUso( void );
+static void prvKillUso( void );
 
 /*
  * Causa del último reset, leída de RCC_CSR antes de limpiarla.
@@ -470,6 +474,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "ev",     cmdEv     );
     FRTOS_CMD_register( "lte",    cmdLte    );
     FRTOS_CMD_register( "config", cmdConfig );
+    FRTOS_CMD_register( "kill",   cmdKill   );
     FRTOS_CMD_register( "poll",   cmdPoll   );
     FRTOS_CMD_register( "frame",  cmdFrame  );
     FRTOS_CMD_register( "cls",    cmdCls    );
@@ -552,6 +557,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "ev",     "electrovalvula TOYI: abrir, cerrar y estado",           prvEvUso      },
     { "lte",    "modem LTE, etapa 1: la energia y el PWRKEY",            prvLteUso     },
     { "config", "configuracion del datalogger (EEPROM)",                 prvConfigUso  },
+    { "kill",   "mata una tarea para trabajar su periferico a mano",     prvKillUso    },
     { "poll",   "fuerza un poleo de todos los canales y lo imprime",    NULL          },
     { "frame",  "arma el frame de datos y lo muestra (sin modem)",      NULL          },
     { "cls",    "limpia la pantalla de la terminal",                    NULL          },
@@ -632,8 +638,38 @@ static void cmdStatus( void )
              ( unsigned long ) pwr_lock_estado(),
              pwr_deep_sleep_permitido() ? "(Stop 2 habilitado)" : "(solo Sleep)" );
     xprintf( "heap libre   : %u bytes\r\n", ( unsigned ) xPortGetFreeHeapSize() );
-    xprintf( "stack tkCmd  : %u palabras libres\r\n",
-             ( unsigned ) uxTaskGetStackHighWaterMark( NULL ) );
+    /*
+     * ⚠ El *high water mark* es el MÍNIMO que quedó libre desde que arrancó la
+     * tarea, no lo que hay libre ahora: es la marca del peor momento, que es lo
+     * único que sirve para dimensionar.
+     *
+     * ⚠ **Estos números son de Debug (`-O0`), que usa más stack que `-Os`.** Son
+     * conservadores para Release —el cambio va en la dirección segura— pero no
+     * son los que van a valer: antes de campo hay que rehacer la medición sobre
+     * un binario Release.
+     */
+    xprintf( "stacks libres (minimo desde el arranque, en palabras):\r\n" );
+    xprintf( "  tkCmd : %4u de %u\r\n",
+             ( unsigned ) uxTaskGetStackHighWaterMark( NULL ), tkCmd_STACK_SIZE );
+
+    if( xHandle_tkCtl != NULL )
+    {
+        xprintf( "  tkCtl : %4u de %u\r\n",
+                 ( unsigned ) uxTaskGetStackHighWaterMark( xHandle_tkCtl ), tkCtl_STACK_SIZE );
+    }
+
+    if( xHandle_tkSys != NULL )
+    {
+        xprintf( "  tkSys : %4u de %u\r\n",
+                 ( unsigned ) uxTaskGetStackHighWaterMark( xHandle_tkSys ), tkSys_STACK_SIZE );
+    }
+
+    if( xHandle_tkWan != NULL )
+    {
+        xprintf( "  tkWan : %4u de %u   (estado: %s)\r\n",
+                 ( unsigned ) uxTaskGetStackHighWaterMark( xHandle_tkWan ), tkWan_STACK_SIZE,
+                 wan_estado_str() );
+    }
 }
 //------------------------------------------------------------------------------
 /*
@@ -2107,6 +2143,24 @@ static void cmdCnt( void )
              ( xCfg.ulPupdr == 0UL ) ? "flotante, CORRECTO" : "OJO: NO deberia tener pull" );
 }
 //------------------------------------------------------------------------------
+/*------------------------------------------------------------------------------
+ * Los comandos de diagnóstico del modem.
+ *
+ * ⚠ La SESIÓN —`ping`, `conf`, `data`— **no está acá**: vive en `tkWan.c`, y
+ * estos comandos la disparan. Se movió al escribir la FSM (paso 5d) para que
+ * sean el mismo código y no dos copias, igual que `poll` con `tkSys_poll()`.
+ *----------------------------------------------------------------------------*/
+
+/* 256 alcanza para cualquier respuesta AT y para un bloque de datos del puente.
+   Es estático: 256 bytes en el stack de tkCmd, que tiene 2 KB, no entran. */
+#define LTE_BUF             256U
+
+/* Techo para que el módulo empiece a contestar. Un AT simple contesta en
+   milisegundos; los comandos de red tardan mucho más, y para ésos está 'lte rx'
+   con el tiempo explícito. */
+#define LTE_ESCUCHA_MS      1000U
+
+//------------------------------------------------------------------------------
 static void prvEvUso( void )
 {
     xprintf( "uso:\r\n" );
@@ -2189,44 +2243,7 @@ static void cmdEv( void )
     xprintf( "  PA7 ctl    : %s\r\n",
              drv_valvula_pin_ctl_estado() ? "1 - abrir" : "0 - cerrar (reposo)" );
 }
-//------------------------------------------------------------------------------
-/*------------------------------------------------------------------------------
- * Modem LTE
- *----------------------------------------------------------------------------*/
 
-/* 256 alcanza para cualquier respuesta AT y para un bloque de datos del puente.
-   Es estático: 256 bytes en el stack de tkCmd, que tiene 2 KB, no entran. */
-#define LTE_BUF             256U
-
-/* Techo para que el módulo empiece a contestar. Un AT simple contesta en
-   milisegundos; los comandos de red tardan mucho más, y para ésos está 'lte rx'
-   con el tiempo explícito. */
-#define LTE_ESCUCHA_MS      1000U
-
-/* Acá adentro entran el `ftime` del módulo, la petición HTTP por LTE y la
-   respuesta del servidor. Por eso es mucho más largo que un AT. */
-#define LTE_PING_TIMEOUT_MS 15000U
-
-/*
- * Cuántos frames se mandan sin esperar respuesta antes de pedir confirmación.
- * Es el valor del AVR y se mantiene: cuanto más grande, más rápido el vaciado,
- * pero más registros se retransmiten si la sesión se corta.
- */
-#define LTE_DATA_VENTANA    10U
-
-/*
- * ⚠ La pausa entre frames, y **no es opcional**: el DTU delimita cada trama por
- * SILENCIO en la serie (su `ftime`, configurado en 250 ms). Sin esta espera dos
- * frames se le juntan en un solo GET. Va con margen sobre el `ftime`.
- */
-#define LTE_DATA_MS_ENTRE_FRAMES    500U
-
-/*
- * Cuánto espera CADA lectura mientras se busca la respuesta buena. No es el
- * timeout total —ése lo pone el lazo de `prvEsperarRespuestaConClase()`— sino el
- * tiempo que se le da a una trama para aparecer antes de volver a mirar.
- */
-#define LTE_DATA_MS_POR_LECTURA     3000U
 
 static int16_t prvLteEscuchar( uint32_t ulMs );
 static void    prvLteBridge  ( void );
@@ -2276,881 +2293,6 @@ static void prvLteUso( void )
 }
 //------------------------------------------------------------------------------
 /*
- * Deja el módulo en modo comando, venga de donde venga.
- *
- * ⚠ Existe porque `lte esc` **falla si el módulo YA está en modo comando**: el
- * `+++` se lee como texto cualquiera, no contesta la `a`, y el resultado es
- * `SIN_A` — el mismo que cuando no escucha nada. Ese error es el que confunde
- * cuando uno va y viene entre consultas.
- *
- * El orden importa: **primero el escape** y sólo si falla se prueba un `AT`. Al
- * revés, un `AT` mandado en modo transparente **se iría a la red como datos**;
- * es inocuo pero ensucia, y no hay razón para pagarlo en el caso normal.
- */
-/*
- * ⚠ LOS COMANDOS DE CONFIGURACIÓN NO ENTRAN SOLOS EN MODO AT. SI NO ESTÁ, FALLAN.
- *
- * Es el modelo del AVR y lo pidió Pablo explícitamente (2026-09-09): *"con un
- * comando lo pongo en modo AT y con otro lo saco. Luego tengo comandos que
- * ASUMIENDO que está en modo AT le mandan la configuración o leen. Estos
- * comandos NO intentan ponerlo. Si no está, fallan."*
- *
- * O sea: `lte esc` entra, `lte exit` sale, y en el medio `info`/`set`/`save`
- * sólo hablan. El estado del módulo lo maneja el técnico, que sabe en cuál está
- * porque lo puso él.
- *
- * **Y elimina de raíz el bug del 2026-09-09**: intentar el escape "por las
- * dudas" mandaba `+++` cuando el módulo YA estaba en modo comando. Ese `+++` va
- * sin CR —es una contraseña, no un comando— así que quedaba colgado en el buffer
- * del módulo y el `AT` siguiente se le concatenaba: leía `+++AT`, contestaba
- * ERROR, y desde afuera se veía como "no se pudo entrar en modo comando"
- * **estando adentro**. Un estado explícito no tiene ese problema.
- */
-static bool prvLteListo( void )
-{
-    if( !drv_lte_power_estado() )
-    {
-        xprintf( "el modem esta APAGADO: 'lte on' primero\r\n" );
-        return false;
-    }
-
-    return true;
-}
-//------------------------------------------------------------------------------
-/*
- * Una vuelta completa contra el servidor: escribe el frame y espera la
- * respuesta. La usan CONF_ALL y los cinco bloques, que hacen exactamente lo
- * mismo, y por eso está acá afuera: con seis copias, un arreglo en una se
- * olvida en las otras cinco.
- *
- * ⚠ **ASUME modo TRANSPARENTE.** Ver `prvLtePing()`.
- */
-/*
- * ⛔ Avisa si se está por transmitir con el IMEI FALSO.
- *
- * El 2026-09-21 se transmitió una sesión entera con los 15 ceros y nada lo
- * dijo: el IMEI se cachea recién cuando alguien corre `lte info`, y esa corrida
- * empezó con `lte clock set`. **El servidor los aceptó**, así que esos frames
- * quedaron en la base atribuidos a un equipo que no existe.
- *
- * ⚠ **Avisa pero no impide**, que es el criterio de este firmware (igual que
- * `cfg_nvm_chequear_nombres()`): en banco a veces se quiere transmitir sin
- * haber leído el IMEI, y un comando que se niega en medio de una prueba es peor
- * que uno que advierte.
- */
-static void prvAvisarImeiFalso( void )
-{
-    if( wan_imei_es_falso() )
-    {
-        xprintf( "[!] el IMEI es el FALSO (15 ceros): nadie se lo pregunto al modulo.\r\n" );
-        xprintf( "    los frames van a quedar en el servidor sin equipo que los reclame.\r\n" );
-        xprintf( "    correr 'lte esc' + 'lte info' para leerlo, y despues 'lte exit'.\r\n" );
-    }
-}
-//------------------------------------------------------------------------------
-static bool prvLteTxRx( const char *pcFrame, uint16_t usLargo,
-                        char *pcRta, uint16_t usRtaSize )
-{
-    xprintf( "-> " );
-    ( void ) frtos_write( fdTERM, pcFrame, usLargo );
-    xprintf( "\r\n" );
-
-    drv_lte_flush();
-
-    if( drv_lte_write( pcFrame, usLargo ) != ( int16_t ) usLargo )
-    {
-        xprintf( "ERROR: no se pudo transmitir\r\n" );
-        return false;
-    }
-
-    int16_t sRet = drv_lte_read( pcRta, usRtaSize - 1U, LTE_PING_TIMEOUT_MS );
-
-    if( sRet <= 0 )
-    {
-        xprintf( "sin respuesta en %u ms.\r\n", ( unsigned ) LTE_PING_TIMEOUT_MS );
-        xprintf( "  el modulo esta en modo TRANSPARENTE? (en modo comando NO transmite)\r\n" );
-        return false;
-    }
-
-    pcRta[ sRet ] = '\0';
-
-    xprintf( "<- " );
-    ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
-    xprintf( "\r\n" );
-
-    return true;
-}
-//------------------------------------------------------------------------------
-/*
- * Los frames `CONF_*`: por cada bloque que el servidor pidió, se le manda su
- * hash y él contesta con la configuración que quiere que tenga el equipo.
- *
- * Tres cosas que no son obvias:
- *
- *  - **Se sigue con los demás aunque uno falle.** Es lo que hace el AVR
- *    (`wan_state_online_config()`: sólo `conf_base` aborta la secuencia) y es
- *    lo que permite que un `FLOWC` que nunca vamos a configurar no deje al
- *    equipo sin transmitir una sola muestra.
- *  - **Se verifica que la respuesta sea de ESTE bloque** antes de aplicarla. Es
- *    el `wan_check_response()` del AVR, y no es paranoia: con el módulo en
- *    transparente una respuesta demorada del frame anterior llega igual, y
- *    aplicar la configuración de un bloque leyendo la respuesta de otro
- *    escribiría basura con toda naturalidad.
- *  - **Se graba UNA sola vez al final**, y sólo si algo cambió. Ver
- *    `wan_conf_aplicar()`.
- */
-static void prvLteConfBloques( const wan_conf_flags_t *pxFlags )
-{
-    static char pcFrame[ WAN_FRAME_BUFFER_SIZE ];
-    static char pcRta  [ WAN_FRAME_BUFFER_SIZE ];
-    char        pcEsperado[ 24 ];
-    bool        bAlgo = false;
-    uint8_t     i;
-
-    for( i = 0U; i < ( uint8_t ) wanBLOQUE_NRO; i++ )
-    {
-        wan_bloque_t eBloque = ( wan_bloque_t ) i;
-
-        if( !wan_conf_pedido( pxFlags, eBloque ) )
-        {
-            continue;
-        }
-
-        xprintf( "\r\n--- %s ---\r\n", wan_conf_clase( eBloque ) );
-
-        uint16_t usLargo = wan_frame_conf_bloque( pcFrame, sizeof( pcFrame ), eBloque );
-
-        if( usLargo == 0U )
-        {
-            continue;
-        }
-
-        if( !prvLteTxRx( pcFrame, usLargo, pcRta, sizeof( pcRta ) ) )
-        {
-            continue;
-        }
-
-        snprintf( pcEsperado, sizeof( pcEsperado ), "CLASS=%s", wan_conf_clase( eBloque ) );
-
-        if( strstr( pcRta, pcEsperado ) == NULL )
-        {
-            xprintf( "[!] la respuesta no es de %s: se descarta\r\n", wan_conf_clase( eBloque ) );
-            continue;
-        }
-
-        switch( wan_conf_aplicar( eBloque, pcRta ) )
-        {
-            case wanCONF_OK:
-                xprintf( "CONFIG=OK: este bloque ya coincide\r\n" );
-                break;
-
-            case wanCONF_RECONFIGURAR:
-                bAlgo = true;
-                break;
-
-            case wanCONF_DESCONOCIDO:
-                xprintf( "[!] el servidor NO RECONOCE al equipo\r\n" );
-                break;
-
-            default:
-                xprintf( "[!] no se aplico nada de este bloque\r\n" );
-                break;
-        }
-    }
-
-    xprintf( "\r\n" );
-
-    if( !bAlgo )
-    {
-        xprintf( "no cambio nada: no se graba la EEPROM\r\n" );
-        return;
-    }
-
-    /* Con la configuración nueva puede aparecer lo de siempre: dos canales con
-       el mismo nombre. Se avisa, no se impide — igual que en `config save`. */
-    ( void ) cfg_nvm_chequear_nombres();
-
-    if( cfg_nvm_save_all() )
-    {
-        xprintf( "configuracion nueva GRABADA en la EEPROM\r\n" );
-        xprintf( "verificar los hashes con 'config' y repetir 'lte conf'\r\n" );
-    }
-    else
-    {
-        xprintf( "ERROR: no se pudo grabar la configuracion en la EEPROM !!\r\n" );
-    }
-}
-//------------------------------------------------------------------------------
-/*
- * `CONF_ALL`: manda un hash por bloque y el servidor contesta cuáles quiere
- * reconfigurar. Es el paso donde el contrato del hash se prueba de verdad.
- *
- * ⚠ **ASUME modo TRANSPARENTE**, igual que `lte ping`.
- *
- * Y si pide algo, sigue con los `CONF_*`: le pregunta bloque por bloque y
- * **aplica lo que conteste**, grabando una sola vez al final. Es la secuencia
- * completa de configuración, la misma que va a correr sola la FSM del paso 5c.
- */
-static void prvLteConfAll( void )
-{
-    static char pcFrame[ WAN_FRAME_BUFFER_SIZE ];
-    static char pcRta  [ WAN_FRAME_BUFFER_SIZE ];
-
-    if( !prvLteListo() )
-    {
-        return;
-    }
-
-    if( !wan_csq_valido() )
-    {
-        /*
-         * Se avisa pero NO se aborta: el frame sale igual con CSQ=0, y que el
-         * servidor conteste prueba que el enlace está aunque la señal no se haya
-         * podido medir. Abortar acá escondería el resultado que se vino a ver.
-         */
-        xprintf( "[!] el CSQ leido no es una medida (99 = desconocido, >=31 = todavia\r\n" );
-        xprintf( "    no campo en la red). Correr 'lte esc' + 'lte info' para refrescarlo.\r\n" );
-    }
-
-    prvAvisarImeiFalso();
-
-    uint16_t usLargo = wan_frame_conf_all( pcFrame, sizeof( pcFrame ) );
-
-    if( usLargo == 0U )
-    {
-        return;
-    }
-
-    if( !prvLteTxRx( pcFrame, usLargo, pcRta, sizeof( pcRta ) ) )
-    {
-        return;
-    }
-
-    wan_conf_flags_t xFlags;
-
-    switch( wan_frame_conf_all_rta( pcRta, &xFlags ) )
-    {
-        case wanCONF_OK:
-            xprintf( "CONFIG=OK: la configuracion del equipo coincide con la del servidor\r\n" );
-            break;
-
-        case wanCONF_DESCONOCIDO:
-            /*
-             * El AVR ante esto se reconfigura solo: pasa a DISCRETO con los
-             * timers en 1 hora. Es la política correcta —si el servidor no te
-             * reconoce, insistir cada minuto sólo gasta batería y tráfico— pero
-             * **acá todavía no se hace**: que un comando de banco cambie la
-             * configuración del equipo por lo bajo sería peor que el problema.
-             * Entra con la FSM, en el paso 5c.
-             */
-            xprintf( "[!] el servidor NO RECONOCE al equipo (CONFIG=ERROR / FAIL).\r\n" );
-            xprintf( "    hay que dar de alta el IMEI %s en el servidor.\r\n", wan_imei() );
-            break;
-
-        case wanCONF_RECONFIGURAR:
-            xprintf( "el servidor pide reconfigurar:%s%s%s%s%s%s\r\n",
-                     xFlags.bBase        ? " BASE"     : "",
-                     xFlags.bAinputs     ? " AINPUT"   : "",
-                     xFlags.bCounter     ? " COUNTER"  : "",
-                     xFlags.bModbus      ? " MODBUS"   : "",
-                     xFlags.bConsigna    ? " PRESION"  : "",
-                     xFlags.bFlowcontrol ? " FLOWC"    : "" );
-
-            if( xFlags.bFlowcontrol )
-            {
-                /* Esperado y acordado: no mandamos FH, así que el servidor toma
-                   uno por defecto y lo pide siempre. Se ignora a propósito. */
-                xprintf( "  (FLOWC se pide SIEMPRE porque no mandamos su hash: se ignora)\r\n" );
-            }
-
-            prvLteConfBloques( &xFlags );
-            break;
-
-        default:
-            xprintf( "respuesta no reconocida\r\n" );
-            break;
-    }
-}
-//------------------------------------------------------------------------------
-/*
- * Espera la respuesta a un frame **descartando las que no son de él**.
- *
- * ⛔ EL PROBLEMA QUE RESUELVE, encontrado en banco el 2026-09-21 con el log del
- * servidor al lado:
- *
- * **El servidor contesta a TODOS los GET, también a los `DATANR`.** El
- * `NR` —"no response"— es una convención de la capa de aplicación: dice que el
- * equipo no va a *esperar* la respuesta, no que el servidor no la mande. Por
- * HTTP siempre hay respuesta, y para un `DATANR` es un cuerpo **vacío**, que
- * envuelto en HTML llega como `<html></html>`.
- *
- * Esas respuestas viajan por LTE con cientos de ms de latencia, así que **llegan
- * cuando ya estamos mandando el frame siguiente**. Los tiempos del banco:
- *
- *     14:41:46,455  el servidor procesa el DATANR #9   -> responde vacio
- *     14:41:47,445  el servidor procesa el DATA        -> responde CLASS=DATA&CLOCK=...
- *
- * Con una pausa de 500 ms entre frames, el `drv_lte_flush()` de antes del `DATA`
- * corre **justo antes** de que llegue la respuesta del `DATANR` anterior: la
- * limpiamos cuando todavía venía en camino, y después leímos **esa** en lugar de
- * la nuestra. El síntoma era un `<html></html>` vacío que parecía un rechazo del
- * servidor, cuando en su log figuraba `raw_response->CLASS=DATA&CLOCK=2609211441`.
- *
- * ⭐ **El AVR no tiene este problema y vale la pena entender por qué**: aquel
- * ACUMULA todo lo que llega en un buffer y busca el patrón con `strstr`
- * (`wan_check_response`), así que una respuesta demorada simplemente queda
- * delante y no estorba. Nosotros leemos **una trama delimitada por silencio** y
- * la evaluamos sola — que es mejor para todo lo demás, pero necesita esto.
- *
- * ⚠ Descartar es lo correcto y no un parche: una respuesta sin `CLASS=` **no
- * lleva información** —es el acuse vacío de un `DATANR`— así que perderla no
- * pierde nada. Lo que no se puede es tomarla por la respuesta de otro frame.
- */
-static bool prvEsperarRespuestaConClase( char *pcRta, uint16_t usSize,
-                                         uint32_t ulTimeoutMs )
-{
-    TickType_t xInicio  = xTaskGetTickCount();
-    TickType_t xLimite  = pdMS_TO_TICKS( ulTimeoutMs );
-    uint8_t    ucVacias = 0U;
-
-    while( ( xTaskGetTickCount() - xInicio ) < xLimite )
-    {
-        int16_t sRet = drv_lte_read( pcRta, usSize - 1U, LTE_DATA_MS_POR_LECTURA );
-
-        if( sRet <= 0 )
-        {
-            continue;   /* nada todavía; el lazo decide cuándo rendirse */
-        }
-
-        pcRta[ sRet ] = '\0';
-
-        if( strstr( pcRta, "CLASS=" ) != NULL )
-        {
-            if( ucVacias > 0U )
-            {
-                xprintf( "   (se descartaron %u acuses vacios de DATANR anteriores)\r\n",
-                         ( unsigned ) ucVacias );
-            }
-
-            return true;
-        }
-
-        /* Sin `CLASS=` no hay nada que interpretar: es el acuse de un DATANR que
-           venía atrasado. Se cuenta para poder decirlo, y se sigue esperando. */
-        ucVacias++;
-    }
-
-    if( ucVacias > 0U )
-    {
-        xprintf( "   (llegaron %u acuses vacios, pero ninguna respuesta con CLASS=)\r\n",
-                 ( unsigned ) ucVacias );
-    }
-
-    return false;
-}
-//------------------------------------------------------------------------------
-/*
- * Arma el frame que se va a transmitir a partir de **una línea del lote**, que
- * trae sólo la parte de datos (`DATE=…`).
- *
- *     prefijo construido AHORA          +  '&'  +  la línea del archivo
- *     ID=..&HW=..&TYPE=..&VER=..&CLASS=..        DATE=..&TIME=..&…
- *
- * ⭐ Construir el prefijo en el momento de transmitir es todo el punto del
- * formato: el `ID` es el **IMEI del módulo que hay hoy**, no el que había cuando
- * se guardó el lote — si no, cambiar el módulo LTE haría que los lotes
- * pendientes salieran con el IMEI viejo. Y el `CLASS` sale directamente como
- * corresponde, sin tener que reescribir nada.
- *
- * ⚠ **Tolera los lotes del formato VIEJO**, que guardaban el frame entero: si la
- * línea ya empieza con `ID=`, se manda tal cual. Sin esto, una tarjeta con lotes
- * de antes del cambio transmitiría frames con el prefijo duplicado. Cuando no
- * queden lotes viejos en ninguna tarjeta, esta rama se puede sacar.
- */
-static uint16_t prvLineaArmarFrame( char *pcDestino, uint16_t usSize,
-                                    const char *pcLinea, bool bConRespuesta )
-{
-    if( ( pcDestino == NULL ) || ( pcLinea == NULL ) || ( usSize < 2U ) )
-    {
-        return 0U;
-    }
-
-    /* Formato viejo: la línea YA es un frame completo. */
-    if( strncmp( pcLinea, "ID=", 3U ) == 0 )
-    {
-        int iN = snprintf( pcDestino, usSize, "%s", pcLinea );
-
-        return ( ( iN > 0 ) && ( ( uint16_t ) iN < usSize ) ) ? ( uint16_t ) iN : 0U;
-    }
-
-    uint16_t usIdx = wan_frame_prefijo( pcDestino, usSize, bConRespuesta );
-
-    if( usIdx == 0U )
-    {
-        return 0U;
-    }
-
-    int iN = snprintf( &pcDestino[ usIdx ], ( size_t ) ( usSize - usIdx ), "&%s", pcLinea );
-
-    if( ( iN < 0 ) || ( ( uint16_t ) iN >= ( uint16_t ) ( usSize - usIdx ) ) )
-    {
-        return 0U;      /* no entra: mejor no transmitir que transmitir cortado */
-    }
-
-    return ( uint16_t ) ( usIdx + ( uint16_t ) iN );
-}
-//------------------------------------------------------------------------------
-/*
- * La segunda mitad del vaciado: **los lotes de la microSD**.
- *
- * Van después de la ventana (criterio de Pablo, 2026-09-08): no es el orden
- * cronológico y está bien, porque el servidor indexa por la fecha que viaja
- * adentro de cada frame. De paso, vaciar la ventana primero la libera justo
- * antes de la parte larga.
- *
- * ⚠ **No se imprime cada frame**, a diferencia de la ventana: un lote son hasta
- * 1984 líneas de ~153 bytes, y sacarlas por la consola a 9600 son **más de
- * cinco minutos por lote** de puro log. Se informa por bloque confirmado.
- *
- * ⚠ **El lote se borra sólo si se transmitió ENTERO.** Si se corta en el medio
- * queda y se retransmite completo la próxima vez — con duplicados de lo que ya
- * había llegado, que son inofensivos. Ver `fs_sd.h`.
- */
-static void prvLteLotes( void )
-{
-    /*
-     * Dos buffers porque hace falta **mirar una línea adelante**: el frame que
-     * cierra el lote tiene que ir como `CLASS=DATA` para que el servidor
-     * confirme, y no hay forma de saber que una línea es la última hasta
-     * intentar leer la siguiente.
-     */
-    static char pcActual   [ WAN_FRAME_BUFFER_SIZE ];
-    static char pcSiguiente[ WAN_FRAME_BUFFER_SIZE ];
-    static char pcFrame    [ WAN_FRAME_BUFFER_SIZE ];   /* prefijo + la línea */
-    static char pcRta      [ WAN_FRAME_BUFFER_SIZE ];
-
-    char     pcNombre[ FS_SD_NOMBRE_LARGO ];
-    uint16_t usLotes = 0U;
-
-    while( fs_sd_lote_abrir( pcNombre, sizeof( pcNombre ) ) )
-    {
-        uint32_t ulLineas       = 0UL;
-        uint32_t ulConfirmadas  = 0UL;
-        uint16_t usSinConfirmar = 0U;
-        bool     bCompleto      = true;
-
-        xprintf( "\r\n--- %s ---\r\n", pcNombre );
-
-        bool bHayActual = fs_sd_lote_leer( pcActual, sizeof( pcActual ) );
-
-        while( bHayActual )
-        {
-            bool bHaySiguiente = fs_sd_lote_leer( pcSiguiente, sizeof( pcSiguiente ) );
-
-            /* La última del lote SIEMPRE pide confirmación: si no, lo que queda
-               del último bloque nunca se daría por bueno y el lote no se podría
-               borrar. */
-            bool bConfirmar = ( !bHaySiguiente ) ||
-                              ( ( usSinConfirmar + 1U ) >= LTE_DATA_VENTANA );
-
-            uint16_t usLargo = prvLineaArmarFrame( pcFrame, sizeof( pcFrame ),
-                                                   pcActual, bConfirmar );
-
-            if( usLargo == 0U )
-            {
-                xprintf( "[!] no se pudo armar el frame de la linea %lu: se salta\r\n",
-                         ( unsigned long ) ( ulLineas + 1UL ) );
-            }
-            else
-            {
-                if( bConfirmar )
-                {
-                    drv_lte_flush();
-                }
-
-                if( drv_lte_write( pcFrame, usLargo ) != ( int16_t ) usLargo )
-                {
-                    xprintf( "ERROR: no se pudo transmitir\r\n" );
-                    bCompleto = false;
-                    break;
-                }
-
-                ulLineas++;
-                usSinConfirmar++;
-
-                if( bConfirmar )
-                {
-                    if( !prvEsperarRespuestaConClase( pcRta, sizeof( pcRta ),
-                                                      LTE_PING_TIMEOUT_MS ) )
-                    {
-                        xprintf( "sin respuesta: el lote queda para la proxima\r\n" );
-                        bCompleto = false;
-                        break;
-                    }
-
-                    wan_data_ordenes_t xOrdenes;
-
-                    if( wan_frame_data_rta( pcRta, &xOrdenes ) != wanDATA_ACEPTADO )
-                    {
-                        xprintf( "[!] respuesta inesperada: el lote queda para la proxima\r\n" );
-                        bCompleto = false;
-                        break;
-                    }
-
-                    ulConfirmadas += usSinConfirmar;
-                    usSinConfirmar = 0U;
-
-                    xprintf( "  %lu lineas confirmadas\r\n",
-                             ( unsigned long ) ulConfirmadas );
-
-                    if( xOrdenes.bReset )
-                    {
-                        /* Igual que en la ventana: el RESET se atiende, pero acá
-                           **sin borrar el lote** — se retransmite entero al
-                           volver, que es lo correcto porque no se confirmó todo. */
-                        xprintf( "el servidor pide RESET: reiniciando...\r\n" );
-                        fs_sd_lote_cerrar( false );
-                        vTaskDelay( pdMS_TO_TICKS( 2000 ) );
-                        NVIC_SystemReset();
-                    }
-                }
-            }
-
-            if( bHaySiguiente )
-            {
-                memcpy( pcActual, pcSiguiente, sizeof( pcActual ) );
-                vTaskDelay( pdMS_TO_TICKS( LTE_DATA_MS_ENTRE_FRAMES ) );
-            }
-
-            bHayActual = bHaySiguiente;
-        }
-
-        /*
-         * ⭐ Se borra SÓLO si se transmitió entero y no quedó nada sin
-         * confirmar. Las dos condiciones: `bCompleto` dice que no se cortó, y
-         * `usSinConfirmar == 0` que el último bloque se dio por bueno.
-         */
-        bool bBorrar = bCompleto && ( usSinConfirmar == 0U ) && ( ulLineas > 0UL );
-
-        fs_sd_lote_cerrar( bBorrar );
-
-        if( !bBorrar )
-        {
-            xprintf( "[!] %s NO se borro: se retransmite entero la proxima vez\r\n",
-                     pcNombre );
-            return;     /* si uno falló, los demás también van a fallar */
-        }
-
-        usLotes++;
-    }
-
-    if( usLotes > 0U )
-    {
-        xprintf( "\r\n%u lote(s) transmitidos y borrados\r\n", ( unsigned ) usLotes );
-    }
-}
-//------------------------------------------------------------------------------
-/*
- * El vaciado de la VENTANA (la EEPROM): transmite los registros guardados y los
- * borra **recién cuando el servidor confirmó**.
- *
- * ⚠ **ASUME modo TRANSPARENTE**, igual que `lte ping` y `lte conf`.
- *
- * La estructura es la del AVR (`wan_send_from_memory`): se mandan bloques de
- * `LTE_DATA_VENTANA` frames con `CLASS=DATANR` —sin esperar respuesta— y el que
- * cierra el bloque va como `CLASS=DATA`, que sí espera. Confirmado ése, se dan
- * por buenos todos los del bloque.
- *
- * ⛔ **Pero el borrado NO es el del AVR, y la diferencia importa.** Aquel usa
- * `FS_readRcd()`, que **consume el registro antes de transmitirlo**: si la
- * sesión se corta, esos datos ya se perdieron. Acá se lee con
- * `fs_datos_peek( dr, offset )` y se llama `fs_datos_pop( n )` **sólo tras la
- * confirmación** — que es para lo que esas dos funciones se separaron en el
- * paso 4. Si se corta, no se pierde nada; a lo sumo se retransmiten hasta
- * `LTE_DATA_VENTANA` registros, y como el servidor los indexa por la fecha que
- * viaja adentro del frame, un duplicado es inofensivo.
- *
- * ⚠ **El `count` se congela al entrar**, como en el AVR: los registros que
- * `tkSys` grabe durante el vaciado quedan para el ciclo siguiente. Sin eso, con
- * un `timerpoll` corto el vaciado no terminaría nunca.
- */
-static void prvLteData( void )
-{
-    static char pcFrame[ WAN_FRAME_BUFFER_SIZE ];
-    static char pcRta  [ WAN_FRAME_BUFFER_SIZE ];
-    dataRcd_t   xDr;
-
-    fs_datos_stats_t xStats;
-    uint16_t         usPendientes;
-    uint16_t         usSinConfirmar = 0U;
-    uint16_t         usEnviados     = 0U;
-
-    if( !prvLteListo() )
-    {
-        return;
-    }
-
-    fs_datos_stats( &xStats );
-    usPendientes = xStats.usCount;
-
-    /* El total se congela acá, igual que `usPendientes`: es contra este número
-       que se informa el progreso, y no contra el `count` de la ventana —que
-       sigue creciendo mientras `tkSys` polea—. Si se informara contra el count
-       real, el porcentaje iría para atrás en medio del vaciado. */
-    const uint16_t usTotal = usPendientes;
-
-    if( usPendientes == 0U )
-    {
-        xprintf( "la ventana esta vacia: no hay nada que transmitir\r\n" );
-        return;
-    }
-
-    prvAvisarImeiFalso();
-
-    xprintf( "vaciando la ventana: %u registros\r\n", ( unsigned ) usPendientes );
-
-    while( usPendientes > 0U )
-    {
-        /*
-         * El offset es lo que ya se mandó y todavía no se confirmó: el registro
-         * 0 sigue siendo el más viejo hasta que el `pop()` lo saque.
-         */
-        if( !fs_datos_peek( &xDr, usSinConfirmar ) )
-        {
-            xprintf( "ERROR: no se pudo leer el registro %u\r\n",
-                     ( unsigned ) usSinConfirmar );
-            break;
-        }
-
-        /* El último del bloque —y el último de todos— piden confirmación. */
-        bool bConfirmar = ( ( usSinConfirmar + 1U ) >= LTE_DATA_VENTANA ) ||
-                          ( usPendientes == 1U );
-
-        uint16_t usLargo = wan_frame_data( pcFrame, sizeof( pcFrame ), &xDr, bConfirmar );
-
-        if( usLargo == 0U )
-        {
-            break;
-        }
-
-        xprintf( "-> " );
-        ( void ) frtos_write( fdTERM, pcFrame, usLargo );
-        xprintf( "\r\n" );
-
-        if( bConfirmar )
-        {
-            drv_lte_flush();
-        }
-
-        if( drv_lte_write( pcFrame, usLargo ) != ( int16_t ) usLargo )
-        {
-            xprintf( "ERROR: no se pudo transmitir\r\n" );
-            break;
-        }
-
-        usSinConfirmar++;
-        usPendientes--;
-        usEnviados++;
-
-        if( !bConfirmar )
-        {
-            /*
-             * ⚠ **La pausa entre frames es OBLIGATORIA y tiene que ser
-             * explícita.** El DTU delimita cada trama por SILENCIO en la serie
-             * (su `ftime`, 250 ms acá): dos frames seguidos sin pausa se le
-             * juntan en un solo GET y del otro lado llega un frame corrupto.
-             *
-             * ⛔ El AVR no tiene ninguna espera acá — le funciona porque imprime
-             * el frame por la consola a 9600 antes de mandarlo, y eso son ~150 ms
-             * de pausa ACCIDENTAL. Depender de eso es depender de que el log
-             * esté encendido y de la velocidad de la terminal; en campo, con el
-             * log apagado, los frames se pegarían.
-             */
-            vTaskDelay( pdMS_TO_TICKS( LTE_DATA_MS_ENTRE_FRAMES ) );
-            continue;
-        }
-
-        /* ---- Toca confirmar: se espera la respuesta del servidor ---- */
-
-        if( !prvEsperarRespuestaConClase( pcRta, sizeof( pcRta ), LTE_PING_TIMEOUT_MS ) )
-        {
-            xprintf( "sin respuesta en %u ms: quedan %u sin confirmar\r\n",
-                     ( unsigned ) LTE_PING_TIMEOUT_MS, ( unsigned ) usSinConfirmar );
-            break;
-        }
-
-        xprintf( "<- " );
-        ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) strlen( pcRta ) );
-        xprintf( "\r\n" );
-
-        wan_data_ordenes_t xOrdenes;
-        wan_data_rta_t     eRta = wan_frame_data_rta( pcRta, &xOrdenes );
-
-        if( eRta != wanDATA_ACEPTADO )
-        {
-            /*
-             * Se corta el vaciado en los tres casos: si el servidor no confirma,
-             * seguir mandando cientos de registros que no se van a poder borrar
-             * sólo gasta batería y tráfico. **Los datos quedan intactos.**
-             *
-             * Pero el mensaje distingue las causas, porque mandan a mirar lugares
-             * distintos.
-             */
-            if( eRta == wanDATA_VACIA )
-            {
-                /* Con `prvEsperarRespuestaConClase()` delante esto ya no
-                   debería poder pasar: el lazo sólo devuelve tramas que traen
-                   `CLASS=`. Si aparece, es que algo cambió ahí. */
-                xprintf( "[!] respuesta sin CLASS= (no deberia llegar aca)\r\n" );
-            }
-            else if( eRta == wanDATA_OTRA_CLASE )
-            {
-                xprintf( "[!] llego una respuesta de OTRA clase: se descarta\r\n" );
-            }
-            else
-            {
-                xprintf( "[!] sin respuesta del servidor\r\n" );
-            }
-
-            break;
-        }
-
-        /* ⭐ Recién acá se borran: el servidor los tiene. */
-        uint16_t usBorrados = fs_datos_pop( usSinConfirmar );
-
-        xprintf( "OK: %u de %u confirmados y borrados; quedan %u\r\n",
-                 ( unsigned ) usEnviados, ( unsigned ) usTotal,
-                 ( unsigned ) usPendientes );
-
-        if( usBorrados != usSinConfirmar )
-        {
-            /* No debería pasar nunca: se borra exactamente lo que se confirmó.
-               Si el almacén descarta menos de lo pedido, algo no cierra entre lo
-               que se leyó con `peek` y lo que hay — mejor verlo que suponerlo. */
-            xprintf( "[!] se pidio borrar %u y se borraron %u\r\n",
-                     ( unsigned ) usSinConfirmar, ( unsigned ) usBorrados );
-        }
-
-        usSinConfirmar = 0U;
-
-        if( xOrdenes.bReset )
-        {
-            /*
-             * Se atiende DESPUÉS del `pop()`: reiniciar antes dejaría los
-             * registros confirmados sin borrar, y el equipo los retransmitiría
-             * enteros al volver.
-             */
-            xprintf( "el servidor pide RESET: reiniciando...\r\n" );
-            vTaskDelay( pdMS_TO_TICKS( 2000 ) );
-            NVIC_SystemReset();
-        }
-
-        if( usPendientes > 0U )
-        {
-            vTaskDelay( pdMS_TO_TICKS( LTE_DATA_MS_ENTRE_FRAMES ) );
-        }
-    }
-
-    fs_datos_stats( &xStats );
-
-    xprintf( "\r\ntransmitidos %u, quedan %u en la ventana\r\n",
-             ( unsigned ) usEnviados, ( unsigned ) xStats.usCount );
-
-    if( usSinConfirmar > 0U )
-    {
-        xprintf( "[!] %u quedaron SIN confirmar: no se borraron, se reintentan\r\n",
-                 ( unsigned ) usSinConfirmar );
-
-        /* Si la ventana no se pudo vaciar, el enlace está mal y los lotes van a
-           fallar igual: no tiene sentido encender la SD para descubrirlo. */
-        return;
-    }
-
-    /* ---- Y recién ahora los lotes de la microSD ---- */
-    prvLteLotes();
-}
-//------------------------------------------------------------------------------
-/*
- * El PING: la primera pregunta de toda sesión, "¿estás ahí?".
- *
- * ⚠ **ASUME el modo TRANSPARENTE**, al revés que `info` y `set`. Es coherente
- * con el mismo criterio: cada comando asume un estado y no lo cambia. En modo
- * comando el módulo **no transmite nada**, así que un PING desde ahí no sale —
- * por eso, si no hay respuesta, el mensaje pregunta justo por eso.
- *
- * Transmitir es sólo **escribir el payload**: el módulo arma el GET entero con
- * la IP, el puerto y la URL que tiene grabados, y delimita la trama por
- * SILENCIO en la serie (el `ftime` de su configuración). No hay terminador que
- * mandar; es lo mismo que hace `MODEM_txmit()` en el AVR.
- */
-static void prvLtePing( void )
-{
-    static char pcFrame[ WAN_FRAME_BUFFER_SIZE ];
-    static char pcRta  [ WAN_FRAME_BUFFER_SIZE ];
-
-    if( !prvLteListo() )
-    {
-        return;
-    }
-
-    prvAvisarImeiFalso();
-
-    uint16_t usLargo = wan_frame_ping( pcFrame, sizeof( pcFrame ) );
-
-    if( usLargo == 0U )
-    {
-        return;
-    }
-
-    xprintf( "-> " );
-    ( void ) frtos_write( fdTERM, pcFrame, usLargo );
-    xprintf( "\r\n" );
-
-    drv_lte_flush();
-
-    if( drv_lte_write( pcFrame, usLargo ) != ( int16_t ) usLargo )
-    {
-        xprintf( "ERROR: no se pudo transmitir\r\n" );
-        return;
-    }
-
-    /*
-     * El timeout es generoso a propósito: acá adentro entran el `ftime` del
-     * módulo, la petición HTTP por LTE y la respuesta del servidor. El AVR
-     * reintenta 5 veces por esta misma razón.
-     */
-    int16_t sRet = drv_lte_read( pcRta, sizeof( pcRta ) - 1U, LTE_PING_TIMEOUT_MS );
-
-    if( sRet <= 0 )
-    {
-        xprintf( "sin respuesta en %u ms.\r\n", ( unsigned ) LTE_PING_TIMEOUT_MS );
-        xprintf( "  el modulo esta en modo TRANSPARENTE? (en modo comando NO transmite)\r\n" );
-        xprintf( "  y verificar la IP con 'lte esc' + 'lte info'\r\n" );
-        return;
-    }
-
-    pcRta[ sRet ] = '\0';
-
-    xprintf( "<- " );
-    ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
-    xprintf( "\r\n" );
-
-    /*
-     * La respuesta del servidor viene envuelta en HTML — el log del AVR del
-     * 2026-09-09 la muestra como `<html>CLASS=PONG</html>` — así que se busca el
-     * patrón adentro en vez de comparar la respuesta entera.
-     */
-    if( strstr( pcRta, "CLASS=PONG" ) != NULL )
-    {
-        xprintf( "PONG: el servidor contesta\r\n" );
-    }
-    else
-    {
-        xprintf( "[!] contesto algo, pero sin CLASS=PONG\r\n" );
-    }
-}
-//------------------------------------------------------------------------------
-/*
  * Manda un comando AT de configuración y dice si el módulo lo aceptó.
  *
  * ⚠ **Existe para que el técnico no tenga que saber la sintaxis AT.** Los
@@ -3166,7 +2308,7 @@ static void prvLteSet( const char *pcCmd )
 {
     static char pcRta[ 128 ];
 
-    if( !prvLteListo() )
+    if( !wan_modem_listo() )
     {
         return;
     }
@@ -3207,7 +2349,7 @@ static void prvLteGrabar( void )
 {
     static char pcRta[ 128 ];
 
-    if( !prvLteListo() )
+    if( !wan_modem_listo() )
     {
         return;
     }
@@ -3253,7 +2395,7 @@ static void prvLteClock( bool bAplicar )
     char    pcRta[ 96 ];
     int16_t sRet;
 
-    if( !prvLteListo() )
+    if( !wan_modem_listo() )
     {
         return;
     }
@@ -3268,55 +2410,19 @@ static void prvLteClock( bool bAplicar )
 
     xprintf( "%s\r\n", pcRta );
 
-    /*
-     * Formato: +CCLK: "20/06/19,20:05:19+32"
-     * El primer dígito de la fecha es el que sigue a la comilla; se busca ésa y
-     * no una posición fija, porque el eco y el CRLF corren todo.
-     */
-    const char *p = strchr( pcRta, '"' );
-
-    if( p == NULL )
-    {
-        p = strstr( pcRta, "+CCLK:" );
-        p = ( p != NULL ) ? ( p + 6 ) : NULL;
-
-        while( ( p != NULL ) && ( *p == ' ' ) )
-        {
-            p++;
-        }
-    }
-    else
-    {
-        p++;
-    }
-
-    if( ( p == NULL ) || ( strlen( p ) < 17U ) )
-    {
-        xprintf( "[!] no se pudo interpretar la respuesta\r\n" );
-        return;
-    }
-
-    /* "YY/MM/DD,hh:mm:ss" — se validan los separadores antes de creerle. */
-    if( ( p[2] != '/' ) || ( p[5] != '/' ) || ( p[8] != ',' ) ||
-        ( p[11] != ':' ) || ( p[14] != ':' ) )
-    {
-        xprintf( "[!] formato inesperado: se esperaba YY/MM/DD,hh:mm:ss\r\n" );
-        return;
-    }
-
-    #define DOSD( n )   ( ( uint8_t ) ( ( p[ n ] - '0' ) * 10 + ( p[ n + 1 ] - '0' ) ) )
-
     RtcTimeType_t xHora;
 
-    memset( &xHora, 0, sizeof( xHora ) );
-    xHora.year  = DOSD( 0 );
-    xHora.month = DOSD( 3 );
-    xHora.day   = DOSD( 6 );
-    xHora.hour  = DOSD( 9 );
-    xHora.min   = DOSD( 12 );
-    xHora.sec   = DOSD( 15 );
+    if( !wan_cclk_parsear( pcRta, &xHora ) )
+    {
+        xprintf( "[!] no se pudo interpretar la respuesta (o el modulo no\r\n" );
+        xprintf( "    sincronizo todavia con la red)\r\n" );
+        return;
+    }
 
-    #undef DOSD
+    /* El huso se muestra aparte: el parseo no lo necesita —la hora ya viene en
+       local— pero verlo es lo que permitió decidir que era local y no UTC. */
+    const char *p = strchr( pcRta, '"' );
+    p = ( p != NULL ) ? ( p + 1 ) : pcRta;
 
     xprintf( "hora del modulo : %02u/%02u/%02u %02u:%02u:%02u\r\n",
              ( unsigned ) xHora.day, ( unsigned ) xHora.month, ( unsigned ) xHora.year,
@@ -3324,7 +2430,7 @@ static void prvLteClock( bool bAplicar )
 
     /* El huso que informa el módulo, en cuartos de hora. Se MUESTRA para poder
        decidir si la hora que da es local o UTC — ver el comentario de arriba. */
-    const char *pcHuso = strpbrk( &p[ 17 ], "+-" );
+    const char *pcHuso = ( strlen( p ) > 17U ) ? strpbrk( &p[ 17 ], "+-" ) : NULL;
 
     if( pcHuso != NULL )
     {
@@ -3466,7 +2572,7 @@ static void prvLteInfo( void )
         "AT+CCLK?",     /* la hora del modulo, por NTP            */
     };
 
-    if( !prvLteListo() )
+    if( !wan_modem_listo() )
     {
         return;
     }
@@ -3694,19 +2800,19 @@ static void cmdLte( void )
 
         if( strcmp( argv[ 1 ], "data" ) == 0 )
         {
-            prvLteData();
+            ( void ) wan_sesion_datos();   /* desde la consola el resultado ya se imprimio */
             return;
         }
 
         if( strcmp( argv[ 1 ], "conf" ) == 0 )
         {
-            prvLteConfAll();
+            wan_sesion_config();
             return;
         }
 
         if( strcmp( argv[ 1 ], "ping" ) == 0 )
         {
-            prvLtePing();
+            wan_sesion_ping();
             return;
         }
 
@@ -3972,6 +3078,72 @@ static void prvConfigUso( void )
     xprintf( "\r\n" );
     xprintf( "  'default' y 'load' trabajan SOLO en RAM: nada se graba hasta que se\r\n" );
     xprintf( "  haga 'config save'. Asi un 'default' mal tipeado se deshace con 'load'.\r\n" );
+}
+//------------------------------------------------------------------------------
+static void prvKillUso( void )
+{
+    xprintf( "  kill wan     mata tkWan: deja el modem libre para 'lte ...'\r\n" );
+    xprintf( "  kill sys     mata tkSys: deja de polear y de escribir la ventana\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  NO hay forma de revivir una tarea, y es a proposito: despues de\r\n" );
+    xprintf( "  trabajar a mano se hace 'reset' y el equipo arranca limpio.\r\n" );
+}
+//------------------------------------------------------------------------------
+/*
+ * `kill`: mata una tarea para que un operador pueda trabajar con SU periférico
+ * sin pisarse con ella.
+ *
+ * ⭐ Copiado del AVR —mismo nombre y misma semántica— para no reeducar a los
+ * técnicos, igual que con la sintaxis de `config`. Allá es `WD_stop_task()`, y
+ * lo que hace bien es **desregistrar del watchdog ANTES de suspender**:
+ * suspender una tarea que el watchdog sigue vigilando la daría por colgada y
+ * **resetearía el equipo justo mientras el operador trabaja**, que es el síntoma
+ * más desconcertante posible. ⏳ Acá el watchdog todavía no existe (paso 8), y
+ * el lugar donde va ese desregistro está marcado en `tkWan.c`.
+ *
+ * ⚠ **No hay "revivir"** (criterio de Pablo, 2026-09-21): la idea es que después
+ * de entrar en modo comando para pruebas o diagnóstico, el operador **resetee el
+ * datalogger para que entre en modo de funcionamiento limpio**.
+ */
+static void cmdKill( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        prvKillUso();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "wan" ) == 0 )
+    {
+        if( wan_matada() )
+        {
+            xprintf( "tkWan ya estaba matada\r\n" );
+            return;
+        }
+
+        xprintf( "tkWan esta en %s; kill pedido, se mata en su proxima vuelta.\r\n",
+                 wan_estado_str() );
+        wan_pedir_kill();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "sys" ) == 0 )
+    {
+        if( xHandle_tkSys == NULL )
+        {
+            xprintf( "tkSys no existe\r\n" );
+            return;
+        }
+
+        vTaskSuspend( xHandle_tkSys );
+        xprintf( "tkSys MATADA: no polea mas ni escribe la ventana.\r\n" );
+        xprintf( "Para volver a operacion normal: 'reset'.\r\n" );
+        return;
+    }
+
+    prvKillUso();
 }
 //------------------------------------------------------------------------------
 static void cmdConfig( void )

@@ -1199,6 +1199,78 @@ static bool prvAplicarClock( const char *pcValor )
     return wan_rtc_sincronizar( &xNueva, "el servidor", false );
 }
 //------------------------------------------------------------------------------
+bool wan_cclk_parsear( const char *pcRta, RtcTimeType_t *pxHora )
+{
+    if( ( pcRta == NULL ) || ( pxHora == NULL ) )
+    {
+        return false;
+    }
+
+    /*
+     * Formato: `+CCLK: "26/09/21,11:04:08-12"`.
+     *
+     * Se busca la comilla y no una posición fija porque el eco del comando y el
+     * CRLF corren todo; si no hay comillas, se cae al `+CCLK:` y se saltean los
+     * espacios.
+     *
+     * ⭐ **La hora viene en LOCAL, con el huso ya aplicado** —el `-12` son
+     * cuartos de hora, UTC-3— confirmado en banco el 2026-09-21 contra el reloj
+     * de la PC. Si viniera en UTC, estampar eso donde el AVR estampa local
+     * correría todos los registros 3 horas: plausibles y mal.
+     */
+    const char *p = strchr( pcRta, '"' );
+
+    if( p == NULL )
+    {
+        p = strstr( pcRta, "+CCLK:" );
+        p = ( p != NULL ) ? ( p + 6 ) : NULL;
+
+        while( ( p != NULL ) && ( *p == ' ' ) )
+        {
+            p++;
+        }
+    }
+    else
+    {
+        p++;
+    }
+
+    if( ( p == NULL ) || ( strlen( p ) < 17U ) )
+    {
+        return false;
+    }
+
+    /* Se validan los separadores antes de creerle a los dígitos. */
+    if( ( p[ 2 ] != '/' ) || ( p[ 5 ] != '/' ) || ( p[ 8 ] != ',' ) ||
+        ( p[ 11 ] != ':' ) || ( p[ 14 ] != ':' ) )
+    {
+        return false;
+    }
+
+    #define DOSD( n )   ( ( uint8_t ) ( ( p[ n ] - '0' ) * 10 + ( p[ n + 1 ] - '0' ) ) )
+
+    memset( pxHora, 0, sizeof( RtcTimeType_t ) );
+    pxHora->year  = DOSD( 0 );
+    pxHora->month = DOSD( 3 );
+    pxHora->day   = DOSD( 6 );
+    pxHora->hour  = DOSD( 9 );
+    pxHora->min   = DOSD( 12 );
+    pxHora->sec   = DOSD( 15 );
+
+    #undef DOSD
+
+    if( ( pxHora->month < 1U ) || ( pxHora->month > 12U ) ||
+        ( pxHora->day   < 1U ) || ( pxHora->day   > 31U ) ||
+        ( pxHora->hour > 23U ) || ( pxHora->min > 59U ) || ( pxHora->sec > 59U ) )
+    {
+        return false;
+    }
+
+    /* Un año anterior al de compilación es imposible: el módulo todavía no
+       sincronizó con la red. Mismo criterio que `tkSys`. */
+    return ( pxHora->year >= TKSYS_ANIO_COMPILACION );
+}
+//------------------------------------------------------------------------------
 bool wan_rtc_sincronizar( const RtcTimeType_t *pxNueva, const char *pcOrigen,
                           bool bSiempre )
 {

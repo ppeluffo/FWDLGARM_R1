@@ -363,6 +363,18 @@ wan_data_rta_t wan_frame_data_rta( const char *pcRta, wan_data_ordenes_t *pxOrde
  *
  * Devuelve true si efectivamente escribió el RTC.
  *----------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------
+ * Interpreta la respuesta de `AT+CCLK?`: `+CCLK: "26/09/21,11:04:08-12"`.
+ *
+ * Rechaza lo que no tenga la forma exacta, lo que esté fuera de rango, y **un
+ * año anterior al de compilación** —que significa que el módulo todavía no
+ * sincronizó con la red—.
+ *
+ * Lo usan el comando `lte clock` y la FSM; está acá para que sean el mismo
+ * parseo y no dos copias.
+ *----------------------------------------------------------------------------*/
+bool wan_cclk_parsear( const char *pcRta, RtcTimeType_t *pxHora );
+
 bool wan_rtc_sincronizar( const RtcTimeType_t *pxNueva, const char *pcOrigen,
                           bool bSiempre );
 

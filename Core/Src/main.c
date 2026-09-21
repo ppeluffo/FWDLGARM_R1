@@ -28,6 +28,7 @@
 #include "tkCtl.h"
 #include "tkCmd.h"
 #include "tkSys.h"
+#include "tkWan.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -451,6 +452,21 @@ int main(void)
                                      tkSys_Stack,
                                      &tkSys_TCB );
   if ( xHandle_tkSys == NULL )
+  {
+    Error_Handler();
+  }
+
+  /* La WAN: la maquina de estados que abre la sesion con el servidor. Arranca
+     sola y disca enseguida, para que un equipo recien energizado se configure y
+     vacie la memoria en vez de esperar al primer timerdial. */
+  xHandle_tkWan = xTaskCreateStatic( tkWan,
+                                     "WAN",
+                                     tkWan_STACK_SIZE,
+                                     NULL,
+                                     tkWan_PRIORITY,
+                                     tkWan_Stack,
+                                     &tkWan_TCB );
+  if ( xHandle_tkWan == NULL )
   {
     Error_Handler();
   }

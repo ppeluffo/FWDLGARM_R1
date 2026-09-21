@@ -16,7 +16,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define tkCtl_STACK_SIZE    384                       /* palabras, no bytes */
+#define tkCtl_STACK_SIZE    512                       /* palabras, no bytes */
 #define tkCtl_PRIORITY      ( tskIDLE_PRIORITY + 1 )
 
 void tkCtl( void *pvParameters );
