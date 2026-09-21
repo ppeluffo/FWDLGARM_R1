@@ -384,26 +384,6 @@ void tkSys_print( const dataRcd_t *pxDr )
         }
     }
 
-    if( xCfgModbus.bEnabled )
-    {
-        for( i = 0U; i < CFG_MODBUS_NRO_CANALES; i++ )
-        {
-            if( !xCfgModbus.xCanal[ i ].bEnabled )
-            {
-                continue;
-            }
-
-            if( pxDr->usInvalidos & ( uint16_t ) ( dataINVALIDO_MODBUS0 << i ) )
-            {
-                xprintf( "%s=SIN_DATO;", xCfgModbus.xCanal[ i ].pcName );
-            }
-            else
-            {
-                xprintf( "%s=%0.3f;", xCfgModbus.xCanal[ i ].pcName, pxDr->fModbus[ i ] );
-            }
-        }
-    }
-
     if( xCfgCounter.bEnabled )
     {
         if( pxDr->usInvalidos & dataINVALIDO_CONTADOR )
@@ -422,11 +402,23 @@ void tkSys_print( const dataRcd_t *pxDr )
         }
     }
 
+    /* ⚠ Los canales Modbus van DESPUÉS del contador, igual que en el frame: la
+       consola y lo que viaja tienen que leerse en el mismo orden, o comparar
+       una traza contra un frame se vuelve un ejercicio de paciencia. */
     if( xCfgModbus.bEnabled )
     {
         for( i = 0U; i < CFG_MODBUS_NRO_CANALES; i++ )
         {
-            if( xCfgModbus.xCanal[ i ].bEnabled )
+            if( !xCfgModbus.xCanal[ i ].bEnabled )
+            {
+                continue;
+            }
+
+            if( pxDr->usInvalidos & ( uint16_t ) ( dataINVALIDO_MODBUS0 << i ) )
+            {
+                xprintf( "%s=SIN_DATO;", xCfgModbus.xCanal[ i ].pcName );
+            }
+            else
             {
                 xprintf( "%s=%0.3f;", xCfgModbus.xCanal[ i ].pcName, pxDr->fModbus[ i ] );
             }

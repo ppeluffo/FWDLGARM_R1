@@ -3352,7 +3352,7 @@ Todo lo anterior es el camino feliz en modo `CONTINUO`. Quedan sin ejercitar:
 - **Los modos `DISCRETO`, `MIXTO`, `RTU` y `SILENT`** en la FSM (`BH` de referencia: `0xDF` y `0xD4`).
 - **El camino de fallo con el backoff de 120 s**, que entró en esta misma versión.
 
-## ✅ Paso 6a / 🔨 6b: Modbus RTU
+## ✅ Paso 6: Modbus RTU
 
 Pablo lo puso **antes que las consignas** (2026-09-21), y es el orden correcto por una razón que
 apareció al relevar: **la consigna del control de presión ES Modbus** —habla por FC03/FC06 con el
@@ -3576,7 +3576,7 @@ saberlo por dos razones:
 escribir un holding register puede cambiarle la configuración. Su lugar natural es el paso 7, contra
 el control de presión, que es el dispositivo que se escribe por diseño.
 
-### 🔨 Paso 6b: el Modbus entra al poleo
+### ✅ Paso 6b: el Modbus entra al poleo
 
 `prvPolearModbus()` en `tkSys.c`. Los canales habilitados se leen en cada ciclo y quedan en
 `dr->fModbus[]`, de donde los toma el frame.
@@ -3639,6 +3639,48 @@ MODBUS:: ch0 [CAU0] SIN DATO: SIN RESPUESTA (timeout)
 Hay un `_Static_assert` que verifica que los canales entren en los 16 bits de `usInvalidos`: hoy
 llegan al bit 11.
 
+#### ✅ Validado en banco (2026-09-21): el canal muerto viaja como -9999
+
+Dos canales configurados, uno contra el esclavo real y otro contra una dirección que no contesta:
+
+```
+cmd>poll
+MODBUS:: ch1 [qa0] SIN DATO: SIN RESPUESTA (timeout)
+21/09/26 17:17:24;CAU0=766.000;qa0=SIN_DATO;V0=0;bt3v3=3.273;bt12v=7.312;
+  [!] campos sin dato (0x0100): modbus
+
+cmd>frame
+…&CAU0=766.000&qa0=-9999.000&V0=0&bt3v3=3.268&bt12v=7.332
+  (148 bytes de 512)
+  [!] hay campos en -9999: no se pudieron medir
+```
+
+| Criterio | Resultado |
+|---|---|
+| El canal bueno | ✅ `CAU0=766.000`, el mismo valor que el comando `modbus read` |
+| ⭐ **El canal muerto** | ✅ `SIN_DATO` en consola, **`-9999.000`** en el frame |
+| El motivo | ✅ `SIN RESPUESTA (timeout)`, y dice **qué canal** |
+| El bitmask | ✅ `0x0100` = bit 8 = el canal 1, como corresponde |
+| El largo del frame | ✅ 148 de 512 |
+
+#### ⛔ Y un bug propio: los canales se imprimían DOS VECES
+
+En la primera corrida la consola mostró `CAU0=766.000;qa0=SIN_DATO;CAU0=766.000;qa0=0.000;`. **Ya
+existía** un bloque que imprimía los canales Modbus —escrito en el paso 2, cuando los valores eran
+siempre cero— y yo agregué otro.
+
+⚠ **Lo peor no era la duplicación sino la discrepancia**: el bloque viejo no consultaba
+`usInvalidos`, así que **la misma línea decía `qa0=SIN_DATO` y `qa0=0.000`**. Si hubiera quedado sólo
+el viejo, el canal muerto se habría impreso como un cero perfectamente creíble.
+
+⚠ **Cómo me lo perdí, que es la parte útil**: busqué con `grep … | head` y el resultado quedó
+**truncado exactamente en 10 líneas**, justo antes de las que importaban. Un `head` que corta
+silenciosamente en el límite es indistinguible de "no hay más". Para verificar que algo *no existe*,
+el `head` sobra.
+
+De paso, el bloque que quedó se movió **después del contador**, para que la consola y el frame se
+lean en el mismo orden.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3657,7 +3699,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.61"        /* = VER                                 */
+#define FW_VERSION  "0.0.62"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -3681,7 +3723,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5c** | Los frames de datos y el vaciado | ✅ **VALIDADO el 2026-09-21**: ventana y lotes |
 | **5d** | **`tkWan`: la FSM. El equipo transmite solo** | ✅ **VALIDADO el 2026-09-21** |
 | **6a** | **Modbus: el motor** (transaccion, codecs, comando) | ✅ **VALIDADO el 2026-09-21** |
-| **6b** | Modbus: el enganche al poleo de `tkSys` | 🔨 **escrito, sin probar** |
+| **6b** | Modbus: el enganche al poleo de `tkSys` | ✅ **VALIDADO el 2026-09-21** |
 | 7 | Consigna (`tkCtlPres`) — ⚠ **es Modbus**: depende del 6a | |
 | 7b | ⏳ **`tkFlow`/flowcontrol** — volvió al alcance el 2026-09-12; necesita el 2b | |
 | 8 | Watchdog cooperativo + `tkCtl` definitivo | |
