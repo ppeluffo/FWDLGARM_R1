@@ -67,6 +67,7 @@
 #include <stdint.h>
 
 #include "tkSys.h"
+#include "drv_rtc79410.h"
 
 /* Lo que va en un campo que no se pudo medir. Ver arriba. */
 #define WAN_CENTINELA_SIN_DATO      ( -9999.0f )
@@ -290,6 +291,31 @@ typedef struct {
 } wan_data_ordenes_t;
 
 wan_data_rta_t wan_frame_data_rta( const char *pcRta, wan_data_ordenes_t *pxOrdenes );
+
+/*------------------------------------------------------------------------------
+ * Pone el RTC en hora desde una fuente externa, **y de paso MIDE la deriva**.
+ *
+ * Hay dos fuentes y llegan en momentos distintos, por eso las dos pasan por acá:
+ *
+ * | Fuente | Cuándo | Qué resuelve |
+ * |---|---|---|
+ * | el `CLOCK=` del servidor | en la respuesta a un frame de datos | la **deriva** en operación normal — es lo que hace el AVR |
+ * | `AT+CCLK?` del módulo (NTP) | al abrir la sesión, **antes de medir** | el **arranque en frío**: el `CLOCK` llega tarde, cuando los registros ya se grabaron con fecha 2001 |
+ *
+ * ⭐ **La medición de deriva vive acá y no en el comando de consola a
+ * propósito.** Si el servidor corrige la hora en cada sesión —que es lo que
+ * hace—, el reloj siempre se ve bien y **la deriva del cristal queda tapada
+ * para siempre**. Poniendo la medición en el punto donde se aplica la
+ * corrección, cada ajuste informa cuántos ppm se desvió: el dato que decide si
+ * hay que cambiar los condensadores de carga de la placa.
+ *
+ * `bSiempre` salta el umbral de 90 s. Lo usa el comando manual (`lte clock
+ * set`); el camino automático lo deja en false para no reajustar en cada poleo.
+ *
+ * Devuelve true si efectivamente escribió el RTC.
+ *----------------------------------------------------------------------------*/
+bool wan_rtc_sincronizar( const RtcTimeType_t *pxNueva, const char *pcOrigen,
+                          bool bSiempre );
 
 /*------------------------------------------------------------------------------
  * El frame de PING, que es el primero de toda sesión: pregunta si el servidor

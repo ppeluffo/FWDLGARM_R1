@@ -6,10 +6,12 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stddef.h>
 
 #include "wan_frame.h"
 #include "cfg_nvm.h"
 #include "tkCmd.h"
+#include "tkSys.h"
 #include "drv_rtc79410.h"
 #include "frtos-io.h"
 #include "main.h"
@@ -897,6 +899,187 @@ wan_conf_rta_t wan_conf_aplicar( wan_bloque_t eBloque, const char *pcRta )
  * LA RESPUESTA A UN FRAME DE DATOS (paso 5c)
  *============================================================================*/
 
+/*==============================================================================
+ * LA DERIVA DEL RTC: que la corrección MIDA en vez de esconder
+ *
+ * ⚠ Una vez que el equipo se pone en hora solo en cada sesión, **la deriva del
+ * cristal deja de verse**: el reloj siempre está bien porque se corrige, y nunca
+ * nos enteraríamos de que hay que cambiar un componente de la placa.
+ *
+ * ⛔ **Y ojo con CUÁL cristal**: la hora de las muestras la lleva el **MCP79410
+ * con su propio cristal `Y1`** (X1/X2 de ese chip), no el de PC14/PC15 del
+ * micro — ése es el LSE, que alimenta el tick del kernel y el RTC interno. Son
+ * dos cristales distintos y la nota de "pendiente de hardware" del bring-up
+ * hablaba del segundo, que **no tiene nada que ver con la hora que se estampa**.
+ *
+ * Cargar de menos hace oscilar **rápido**, siempre, y cuanto menos carga más
+ * adelanta — que es justo el signo que se midió en banco.
+ *
+ * ⭐ Con la marca de la última sincronización guardada, **cada corrección se
+ * convierte en una medición**: el desvío acumulado dividido por el tiempo
+ * transcurrido da los ppm directamente. No cuesta nada y es el dato que decide
+ * si hay que tocar la placa.
+ *============================================================================*/
+
+/* Ver el mapa de la SRAM en `drv_rtc79410.h` antes de mover esto. */
+#define TKCMD_SYNC_SRAM_ADDR    32U
+
+typedef struct {
+    RtcTimeType_t xHora;        /* cuándo fue la última sincronización */
+    uint8_t       ucChecksum;   /* suma de lo anterior, para no creerle a basura */
+} __attribute__( ( packed ) ) tkcmd_sync_t;
+
+//------------------------------------------------------------------------------
+/*
+ * Días transcurridos desde una época arbitraria. Sólo sirve para restar dos
+ * fechas, así que el origen da igual mientras sea el mismo en los dos.
+ *
+ * El truco es correr el año para que **marzo sea el mes 0**: así el día
+ * bisiesto cae al final y no hay que tratarlo como caso especial en el medio.
+ *
+ * ⚠ `y / 4` asume que todo múltiplo de 4 es bisiesto. Eso es cierto **entre
+ * 2000 y 2099** —2000 lo es y 2100 no, pero queda fuera del rango de un RTC que
+ * guarda el año en dos dígitos—, así que acá es exacto y no una aproximación.
+ */
+static uint32_t prvDiasAbsolutos( const RtcTimeType_t *pxHora )
+{
+    uint32_t y = ( uint32_t ) pxHora->year;
+    uint32_t m = ( uint32_t ) pxHora->month;
+
+    /* El +100/+99 es para que el año corrido nunca quede negativo; se cancela
+       al restar dos fechas. */
+    if( m <= 2U )
+    {
+        y += 99U;
+        m += 12U;
+    }
+    else
+    {
+        y += 100U;
+    }
+
+    return ( 365U * y ) + ( y / 4U ) + ( ( 153U * ( m - 3U ) + 2U ) / 5U )
+           + ( uint32_t ) pxHora->day;
+}
+//------------------------------------------------------------------------------
+static int32_t prvSegundosDelDia( const RtcTimeType_t *pxHora )
+{
+    return ( ( int32_t ) pxHora->hour * 3600 ) + ( ( int32_t ) pxHora->min * 60 )
+           + ( int32_t ) pxHora->sec;
+}
+//------------------------------------------------------------------------------
+/* Diferencia con signo, en segundos: positiva si `a` va ADELANTADO respecto de `b`. */
+static int32_t prvDiferenciaSeg( const RtcTimeType_t *pxA, const RtcTimeType_t *pxB )
+{
+    int32_t lDias = ( int32_t ) prvDiasAbsolutos( pxA ) - ( int32_t ) prvDiasAbsolutos( pxB );
+
+    return ( lDias * 86400 ) + prvSegundosDelDia( pxA ) - prvSegundosDelDia( pxB );
+}
+//------------------------------------------------------------------------------
+static uint8_t prvSyncChecksum( const tkcmd_sync_t *pxSync )
+{
+    const uint8_t *p = ( const uint8_t * ) pxSync;
+    uint8_t        ucSuma = 0U;
+    uint8_t        i;
+
+    /* ⚠ `offsetof` y NO `sizeof - 1`: el checksum cubre lo que hay ANTES del
+       campo checksum, y con `sizeof` entraría el relleno. Es el bug que en el
+       paso 4 hacía que la FAT se declarara inválida en cada arranque. */
+    for( i = 0U; i < ( uint8_t ) offsetof( tkcmd_sync_t, ucChecksum ); i++ )
+    {
+        ucSuma = ( uint8_t ) ( ucSuma + p[ i ] );
+    }
+
+    return ucSuma;
+}
+//------------------------------------------------------------------------------
+/* Informa la deriva contra la última sincronización, y guarda la marca nueva.
+   `pxAntes` es la hora que tenía el equipo; `pxNueva`, la que se le acaba de
+   poner. */
+static void prvDerivaInformarYGuardar( const RtcTimeType_t *pxAntes,
+                                       const RtcTimeType_t *pxNueva,
+                                       bool bHabiaHoraConfiable )
+{
+    tkcmd_sync_t xSync;
+
+    /* ---- Lo primero: ¿cuánto se había desviado? ---- */
+    if( bHabiaHoraConfiable &&
+        ( drv_rtc_sram_leer( TKCMD_SYNC_SRAM_ADDR, ( char * ) &xSync,
+                             ( uint8_t ) sizeof( xSync ) ) == ( int16_t ) sizeof( xSync ) ) &&
+        ( xSync.ucChecksum == prvSyncChecksum( &xSync ) ) &&
+        ( xSync.xHora.year >= TKSYS_ANIO_COMPILACION ) )
+    {
+        int32_t lDesvio     = prvDiferenciaSeg( pxAntes, pxNueva );
+        int32_t lTranscurrido = prvDiferenciaSeg( pxNueva, &xSync.xHora );
+
+        xprintf( "\r\nDERIVA DEL RTC desde la ultima sincronizacion:\r\n" );
+        xprintf( "  desde        : %02u/%02u/%02u %02u:%02u\r\n",
+                 ( unsigned ) xSync.xHora.day,  ( unsigned ) xSync.xHora.month,
+                 ( unsigned ) xSync.xHora.year, ( unsigned ) xSync.xHora.hour,
+                 ( unsigned ) xSync.xHora.min );
+
+        if( lTranscurrido >= 3600 )
+        {
+            xprintf( "  transcurrido : %ld h\r\n", ( long ) ( lTranscurrido / 3600 ) );
+            xprintf( "  desvio       : %+ld s (%s)\r\n", ( long ) lDesvio,
+                     ( lDesvio > 0 ) ? "ADELANTADO" : "atrasado" );
+
+            /*
+             * ppm = desvio / transcurrido * 1e6. Se hace en enteros y con el
+             * numerador primero para no perder la parte que interesa: con
+             * desvíos de segundos sobre días, dividir antes daría cero.
+             */
+            long lPpm     = ( long ) ( ( lDesvio * 1000000L ) / lTranscurrido );
+            long lSegDia  = ( long ) ( ( lDesvio * 86400L ) / lTranscurrido );
+
+            xprintf( "  ==> %+ld ppm  (%+ld s/dia)\r\n", lPpm, lSegDia );
+
+            /*
+             * ⚠ El umbral no es arbitrario: **±20 ppm es la tolerancia típica de
+             * un cristal de reloj** (±1,7 s/día). Por encima de eso el cristal
+             * ya no está andando dentro de especificación.
+             *
+             * ⛔ **Y el cristal que hay que mirar es `Y1`, el del MCP79410** — el
+             * que está en X1/X2 de ese chip, NO el de PC14/PC15 del micro. Son
+             * dos cristales distintos y es fácil confundirlos: el del STM32 es
+             * el LSE, que alimenta el tick del kernel y el RTC interno; **la
+             * hora de las muestras la lleva el MCP79410 con el suyo**, que es el
+             * que esta medición mide.
+             */
+            if( ( lPpm > 20L ) || ( lPpm < -20L ) )
+            {
+                xprintf( "  [!] fuera de la tolerancia tipica de un cristal (+-20 ppm).\r\n" );
+                xprintf( "      El cristal es Y1, el del MCP79410 (X1/X2 de ese chip),\r\n" );
+                xprintf( "      NO el de PC14/PC15 del micro.\r\n" );
+
+                if( lPpm > 0L )
+                {
+                    /* Cargar de MENOS siempre adelanta, y cuanto menos carga,
+                       más adelanta: es la primera cosa a verificar. */
+                    xprintf( "      ADELANTA -> le falta CARGA capacitiva: verificar que\r\n" );
+                    xprintf( "      Y1 tenga sus condensadores y que correspondan a su CL.\r\n" );
+                }
+            }
+        }
+        else
+        {
+            /* Con poco tiempo transcurrido el ppm no significa nada: la
+               resolución del RTC es 1 s, así que el error relativo es enorme. */
+            xprintf( "  transcurrido : %ld s -- muy poco para calcular ppm\r\n",
+                     ( long ) lTranscurrido );
+            xprintf( "  desvio       : %+ld s\r\n", ( long ) lDesvio );
+        }
+    }
+
+    /* ---- Y se deja la marca para la próxima ---- */
+    memset( &xSync, 0, sizeof( xSync ) );
+    xSync.xHora      = *pxNueva;
+    xSync.ucChecksum = prvSyncChecksum( &xSync );
+
+    ( void ) drv_rtc_sram_escribir( TKCMD_SYNC_SRAM_ADDR, ( const char * ) &xSync,
+                                    ( uint8_t ) sizeof( xSync ) );
+}
+
 /*------------------------------------------------------------------------------
  * `CLOCK=YYMMDDhhmm`: el servidor pone en hora al equipo.
  *
@@ -925,7 +1108,6 @@ wan_conf_rta_t wan_conf_aplicar( wan_bloque_t eBloque, const char *pcRta )
 static bool prvAplicarClock( const char *pcValor )
 {
     RtcTimeType_t xNueva;
-    RtcTimeType_t xActual;
     uint8_t       i;
 
     /* Diez dígitos, ni uno menos: con el string corto se leería basura de los
@@ -967,44 +1149,70 @@ static bool prvAplicarClock( const char *pcValor )
         return false;
     }
 
-    bool bForzar = ( drv_rtc_validez() != rtcHORA_VALIDA );
+    return wan_rtc_sincronizar( &xNueva, "el servidor", false );
+}
+//------------------------------------------------------------------------------
+bool wan_rtc_sincronizar( const RtcTimeType_t *pxNueva, const char *pcOrigen,
+                          bool bSiempre )
+{
+    RtcTimeType_t xActual;
+    bool          bHabiaHora = ( drv_rtc_validez() == rtcHORA_VALIDA );
+    bool          bLeida     = drv_rtc_leer( &xActual );
+    bool          bForzar    = bSiempre || !bHabiaHora;
 
-    if( !drv_rtc_leer( &xActual ) )
+    if( ( pxNueva == NULL ) || ( pcOrigen == NULL ) )
+    {
+        return false;
+    }
+
+    if( !bLeida )
     {
         /* Sin poder leer la hora actual no hay con qué comparar, así que se
-           escribe: tener la del servidor es mejor que no tener ninguna. */
-        bForzar = true;
+           escribe: tener una hora de afuera es mejor que no tener ninguna. */
+        bForzar    = true;
+        bHabiaHora = false;
     }
-    else if( ( xActual.year  != xNueva.year  ) ||
-             ( xActual.month != xNueva.month ) ||
-             ( xActual.day   != xNueva.day   ) )
+    else if( ( xActual.year  != pxNueva->year  ) ||
+             ( xActual.month != pxNueva->month ) ||
+             ( xActual.day   != pxNueva->day   ) )
     {
+        /* ⛔ La FECHA distinta fuerza el ajuste, y acá está el agujero del AVR:
+           su cuenta es sólo `hour*3600 + min*60 + sec`, así que un equipo que
+           arrancó frío en 2001-01-01 10:30 contra un servidor en 2026-09-11
+           10:30 da diferencia CERO y no ajustaría nunca. */
         bForzar = true;
     }
 
     if( !bForzar )
     {
-        long lActual = ( long ) xActual.hour * 3600L + ( long ) xActual.min * 60L +
-                       ( long ) xActual.sec;
-        long lNueva  = ( long ) xNueva.hour * 3600L + ( long ) xNueva.min * 60L;
-        long lDiff   = ( lActual > lNueva ) ? ( lActual - lNueva ) : ( lNueva - lActual );
+        /*
+         * ⚠ El umbral de 90 segundos es del AVR y hay que conservarlo (su
+         * comentario lo fecha en 2021-12-14): sin él, con `timerpoll` corto el
+         * reloj se reajusta en cada poleo y la hora del equipo se mueve todo el
+         * tiempo.
+         */
+        int32_t lDiff = prvDiferenciaSeg( &xActual, pxNueva );
 
-        if( lDiff <= 90L )
+        if( ( lDiff <= 90 ) && ( lDiff >= -90 ) )
         {
             return false;   /* dentro de la tolerancia: no se toca */
         }
     }
 
-    if( !drv_rtc_escribir( &xNueva ) )
+    if( !drv_rtc_escribir( pxNueva ) )
     {
         xprintf( "WAN:: ERROR: no se pudo poner en hora el RTC\r\n" );
         return false;
     }
 
-    xprintf( "WAN:: RTC en hora desde el servidor: %02u/%02u/%02u %02u:%02u\r\n",
-             ( unsigned ) xNueva.day, ( unsigned ) xNueva.month,
-             ( unsigned ) xNueva.year, ( unsigned ) xNueva.hour,
-             ( unsigned ) xNueva.min );
+    xprintf( "WAN:: RTC en hora desde %s: %02u/%02u/%02u %02u:%02u:%02u\r\n",
+             pcOrigen,
+             ( unsigned ) pxNueva->day,  ( unsigned ) pxNueva->month,
+             ( unsigned ) pxNueva->year, ( unsigned ) pxNueva->hour,
+             ( unsigned ) pxNueva->min,  ( unsigned ) pxNueva->sec );
+
+    /* ⭐ Y acá la corrección se vuelve una MEDICIÓN. Ver el bloque de arriba. */
+    prvDerivaInformarYGuardar( &xActual, pxNueva, bHabiaHora && bLeida );
 
     return true;
 }

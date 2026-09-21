@@ -2221,6 +2221,13 @@ static void cmdEv( void )
  */
 #define LTE_DATA_MS_ENTRE_FRAMES    500U
 
+/*
+ * Cuánto espera CADA lectura mientras se busca la respuesta buena. No es el
+ * timeout total —ése lo pone el lazo de `prvEsperarRespuestaConClase()`— sino el
+ * tiempo que se le da a una trama para aparecer antes de volver a mirar.
+ */
+#define LTE_DATA_MS_POR_LECTURA     3000U
+
 static int16_t prvLteEscuchar( uint32_t ulMs );
 static void    prvLteBridge  ( void );
 
@@ -2541,6 +2548,83 @@ static void prvLteConfAll( void )
 }
 //------------------------------------------------------------------------------
 /*
+ * Espera la respuesta a un frame **descartando las que no son de él**.
+ *
+ * ⛔ EL PROBLEMA QUE RESUELVE, encontrado en banco el 2026-09-21 con el log del
+ * servidor al lado:
+ *
+ * **El servidor contesta a TODOS los GET, también a los `DATANR`.** El
+ * `NR` —"no response"— es una convención de la capa de aplicación: dice que el
+ * equipo no va a *esperar* la respuesta, no que el servidor no la mande. Por
+ * HTTP siempre hay respuesta, y para un `DATANR` es un cuerpo **vacío**, que
+ * envuelto en HTML llega como `<html></html>`.
+ *
+ * Esas respuestas viajan por LTE con cientos de ms de latencia, así que **llegan
+ * cuando ya estamos mandando el frame siguiente**. Los tiempos del banco:
+ *
+ *     14:41:46,455  el servidor procesa el DATANR #9   -> responde vacio
+ *     14:41:47,445  el servidor procesa el DATA        -> responde CLASS=DATA&CLOCK=...
+ *
+ * Con una pausa de 500 ms entre frames, el `drv_lte_flush()` de antes del `DATA`
+ * corre **justo antes** de que llegue la respuesta del `DATANR` anterior: la
+ * limpiamos cuando todavía venía en camino, y después leímos **esa** en lugar de
+ * la nuestra. El síntoma era un `<html></html>` vacío que parecía un rechazo del
+ * servidor, cuando en su log figuraba `raw_response->CLASS=DATA&CLOCK=2609211441`.
+ *
+ * ⭐ **El AVR no tiene este problema y vale la pena entender por qué**: aquel
+ * ACUMULA todo lo que llega en un buffer y busca el patrón con `strstr`
+ * (`wan_check_response`), así que una respuesta demorada simplemente queda
+ * delante y no estorba. Nosotros leemos **una trama delimitada por silencio** y
+ * la evaluamos sola — que es mejor para todo lo demás, pero necesita esto.
+ *
+ * ⚠ Descartar es lo correcto y no un parche: una respuesta sin `CLASS=` **no
+ * lleva información** —es el acuse vacío de un `DATANR`— así que perderla no
+ * pierde nada. Lo que no se puede es tomarla por la respuesta de otro frame.
+ */
+static bool prvEsperarRespuestaConClase( char *pcRta, uint16_t usSize,
+                                         uint32_t ulTimeoutMs )
+{
+    TickType_t xInicio  = xTaskGetTickCount();
+    TickType_t xLimite  = pdMS_TO_TICKS( ulTimeoutMs );
+    uint8_t    ucVacias = 0U;
+
+    while( ( xTaskGetTickCount() - xInicio ) < xLimite )
+    {
+        int16_t sRet = drv_lte_read( pcRta, usSize - 1U, LTE_DATA_MS_POR_LECTURA );
+
+        if( sRet <= 0 )
+        {
+            continue;   /* nada todavía; el lazo decide cuándo rendirse */
+        }
+
+        pcRta[ sRet ] = '\0';
+
+        if( strstr( pcRta, "CLASS=" ) != NULL )
+        {
+            if( ucVacias > 0U )
+            {
+                xprintf( "   (se descartaron %u acuses vacios de DATANR anteriores)\r\n",
+                         ( unsigned ) ucVacias );
+            }
+
+            return true;
+        }
+
+        /* Sin `CLASS=` no hay nada que interpretar: es el acuse de un DATANR que
+           venía atrasado. Se cuenta para poder decirlo, y se sigue esperando. */
+        ucVacias++;
+    }
+
+    if( ucVacias > 0U )
+    {
+        xprintf( "   (llegaron %u acuses vacios, pero ninguna respuesta con CLASS=)\r\n",
+                 ( unsigned ) ucVacias );
+    }
+
+    return false;
+}
+//------------------------------------------------------------------------------
+/*
  * El vaciado de la VENTANA (la EEPROM): transmite los registros guardados y los
  * borra **recién cuando el servidor confirmó**.
  *
@@ -2654,19 +2738,15 @@ static void prvLteData( void )
 
         /* ---- Toca confirmar: se espera la respuesta del servidor ---- */
 
-        int16_t sRet = drv_lte_read( pcRta, sizeof( pcRta ) - 1U, LTE_PING_TIMEOUT_MS );
-
-        if( sRet <= 0 )
+        if( !prvEsperarRespuestaConClase( pcRta, sizeof( pcRta ), LTE_PING_TIMEOUT_MS ) )
         {
             xprintf( "sin respuesta en %u ms: quedan %u sin confirmar\r\n",
                      ( unsigned ) LTE_PING_TIMEOUT_MS, ( unsigned ) usSinConfirmar );
             break;
         }
 
-        pcRta[ sRet ] = '\0';
-
         xprintf( "<- " );
-        ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+        ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) strlen( pcRta ) );
         xprintf( "\r\n" );
 
         wan_data_ordenes_t xOrdenes;
@@ -2684,11 +2764,10 @@ static void prvLteData( void )
              */
             if( eRta == wanDATA_VACIA )
             {
-                xprintf( "[!] el servidor CONTESTO PERO VACIO (sin CLASS=).\r\n" );
-                xprintf( "    o sea que el frame LLEGO y lo rechazo por su CONTENIDO:\r\n" );
-                xprintf( "    mirar el log del SERVIDOR, y revisar la fecha del frame\r\n" );
-                xprintf( "    (con el RTC en arranque frio viaja DATE=0101xx, que el\r\n" );
-                xprintf( "     servidor no puede indexar). 'rtc' dice si la hora es confiable.\r\n" );
+                /* Con `prvEsperarRespuestaConClase()` delante esto ya no
+                   debería poder pasar: el lazo sólo devuelve tramas que traen
+                   `CLASS=`. Si aparece, es que algo cambió ahí. */
+                xprintf( "[!] respuesta sin CLASS= (no deberia llegar aca)\r\n" );
             }
             else if( eRta == wanDATA_OTRA_CLASE )
             {
@@ -3033,15 +3112,24 @@ static void prvLteClock( bool bAplicar )
         return;
     }
 
-    if( drv_rtc_escribir( &xHora ) )
+    /*
+     * Va por `wan_rtc_sincronizar()` y no por `drv_rtc_escribir()` directo para
+     * que **este camino también mida la deriva**: es el mismo punto por el que
+     * pasa el `CLOCK=` del servidor. Ver el header de `wan_frame.h`.
+     *
+     * `bSiempre = true` porque acá lo pidió una persona: el umbral de 90 s
+     * existe para que el ajuste automático no reajuste en cada poleo, no para
+     * discutirle a un comando explícito.
+     */
+    if( wan_rtc_sincronizar( &xHora, "el modulo (NTP)", true ) )
     {
         /* `drv_rtc_escribir()` escribe además la firma de la SRAM, así que esto
            saca al MCP79410 de un arranque en frío. */
-        xprintf( "RTC puesto en hora desde el modulo. La hora ya es CONFIABLE.\r\n" );
+        xprintf( "la hora ya es CONFIABLE.\r\n" );
     }
     else
     {
-        xprintf( "ERROR: no se pudo escribir el RTC\r\n" );
+        xprintf( "no se escribio el RTC (ya estaba en hora, o fallo el chip)\r\n" );
     }
 }
 //------------------------------------------------------------------------------

@@ -136,9 +136,16 @@ entonces avanzó en trece etapas, todas validadas en banco y etiquetadas en git:
 - `LED_PORT`/`LED_PIN`/`LED2_*` están en `main.h` (bloque *Private defines*) como **alias** de los
   símbolos que genera CubeMX, para que los vean todos los `.c` sin duplicar la definición del pin.
 - **Pendiente de hardware:** los condensadores de carga son de **10 pF**, que corresponden a un
-  cristal de `CL` ≈ 7-9 pF. Si el montado es de los comunes de **12,5 pF**, el RTC va a correr
-  rápido —del orden de +50 a +100 ppm, unos **9 s/día**— lo cual importa en un datalogger que estampa
-  la hora. Verificar el `CL` contra el BOM; si corresponde, cambiarlos por 18-22 pF.
+  cristal de `CL` ≈ 7-9 pF. Si el montado es de los comunes de **12,5 pF**, este oscilador va a
+  correr rápido —del orden de +50 a +100 ppm—. Verificar el `CL` contra el BOM; si corresponde,
+  cambiarlos por 18-22 pF.
+  ⛔ **CORRECCIÓN (2026-09-21): esta nota decía que eso afectaba a "la hora que estampa el
+  datalogger", y es FALSO.** Hay **dos cristales de 32.768 kHz** en R001 y es fácil confundirlos:
+  éste es el **LSE del micro** (PC14/PC15), que alimenta el tick del kernel y el RTC interno —una
+  copia de trabajo que ni siquiera se sincroniza todavía—. **La hora de las muestras la lleva el
+  MCP79410 con SU propio cristal, `Y1`, en X1/X2 de ese chip.** O sea que este pendiente afecta a los
+  `vTaskDelay()` y al `timerpoll`, donde 100 ppm son despreciables; la deriva de la hora se mide y se
+  corrige aparte (ver la fase 2, `wan_rtc_sincronizar()`).
 
 ### ⚠ El programador: lo que hay que saber antes de tocar nada
 
@@ -2697,39 +2704,64 @@ comandos reales son dos, y el módulo cierra la trama con **el que se cumpla pri
 | **`AT+UARTFT`** | el silencio que cierra la trama | 10..500 ms | **50 ms** |
 | **`AT+UARTFL`** | el largo que también la cierra | 5..4096 B | 1024 B |
 
-⚠ **El default es 50 ms, no 250**, así que los 500 ms de pausa quedan con holgura de sobra — pero hay
-que **leer el valor real** con `lte info`, que ahora consulta los dos.
+✅ **Leídos del módulo el 2026-09-21**: `UARTFT` está en **250 ms** y `UARTFL` en **1024**. O sea que
+el módulo **no** está en el default de 50 ms —alguien lo configuró en 250— y los **500 ms** de pausa
+quedan con **2× de margen** sobre el silencio que hace falta. El criterio por largo no se dispara:
+los frames son de ~150 bytes contra 1024.
+
+⭐ Eso es justamente por lo que `lte info` los consulta en vez de confiar en el default del manual: el
+número que importa es el que tiene el módulo, no el de la hoja.
 
 ⚠ **`UARTFL` importa aunque hoy no apriete**: con frames de ~150 bytes nunca se llega a 1024, pero
 **si alguien lo bajara por debajo del largo de un frame, el módulo lo partiría en dos GET** — y eso
 del lado del servidor se vería como frames corruptos sin que el log del equipo muestre nada raro.
 
-#### ⛔ "El servidor contestó VACÍO" no es lo mismo que "contestó otra cosa"
+#### ⛔ El servidor contesta a TODOS los GET — también a los `DATANR`
 
-Primera corrida de `lte data` contra el servidor real (2026-09-18): los 10 frames llegaron, y la
-respuesta al `CLASS=DATA` fue **`<html></html>`** — sin un solo `CLASS=`.
+**Es el hallazgo del 2026-09-21, y sólo se pudo cerrar con el log del servidor al lado.**
 
-Eso **no es un fallo del enlace**: el servidor recibió el GET y contestó. Lo que rechazó es el
-**contenido** del frame. Por eso `wan_data_rta_t` separa los dos casos, que mandan a mirar lugares
-opuestos:
+El síntoma era que la respuesta al `CLASS=DATA` llegaba como **`<html></html>`**, sin un solo
+`CLASS=`. Parecía que el servidor había recibido el frame y lo había rechazado por su contenido — la
+sospecha natural era la **fecha**, porque esos registros viajaban con `DATE=010101`.
 
-| | Qué significa | Dónde mirar |
-|---|---|---|
-| **`wanDATA_VACIA`** | contestó sin ningún `CLASS=` | **el log del SERVIDOR** — el frame llegó |
-| `wanDATA_OTRA_CLASE` | contestó con un `CLASS=` que no es `DATA` | cruce de respuestas (la del frame anterior) |
+⛔ **Era falso, y el log lo desmiente por dos lados:**
 
-⭐ **El firmware hizo lo correcto: cortó el vaciado y NO borró nada.** Los 10 quedaron sin confirmar y
-se reintentan — que es exactamente para lo que el `pop()` se separó del `peek()`. Si el servidor no
-confirma, seguir mandando cientos de registros que no se van a poder borrar sólo gasta batería y
-tráfico.
+```
+raw_response->CLASS=DATA&CLOCK=2609211441      <- el servidor SI respondio bien
+[procesar_frame] D_DATALINE={'DATE': '010101', ...}
+  -> save_dataline -> enqueue_dataline          <- y guarda los de 2001 sin chistar
+```
 
-⚠ **El sospechoso número uno es la FECHA.** Los frames de esa corrida salieron con `DATE=010101`: el
-MCP79410 estaba en arranque frío —el porta pila otra vez— y **el servidor indexa la base por la fecha
-del frame**. Un registro de 2001 no tiene dónde entrar.
+**La causa real es una carrera.** El `NR` de `DATANR` es una convención de la capa de aplicación
+—dice que el equipo no va a *esperar* la respuesta, no que el servidor no la mande—: por HTTP
+**siempre** hay respuesta, y para un `DATANR` es un cuerpo **vacío**, que envuelto llega como
+`<html></html>`. Esas respuestas viajan por LTE con cientos de ms de latencia, así que **llegan
+cuando ya estamos mandando el frame siguiente**:
 
-Y ahí hay algo que el `CLOCK=` del servidor **no puede arreglar**: llega en la respuesta a un frame de
-datos, o sea **después** de que esos registros ya se grabaron mal. Corrige el reloj, no los datos ya
-tomados. De ahí la sección siguiente.
+```
+14:41:46,455   el servidor procesa el DATANR #9   -> responde vacio
+14:41:47,445   el servidor procesa el DATA        -> responde CLASS=DATA&CLOCK=...
+```
+
+Con la pausa de 500 ms entre frames, el `drv_lte_flush()` de antes del `DATA` corre **justo antes**
+de que llegue la respuesta del `DATANR` anterior: la limpiamos cuando todavía venía en camino, y
+después leímos **ésa** en vez de la nuestra.
+
+⭐ **El AVR no tiene este problema, y por qué importa entenderlo**: aquel **acumula** todo lo que
+llega en un buffer y busca el patrón con `strstr` (`wan_check_response`), así que una respuesta
+demorada queda delante y no estorba. Nosotros leemos **una trama delimitada por silencio** y la
+evaluamos sola — que es mejor para todo lo demás, pero necesita tolerar las que no son de este frame.
+
+**La corrección** (`prvEsperarRespuestaConClase()`): se lee en lazo hasta encontrar una respuesta que
+traiga `CLASS=`, **descartando las vacías** y diciendo cuántas se descartaron. Descartar es correcto
+y no un parche: una respuesta sin `CLASS=` **no lleva información** —es el acuse vacío de un
+`DATANR`— así que perderla no pierde nada; lo que no se puede es tomarla por la respuesta de otro
+frame.
+
+⚠ **La lección de método, que ya van tres en este proyecto**: el síntoma señalaba al lugar
+equivocado —la fecha— y ninguna cantidad de mirar el log del equipo lo habría desmentido. Lo cerró
+**la otra punta**, igual que el módulo puesto en un AVR cerró lo de los pines 21/22 y el
+`get_ainputs_hash_from_config()` cerró lo del `PST`.
 
 #### ⭐ El módulo tiene reloj NTP: `lte clock`
 
@@ -2743,10 +2775,109 @@ medir**, en vez de esperar la respuesta a un frame de datos.
 `lte clock` la muestra junto a la del equipo; `lte clock set` la aplica — y como `drv_rtc_escribir()`
 escribe la firma de la SRAM, eso **saca al chip del arranque en frío sin que nadie vaya al sitio**.
 
-⚠ **`set` NO se hace solo todavía, y es a propósito**: falta decidir si el módulo entrega hora **local
-o UTC**. Si el equipo estampara UTC donde el AVR estampa local, **todos los registros quedarían
-corridos 3 horas contra los de FWDLGX** — plausibles y mal, que es el peor desenlace. Por eso el
-comando **muestra el huso que informa el módulo**: con eso se decide y recién ahí se automatiza.
+##### ✅ El módulo entrega hora LOCAL, no UTC (banco, 2026-09-21)
+
+Era la duda que bloqueaba automatizarlo —si el equipo estampara UTC donde el AVR estampa local, todos
+los registros quedarían **corridos 3 horas** contra los de FWDLGX, plausibles y mal—. La respuesta
+está en el propio string:
+
+```
++CCLK: "26/09/21,11:04:08-12"      <- -12 cuartos = UTC-3, y la hora YA viene con el huso aplicado
+```
+
+Si diera UTC diría `14:04`. O sea que **el módulo aplica el huso solo** y coincide con lo que estampa
+el AVR.
+
+##### ⛔ Y de paso apareció que el MCP79410 ADELANTA
+
+La misma corrida mostró:
+
+```
+hora del modulo : 11:04:08        <- coincide con el reloj de la PC
+hora del equipo : 11:09:53        <- 5 min 45 s ADELANTADO, y marcado "confiable"
+```
+
+Las dos lecturas salen del mismo comando con milisegundos entre una y otra, así que **los 345 s son
+discrepancia real**, y Pablo confirmó contra el reloj de la PC que **el bueno es el módulo**.
+
+Para dimensionarlo: si esos 345 s se acumularon en 12 días son **+332 ppm (+28 s/día)**, más de
+quince veces la tolerancia de ±20 ppm de un cristal de reloj.
+
+##### ⛔ HAY DOS CRISTALES DE 32.768 kHz, y el de la hora NO es el del micro
+
+Esto casi manda a cambiar el componente equivocado, y es la clase de error que este proyecto ya pagó
+caro con el `CSQ 31` y con la FAT que acusaba a la pila:
+
+| Cristal | Dónde | Qué alimenta |
+|---|---|---|
+| el del **micro** | PC14/PC15, con sus condensadores de **10 pF** | el **LSE**: tick del kernel y RTC interno |
+| **`Y1`** | **X1/X2 del MCP79410** | ⭐ **la hora que se estampa en cada muestra** |
+
+El "pendiente de hardware" que venía anotado desde el bring-up habla del **primero**, y decía que
+afectaba a la hora del datalogger — **es falso**: ese oscilador mueve los `vTaskDelay()` y el
+`timerpoll`, donde 100 ppm son despreciables. **La deriva que medimos es la de `Y1`.**
+
+⚠ **Y en el esquemático `Y1` va directo a X1/X2 sin condensadores de carga a la vista**
+(`SCH_spq_arm_logica_R001.pdf`). Si el cristal pide carga y no la tiene, la efectiva queda muy por
+debajo de la nominal — y **cargar de menos adelanta, tanto más cuanto menos carga haya**. Eso
+encajaría con los +332 ppm medidos, que son demasiados para explicarse sólo por una carga
+*levemente* baja.
+
+⏳ **Lo que hay que verificar en la placa**: qué `CL` pide el cristal `Y1` montado, y si lleva o no
+condensadores. El firmware ya no manda a mirar PC14/PC15 — el mensaje de la deriva nombra `Y1`
+explícitamente.
+
+#### ℹ️ El `bt12v` bajo en banco NO es del firmware (Pablo, 2026-09-21)
+
+En las corridas de estos días el frame informa `bt12v` entre **6,8 y 7,4 V** en vez de ~12. **Pablo
+avisó que es un problema de su montaje de banco para medir ese riel, no del equipo**, y que lo va a
+resolver.
+
+Queda anotado para que **no vuelva a aparecer como sospechoso** al leer una traza: esos números son
+esperables mientras dure, y no hay nada que investigar del lado del `drv_adc` ni del divisor de la
+placa.
+
+#### ⭐ La corrección MIDE la deriva, y por eso no vive en el comando de consola
+
+Hay **dos** fuentes de hora y llegan en momentos distintos — las dos pasan por
+`wan_rtc_sincronizar()`:
+
+| Fuente | Cuándo llega | Qué resuelve |
+|---|---|---|
+| el **`CLOCK=` del servidor** | en la respuesta a un frame de datos | la **deriva** en operación normal — es lo que hace el AVR |
+| **`AT+CCLK?`** del módulo (NTP) | al abrir la sesión, **antes de medir** | el **arranque en frío**: el `CLOCK` llega tarde, cuando los registros ya se grabaron con fecha 2001 |
+
+⛔ **Y ahí está el problema que obligó a poner la medición en ese punto y no en `lte clock`**: el
+servidor corrige la hora en **cada sesión**, así que el reloj siempre se ve bien y **la deriva del
+cristal queda tapada para siempre**. Nunca nos enteraríamos de que hay que cambiar un componente de
+la placa.
+
+Poniendo la medición donde se aplica la corrección, **cada ajuste informa cuántos ppm se desvió**:
+
+```
+DERIVA DEL RTC desde la ultima sincronizacion:
+  desde        : 09/09/26 12:08
+  transcurrido : 288 h
+  desvio       : +345 s (ADELANTADO)
+  ==> +332 ppm  (+28 s/dia)
+  [!] fuera de la tolerancia tipica de un cristal (+-20 ppm).
+      El cristal es Y1, el del MCP79410 (X1/X2 de ese chip),
+      NO el de PC14/PC15 del micro.
+      ADELANTA -> le falta CARGA capacitiva: verificar que
+      Y1 tenga sus condensadores y que correspondan a su CL.
+```
+
+La marca de la última sincronización va a la **SRAM del MCP79410** (dirección 32, ver el mapa que
+ahora está en `drv_rtc79410.h`), con su checksum calculado con **`offsetof`** — el mismo patrón que
+en el paso 4 hacía que la FAT se declarara inválida en cada arranque.
+
+⚠ **Con menos de una hora transcurrida no se calculan ppm**: la resolución del RTC es 1 s, así que
+sobre poco tiempo el error relativo se come el resultado. Se informa el desvío crudo y nada más.
+
+La aritmética de fechas corre marzo al mes 0 para que el día bisiesto quede al final del año y no
+haya un caso especial en el medio; `y/4` es **exacto** entre 2000 y 2099, que es todo lo que puede
+representar un RTC con el año en dos dígitos. Validada sin hardware: **9 casos**, incluidos los dos
+cruces de bisiesto (2028 sí, 2027 no) y el `2001-01-01` que el AVR daría como diferencia cero.
 
 Se aplica el mismo chequeo que `tkSys`: **un año anterior al de compilación se rechaza** (el módulo
 todavía no sincronizó con la red). `TKSYS_ANIO_COMPILACION` pasó a `tkSys.h` porque ahora lo usan los
@@ -2813,7 +2944,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.47"        /* = VER                                 */
+#define FW_VERSION  "0.0.50"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 

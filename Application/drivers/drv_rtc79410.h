@@ -181,6 +181,24 @@ bool drv_rtc_invalidar( void );
 #define DRV_RTC_SRAM_SIZE       64U
 #define DRV_RTC_SRAM_USUARIO     5U   /* 4 de magia + 1 de versión */
 
+/*------------------------------------------------------------------------------
+ * ⚠ EL MAPA DE LA SRAM, que estaba repartido en tres archivos
+ *
+ * Son 64 bytes y **no hay ningún mecanismo que impida que dos módulos se pisen**:
+ * cada uno define su dirección con un `#define` en su propio `.c`. Antes de
+ * agregar algo, mirar acá — un solapamiento se manifestaría como una FAT
+ * corrupta o un contador de lotes que salta, o sea acusando al componente
+ * equivocado, que es el modo de falla más caro de este proyecto.
+ *
+ * | Dirección | Tamaño | Quién | Definido en |
+ * |---|---|---|---|
+ * | `0..4`   | 5  | la **firma** de validez de la hora | este driver |
+ * | `5..14`  | 10 | la **FAT** del almacén (`fs_fat_t`) | `fs_datos.c` |
+ * | `21..24` | 4  | el **contador de lotes** de la microSD | `fs_sd.c` |
+ * | `32..39` | 8  | la **marca de la última sincronización** de hora | `tkCmd.c` |
+ * | `40..63` | 24 | libre |
+ *----------------------------------------------------------------------------*/
+
 int16_t drv_rtc_sram_leer   ( uint8_t ucAddr, char *pvBuffer, uint8_t ucBytes );
 int16_t drv_rtc_sram_escribir( uint8_t ucAddr, const char *pvBuffer, uint8_t ucBytes );
 
