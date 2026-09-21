@@ -2325,6 +2325,29 @@ static bool prvLteListo( void )
  *
  * ⚠ **ASUME modo TRANSPARENTE.** Ver `prvLtePing()`.
  */
+/*
+ * ⛔ Avisa si se está por transmitir con el IMEI FALSO.
+ *
+ * El 2026-09-21 se transmitió una sesión entera con los 15 ceros y nada lo
+ * dijo: el IMEI se cachea recién cuando alguien corre `lte info`, y esa corrida
+ * empezó con `lte clock set`. **El servidor los aceptó**, así que esos frames
+ * quedaron en la base atribuidos a un equipo que no existe.
+ *
+ * ⚠ **Avisa pero no impide**, que es el criterio de este firmware (igual que
+ * `cfg_nvm_chequear_nombres()`): en banco a veces se quiere transmitir sin
+ * haber leído el IMEI, y un comando que se niega en medio de una prueba es peor
+ * que uno que advierte.
+ */
+static void prvAvisarImeiFalso( void )
+{
+    if( wan_imei_es_falso() )
+    {
+        xprintf( "[!] el IMEI es el FALSO (15 ceros): nadie se lo pregunto al modulo.\r\n" );
+        xprintf( "    los frames van a quedar en el servidor sin equipo que los reclame.\r\n" );
+        xprintf( "    correr 'lte esc' + 'lte info' para leerlo, y despues 'lte exit'.\r\n" );
+    }
+}
+//------------------------------------------------------------------------------
 static bool prvLteTxRx( const char *pcFrame, uint16_t usLargo,
                         char *pcRta, uint16_t usRtaSize )
 {
@@ -2488,6 +2511,8 @@ static void prvLteConfAll( void )
         xprintf( "[!] el CSQ leido no es una medida (99 = desconocido, >=31 = todavia\r\n" );
         xprintf( "    no campo en la red). Correr 'lte esc' + 'lte info' para refrescarlo.\r\n" );
     }
+
+    prvAvisarImeiFalso();
 
     uint16_t usLargo = wan_frame_conf_all( pcFrame, sizeof( pcFrame ) );
 
@@ -2880,6 +2905,8 @@ static void prvLteData( void )
         return;
     }
 
+    prvAvisarImeiFalso();
+
     xprintf( "vaciando la ventana: %u registros\r\n", ( unsigned ) usPendientes );
 
     while( usPendientes > 0U )
@@ -3065,6 +3092,8 @@ static void prvLtePing( void )
     {
         return;
     }
+
+    prvAvisarImeiFalso();
 
     uint16_t usLargo = wan_frame_ping( pcFrame, sizeof( pcFrame ) );
 

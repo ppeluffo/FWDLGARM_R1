@@ -20,7 +20,9 @@
  * ⏳ PROVISORIO de esta etapa. Ver wan_frame.h: lo definitivo lo lee tkWAN del
  * modem con `AT+IMEI?` en el paso 5, y queda fijado para toda la corrida.
  */
-static char pcImei [ 16 ] = "000000000000000";
+#define WAN_IMEI_FALSO      "000000000000000"
+
+static char pcImei [ 16 ] = WAN_IMEI_FALSO;
 static char pcIccid[ 24 ] = "";
 
 /* `rssi` crudo tal como lo devuelve el módulo. 99 mientras no se leyó. */
@@ -30,6 +32,11 @@ static uint8_t ucRssiCrudo = 99U;
 const char *wan_imei( void )
 {
     return pcImei;
+}
+//------------------------------------------------------------------------------
+bool wan_imei_es_falso( void )
+{
+    return ( strcmp( pcImei, WAN_IMEI_FALSO ) == 0 );
 }
 //------------------------------------------------------------------------------
 void wan_imei_set( const char *pcNuevo )

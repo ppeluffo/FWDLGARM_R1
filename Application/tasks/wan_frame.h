@@ -145,6 +145,22 @@ uint16_t wan_frame_datos  ( char *pcBuf, uint16_t usSize, const dataRcd_t *pxDr 
 const char *wan_imei( void );
 
 /*------------------------------------------------------------------------------
+ * true mientras el IMEI siga siendo el falso de 15 ceros, o sea **mientras nadie
+ * se lo haya preguntado al módulo**.
+ *
+ * ⛔ Existe porque el 2026-09-21 se transmitió una sesión entera con los ceros
+ * sin que nada lo dijera: el IMEI se cachea recién cuando alguien corre
+ * `lte info`, y esa corrida empezó con `lte clock set`. El servidor aceptó los
+ * frames igual, así que **quedaron en la base atribuidos a un equipo que no
+ * existe** — y del lado del datalogger no hubo ni una señal.
+ *
+ * Quien vaya a transmitir tiene que consultarlo y avisar. ⏳ Cuando exista la
+ * FSM (paso 5d), el IMEI se lee al abrir la sesión y esto pasa a ser una red de
+ * seguridad en vez del mecanismo principal.
+ *----------------------------------------------------------------------------*/
+bool wan_imei_es_falso( void );
+
+/*------------------------------------------------------------------------------
  * Fija el IMEI leído del módulo. Lo llama quien haya hecho el `AT+IMEI?`.
  *
  * Se guarda **una vez por corrida**: el módulo puede apagarse entre sesiones,

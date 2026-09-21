@@ -3000,6 +3000,57 @@ algo que no hace daño.
 ⚠ **Un `RESET` del servidor en medio de un lote NO lo borra**: se cierra sin borrar y se reinicia, así
 que al volver se retransmite entero. Es lo correcto — no se confirmó todo.
 
+### ✅ Paso 5c VALIDADO EN BANCO (2026-09-21): ventana y lotes
+
+```
+OK: 1 de 1 confirmados y borrados; quedan 0
+--- LOTE0001.DAT ---
+   (se descartaron 1 acuses vacios de DATANR anteriores)
+  2 lineas confirmadas
+SD:: LOTE0001.DAT transmitido y BORRADO
+…
+4 lote(s) transmitidos y borrados
+```
+
+Y `fs sd list` quedó vacío.
+
+⭐ **Los dos formatos de lote convivieron en la misma corrida**: `LOTE0001/2/3` eran del formato
+viejo —se ve en el `fs sd ver`: `ID=…&TYPE=FWDLGARM_R1&VER=0.0.30`— y salieron tal cual; `LOTE9041`
+es del nuevo y se armó al transmitir. Los cuatro confirmados y borrados.
+
+De paso quedó validado **el caso de uso principal de `lte clock`**: el equipo estaba en arranque frío
+(`01/01/01 00:00:41 NO CONFIABLE`) y salió de ahí sin que nadie fuera al sitio.
+
+#### ⛔ Se transmitió una sesión entera con el IMEI FALSO, y nada lo dijo
+
+En esa misma corrida los frames salieron con **`ID=000000000000000`**. El IMEI se cachea recién
+cuando alguien corre `lte info` —que hace `AT+IMEI?`— y esa sesión había empezado con `lte clock
+set`. **El servidor los aceptó igual**, así que quedaron en la base atribuidos a un equipo que no
+existe, y del lado del datalogger no hubo ni una señal.
+
+Es exactamente contra lo que advertía el comentario de `wan_frame.h` al elegir los 15 ceros: *"ningún
+equipo real lo tiene, así que un frame de prueba que llegara por error a producción sería rechazado
+como equipo desconocido"*. La parte de "sería rechazado" resultó optimista — **este servidor no lo
+rechaza**.
+
+`wan_imei_es_falso()` + `prvAvisarImeiFalso()` en los tres comandos que transmiten (`ping`, `conf`,
+`data`). ⚠ **Avisa pero no impide**, que es el criterio de este firmware: en banco a veces se quiere
+transmitir sin haber leído el IMEI, y un comando que se niega en medio de una prueba es peor que uno
+que advierte.
+
+⏳ **Con la FSM (5d) esto pasa a ser una red de seguridad**: ahí el IMEI se lee al abrir la sesión,
+que es cuando corresponde.
+
+#### ℹ️ De paso: el contador de lotes saltó a `LOTE9041`
+
+Tras el arranque frío, la SRAM del MCP79410 quedó con basura y `prvContadorLeer()` sólo filtra
+`0xFFFFFFFF`. No rompe nada —el nombre se calcula con `% 10000` y los que ya existen se saltean— pero
+los nombres quedan raros.
+
+⏳ **Lo coherente sería reiniciarlo en el mismo momento en que se detecta que la FAT no es válida**:
+si la pila falló, todo el estado de la SRAM es sospechoso, no sólo la FAT. Queda anotado; no se tocó
+todavía para no mover dos cosas a la vez.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3018,7 +3069,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.53"        /* = VER                                 */
+#define FW_VERSION  "0.0.54"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -3039,7 +3090,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5a** | **La sesión mínima: configurar el módulo y el `PING`** | ✅ **validado el 2026-09-09** |
 | **5b-1** | `CONF_ALL`: los hashes y qué pide el servidor | ✅ **validado el 2026-09-11** |
 | **5b-2** | Los `CONF_*`: parsear y aplicar la configuración | ✅ **validado el 2026-09-11** — el hash cierra en la 2.ª sesión |
-| **5c** | Los frames de datos y el vaciado | ✅ **la ventana validada el 2026-09-21**; 🔨 los lotes escritos, sin probar |
+| **5c** | Los frames de datos y el vaciado | ✅ **VALIDADO el 2026-09-21**: ventana y lotes |
 | 5d | Los modos continuo / discreto / mixto | |
 | 6 | Modbus | |
 | 7 | Consigna (`tkCtlPres`) | |
