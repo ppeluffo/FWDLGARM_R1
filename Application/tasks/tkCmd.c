@@ -3853,6 +3853,13 @@ static void prvModbusLeerCanal( const cfg_modbus_canal_t *pxCanal, uint8_t ucNro
              ( unsigned ) pxCanal->ucSlaveAddress,
              ( unsigned ) pxCanal->usRegAddress );
 
+    /* Con la traza encendida, las tramas se meten en el medio de esta línea y
+       el resultado termina a tres renglones del canal al que pertenece. */
+    if( drv_modbus_debug_estado() )
+    {
+        xprintf( "\r\n" );
+    }
+
     if( modbus_leer_canal( pxCanal, &fValor, &eRes ) )
     {
         xprintf( "%.3f\r\n", fValor );

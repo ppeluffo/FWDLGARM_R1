@@ -3352,7 +3352,7 @@ Todo lo anterior es el camino feliz en modo `CONTINUO`. Quedan sin ejercitar:
 - **Los modos `DISCRETO`, `MIXTO`, `RTU` y `SILENT`** en la FSM (`BH` de referencia: `0xDF` y `0xD4`).
 - **El camino de fallo con el backoff de 120 s**, que entró en esta misma versión.
 
-## 🔨 Paso 6: Modbus RTU
+## ✅ Paso 6a / 🔨 6b: Modbus RTU
 
 Pablo lo puso **antes que las consignas** (2026-09-21), y es el orden correcto por una razón que
 apareció al relevar: **la consigna del control de presión ES Modbus** —habla por FC03/FC06 con el
@@ -3529,6 +3529,53 @@ uno solo y no entender por qué nadie contesta.
 arranca durante el barrido de 1,4 s del INA3221. El tiempo total es el mismo pero **no se paga**. El
 poleo del 6b debería repetir el truco.
 
+### ✅ Paso 6a VALIDADO EN BANCO (2026-09-21), contra un esclavo real
+
+```
+cmd>modbus read 9 4118 2 3 U32 C3210 0
+MB TX (8):[09][03][10][16][00][02][20][47]
+MB RX (9):[09][03][04][00][00][02][FE][F3][13]
+766.000
+
+cmd>modbus read 9 4118 2 3 U32 C1032 0       <- el MISMO registro, otro codec
+50200576.000
+
+cmd>modbus read 9 4592 2 3 U32 C3210 0       <- un registro que no existe
+MB RX: nada en 1000 ms    (x3)
+ERROR: SIN RESPUESTA (timeout)
+```
+
+⭐ **La validación que cierra el paso: la tabla de codecs PREDIJO los dos valores.** Corriendo el
+código real sobre el payload `00 00 02 FE` que devolvió el esclavo, `C3210` da **766** y `C1032` da
+**50200576** — exactamente lo que informó el equipo. Y el CRC calculado sobre las dos tramas de esa
+sesión coincide con el que viajó por el cable.
+
+| Criterio | Resultado |
+|---|---|
+| La transacción completa | ✅ el esclavo acepta el pedido y la respuesta se decodifica bien |
+| ⭐ **El CRC contra un bus real** | ✅ pedido (`20 47`) y respuesta (`F3 13`), los dos |
+| ⭐ **El codec cambia el valor como predice la tabla** | ✅ 766 y 50200576 sobre el mismo registro |
+| Los 3 reintentos | ✅ tres TX antes de darse por vencido |
+| El timeout | ✅ 1 s por intento |
+| Validación de parámetros | ✅ `C1023` (un dedazo por `C1032`) rechazado con la lista de válidos |
+
+#### ⚠ No todos los esclavos contestan con EXCEPCIÓN: algunos CALLAN
+
+Pedir el registro `4592`, que en ese dispositivo no existe, no dio `mbEXCEPCION` sino **silencio**.
+Es comportamiento del esclavo y no del firmware —la norma permite las dos cosas— pero conviene
+saberlo por dos razones:
+
+- ⏳ **El camino de excepción sigue sin ejercitarse.** Está escrito y es lo que evita que el código
+  de error se decodifique como dato, pero hasta que un dispositivo lo dispare, no está probado.
+- ⚠ **Y en el diagnóstico de campo, `SIN RESPUESTA` es ambiguo**: puede ser el cableado, la
+  dirección del esclavo, la velocidad… **o un registro que no existe**. Si un canal nuevo no
+  contesta, antes de revisar el bus conviene probar **otro registro del mismo esclavo**: si ése sí
+  contesta, el bus está bien y lo que está mal es el mapa.
+
+⏳ **Falta probar el `modbus write` (FC06)**, y ⚠ **no conviene hacerlo contra un caudalímetro**:
+escribir un holding register puede cambiarle la configuración. Su lugar natural es el paso 7, contra
+el control de presión, que es el dispositivo que se escribe por diseño.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3547,7 +3594,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.59"        /* = VER                                 */
+#define FW_VERSION  "0.0.60"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -3570,7 +3617,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5b-2** | Los `CONF_*`: parsear y aplicar la configuración | ✅ **validado el 2026-09-11** — el hash cierra en la 2.ª sesión |
 | **5c** | Los frames de datos y el vaciado | ✅ **VALIDADO el 2026-09-21**: ventana y lotes |
 | **5d** | **`tkWan`: la FSM. El equipo transmite solo** | ✅ **VALIDADO el 2026-09-21** |
-| **6a** | **Modbus: el motor** (transaccion, codecs, comando) | 🔨 **escrito, sin probar** |
+| **6a** | **Modbus: el motor** (transaccion, codecs, comando) | ✅ **VALIDADO el 2026-09-21** |
 | 6b | Modbus: el enganche al poleo de `tkSys` | |
 | 7 | Consigna (`tkCtlPres`) — ⚠ **es Modbus**: depende del 6a | |
 | 7b | ⏳ **`tkFlow`/flowcontrol** — volvió al alcance el 2026-09-12; necesita el 2b | |
