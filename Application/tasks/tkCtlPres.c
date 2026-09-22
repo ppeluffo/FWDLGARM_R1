@@ -9,6 +9,7 @@
 #include "cfg_consigna.h"
 #include "drv_rs485.h"
 #include "drv_rtc79410.h"
+#include "wdg.h"
 #include "frtos-io.h"
 
 TaskHandle_t xHandle_tkCtlPres;
@@ -72,7 +73,9 @@ static void prvMatarse( void )
     xprintf( "\r\ntkCtlPres:: MATADA. El control de presion queda libre.\r\n" );
     xprintf( "            Para volver a operacion normal: 'reset'.\r\n" );
 
-    /* ⏳ acá va el `WD_stop_task()` cuando exista el watchdog */
+    /* Antes de suspender: una tarea suspendida deja de reportar, y el watchdog
+       la daría por colgada. Ver `wdg.h`. */
+    wdg_stop_task();
 
     vTaskSuspend( NULL );   /* no retorna */
 }
@@ -191,6 +194,11 @@ static void prvEsperarCambioDeMinuto( uint16_t usHhmmDeLaOrden )
     {
         vTaskDelay( pdMS_TO_TICKS( TKCTLPRES_MS_CHEQUEO_MIN ) );
 
+        /* ⚠ Este lazo llega a 2 minutos de tope, más que el plazo del watchdog.
+           Se reporta acá adentro en vez de pedir una prórroga: esperar a que el
+           reloj cambie de minuto es progreso, no un cuelgue. */
+        wdg_kick();
+
         if( bMatada )
         {
             return;
@@ -290,6 +298,8 @@ void tkCtlPres( void *pvParameters )
 {
     ( void ) pvParameters;
 
+    wdg_registrar( wdgTK_CTLPRES );
+
     /* Que el resto del equipo termine de arrancar: el RTC, la configuración y el
        primer poleo. Una consigna al arrancar puede esperar medio minuto. */
     vTaskDelay( pdMS_TO_TICKS( 30000 ) );
@@ -315,6 +325,8 @@ void tkCtlPres( void *pvParameters )
          */
         ( void ) xTaskNotifyWait( 0U, 0xFFFFFFFFU, &ulOrden,
                                   pdMS_TO_TICKS( TKCTLPRES_MS_PERIODO ) );
+
+        wdg_kick();
 
         if( bMatada )
         {

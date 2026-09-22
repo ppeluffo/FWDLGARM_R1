@@ -33,6 +33,8 @@
 #include "tkWan.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
+#include "wdg.h"
+#include "drv_wdt.h"
 #include "drv_term_sense.h"
 #include "pwr_lock.h"
 #include "main.h"
@@ -308,6 +310,7 @@ static void cmdEv( void );
 static void cmdLte( void );
 static void cmdConfig( void );
 static void cmdKill( void );
+static void cmdWdg( void );
 static void cmdPoll( void );
 static void cmdFrame( void );
 static void cmdCls( void );
@@ -404,6 +407,8 @@ void tkCmd( void *pvParameters )
      * porque un reset de hardware resetea RCC_CSR y de paso bajaba RMVF — pero
      * después de un 'reboot', que no resetea nada, el bit quedaba puesto.
      */
+    wdg_registrar( wdgTK_CMD );
+
     ulCausaReset = RCC->CSR;
     __HAL_RCC_CLEAR_RESET_FLAGS();
     CLEAR_BIT( RCC->CSR, RCC_CSR_RMVF );
@@ -494,6 +499,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "cls",    cmdCls    );
     FRTOS_CMD_register( "fs",     cmdFs     );
     FRTOS_CMD_register( "keys",   cmdKeys   );
+    FRTOS_CMD_register( "wdg",    cmdWdg    );
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     /* La versión y la fecha de compilación en el banner, no sólo en 'status':
@@ -520,18 +526,37 @@ void tkCmd( void *pvParameters )
      */
     xprintf( "cmd>" );
 
+    /*
+     * ⛔ EL BLOQUEO DEJA DE SER INDEFINIDO, Y ES POR EL WATCHDOG.
+     *
+     * Hasta el paso 8 esta tarea esperaba un carácter con `portMAX_DELAY`, o sea
+     * que **sin nadie tipeando no pasaba nunca por ningún lado** y no había forma
+     * de vigilarla: un cuelgue de la consola —el único camino por el que un
+     * técnico en campo puede diagnosticar el equipo— habría sido invisible.
+     *
+     * Con el timeout, el `frtos_read()` vuelve cada minuto sin haber leído nada,
+     * la tarea reporta y se vuelve a bloquear. **El costo en consumo es nulo**:
+     * una despertada por minuto contra las 60 que ya hace `tkCtl` en ese rato.
+     */
+    TickType_t xEsperaRx = pdMS_TO_TICKS( TKCMD_MS_TIMEOUT_RX );
+
+    ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xEsperaRx );
+
     for( ;; )
     {
         /*
-         * Bloqueo indefinido en el kernel: mientras no llegue un carácter esta
-         * tarea no consume nada y el micro puede dormir. El timeout por defecto
-         * de fdTERM es portMAX_DELAY; se cambia con
-         * frtos_ioctl(fdTERM, ioctl_SET_TIMEOUT, &ticks).
+         * Bloqueo en el kernel: mientras no llegue un carácter esta tarea no
+         * consume nada y el micro puede dormir. El timeout se cambia con
+         * frtos_ioctl(fdTERM, ioctl_SET_TIMEOUT, &ticks) — los comandos que lo
+         * hacen tienen que devolverlo a `TKCMD_MS_TIMEOUT_RX`, no a
+         * `portMAX_DELAY`, o esta tarea deja de estar vigilada.
          */
         if( frtos_read( fdTERM, &cChar, 1U ) == 1 )
         {
             ( void ) FRTOS_CMD_process( cChar );
         }
+
+        wdg_kick();
     }
 }
 
@@ -579,6 +604,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "cls",    "limpia la pantalla de la terminal",                    NULL          },
     { "fs",     "memoria de registros: estado, lectura y formateo",     prvFsUso      },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
+    { "wdg",    "estado del watchdog: el perro y el plazo de cada tarea", NULL          },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
 };
 
@@ -660,6 +686,13 @@ static void cmdStatus( void )
              ( unsigned long ) pwr_lock_estado(),
              pwr_deep_sleep_permitido() ? "(Stop 2 habilitado)" : "(solo Sleep)" );
     xprintf( "heap libre   : %u bytes\r\n", ( unsigned ) xPortGetFreeHeapSize() );
+
+    /* Una línea, y el detalle en el comando `wdg`. Que el perro esté corriendo
+       es de las primeras cosas que uno quiere confirmar al enchufar la terminal
+       en un equipo de campo. */
+    xprintf( "watchdog     : %s (plazo %lu s por tarea)\r\n",
+             drv_wdt_corriendo() ? "IWDG corriendo" : "⛔ DETENIDO",
+             ( unsigned long ) ( WDG_PLAZO_MS / 1000UL ) );
     /*
      * ⚠ El *high water mark* es el MÍNIMO que quedó libre desde que arrancó la
      * tarea, no lo que hay libre ahora: es la marca del peor momento, que es lo
@@ -889,8 +922,10 @@ static void cmdSense( void )
         }
     }
 
-    /* Devolver el bloqueo indefinido: es lo que espera el lazo de la consola. */
-    xEspera = portMAX_DELAY;
+    /* ⚠ De vuelta al timeout del lazo de la consola, NO a `portMAX_DELAY`: con
+       bloqueo indefinido esta tarea dejaría de reportarle al watchdog y el
+       equipo se resetearía al minuto y medio de usar este comando. */
+    xEspera = pdMS_TO_TICKS( TKCMD_MS_TIMEOUT_RX );
     ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xEspera );
 
     xprintf( "monitor terminado. cambios de estado: %lu\r\n",
@@ -2915,6 +2950,16 @@ static void prvLteBridge( void )
         {
             ( void ) frtos_write( fdTERM, pcBuf, ( uint16_t ) sN );
         }
+
+        /*
+         * ⛔ SIN ESTO EL EQUIPO SE RESETEA A LOS 90 s DE ABRIR EL PUENTE.
+         *
+         * Es un lazo sin salida hasta que alguien teclea Ctrl-D, y el puente es
+         * justamente la herramienta que un técnico deja abierta mientras piensa
+         * qué comando AT mandar. El kick es legítimo: el lazo **está
+         * avanzando** —polea las dos UARTs y mueve bytes—, no es un cuelgue.
+         */
+        wdg_kick();
     }
 }
 
@@ -3161,7 +3206,14 @@ static void cmdLte( void )
 
             if( strcmp( argv[ 1 ], "rx" ) == 0 )
             {
-                ( void ) prvLteEscuchar( ( uint32_t ) atoi( argv[ 2 ] ) );
+                uint32_t ulMs = ( uint32_t ) atoi( argv[ 2 ] );
+
+                /* El único comando cuya duración la tipea el usuario: se pide
+                   prórroga por lo que haya pedido, con un poco de aire. Sin
+                   esto, un `lte rx 120000` reiniciaría el equipo a la mitad. */
+                wdg_kick_largo( ulMs + 30000UL );
+                ( void ) prvLteEscuchar( ulMs );
+                wdg_kick();
                 return;
             }
         }
@@ -3249,6 +3301,22 @@ static void prvKillUso( void )
  * de entrar en modo comando para pruebas o diagnóstico, el operador **resetee el
  * datalogger para que entre en modo de funcionamiento limpio**.
  */
+/*==============================================================================
+ * El watchdog
+ *
+ * Sin argumentos: no hay nada que configurar desde la consola. Lo que muestra es
+ * si el perro de hardware está corriendo y cuánto le queda a cada tarea antes de
+ * que se la dé por colgada.
+ *
+ * ⭐ Lo más útil que dice es cuáles están **sin registrar**: una tarea que
+ * arrancó y no figura ahí no se está vigilando, y eso desde afuera no se nota de
+ * ninguna otra forma.
+ *============================================================================*/
+static void cmdWdg( void )
+{
+    wdg_print();
+}
+//------------------------------------------------------------------------------
 static void cmdKill( void )
 {
     uint8_t ucArgs = FRTOS_CMD_makeArgv();
@@ -3712,7 +3780,9 @@ static void cmdFs( void )
             xprintf( "volcando el remanente de la ventana (%u registros)...\r\n",
                      ( unsigned ) xVent.usCount );
 
+            wdg_kick_largo( 120000UL );   /* ver `wdg.h` */
             bool bOk = fs_sd_volcar_ventana();
+            wdg_kick();
 
             fs_datos_stats( &xVent );
 
@@ -3739,7 +3809,9 @@ static void cmdFs( void )
         if( strcmp( argv[ 2 ], "dump" ) == 0 )
         {
             xprintf( "volcando la ventana a la tarjeta...\r\n" );
+            wdg_kick_largo( 120000UL );   /* ver `wdg.h` */
             ( void ) fs_sd_volcar_ventana();
+            wdg_kick();
             prvFsEstado();
             return;
         }
@@ -3767,7 +3839,19 @@ static void cmdFs( void )
                 return;
             }
 
+            /*
+             * ⚠ PRÓRROGA, el otro de los dos únicos casos del firmware (el
+             * primero es el volcado, en `tkSys`).
+             *
+             * `f_mkfs()` escribe **las dos copias de la FAT sector por sector**
+             * —`drv_sd` no expone escritura múltiple— y en una tarjeta grande
+             * son varios segundos con esta tarea bloqueada adentro de FatFs, sin
+             * ningún lugar donde reportar. Cinco minutos es de sobra y no deja
+             * la ventana de ceguera abierta más de lo necesario.
+             */
+            wdg_kick_largo( 300000UL );
             ( void ) fs_sd_format();
+            wdg_kick();
             return;
         }
 
@@ -3888,7 +3972,7 @@ static void cmdKeys( void )
         }
     }
 
-    xEspera = portMAX_DELAY;
+    xEspera = pdMS_TO_TICKS( TKCMD_MS_TIMEOUT_RX );  /* no portMAX_DELAY: ver el lazo de tkCmd */
     ( void ) frtos_ioctl( fdTERM, ioctl_SET_TIMEOUT, &xEspera );
 
     /* ---- Recién ahora, el informe ---- */

@@ -16,6 +16,7 @@
 #include "drv_rs485.h"
 #include "modbus.h"
 #include "drv_rtc79410.h"
+#include "wdg.h"
 #include "frtos-io.h"
 #include "main.h"
 
@@ -516,6 +517,10 @@ void tkSys( void *pvParameters )
 
     TickType_t xLastWakeTime;
 
+    /* Antes de la espera de arranque: el plazo empieza a correr desde que la
+       tarea existe, no desde que hace su primer trabajo. */
+    wdg_registrar( wdgTK_SYS );
+
     /*
      * Espera de arranque. El primer registro sale tarde a propósito: los
      * periféricos acaban de inicializarse y la consola todavía está escupiendo
@@ -532,6 +537,11 @@ void tkSys( void *pvParameters )
     {
         ( void ) tkSys_poll( &xUltimo );
         tkSys_print( &xUltimo );
+
+        /* El poleo puede llevarse decenas de segundos —el barrido del INA son
+           1,4 s y los 5 canales Modbus con reintentos hasta 15—, así que se
+           renueva el plazo antes de encarar el almacenamiento. */
+        wdg_kick();
 
         /*
          * Al almacén. **Se guarda SIEMPRE**, incluso con campos inválidos: un
@@ -601,32 +611,72 @@ void tkSys( void *pvParameters )
              * los datos se van a perder cuando la ventana dé la vuelta, y eso
              * hay que decirlo fuerte y en el momento, no descubrirlo después.
              */
+            /*
+             * ⚠ PRÓRROGA, uno de los dos únicos casos del firmware.
+             *
+             * `fs_sd_volcar_ventana()` no vuelve hasta terminar: enciende la
+             * tarjeta, la monta, escribe hasta 1984 líneas y desmonta, todo en
+             * una llamada. No tiene dónde reportar sin que el watchdog se meta
+             * dentro de `fs_sd`, que es una capa que no tiene por qué conocerlo.
+             *
+             * Los 120 s son generosos a propósito: una tarjeta lenta escribiendo
+             * ~100 KB tarda segundos, no minutos, pero pasarse de plazo acá
+             * resetearía el equipo **en medio de una escritura a FAT**, que es
+             * exactamente el momento en que un corte hace daño de verdad.
+             */
+            wdg_kick_largo( 120000UL );
+
             if( !fs_sd_volcar_ventana() && cfg_base_modo_sin_modem() )
             {
                 xprintf( "tkSys:: ⛔ SILENT sin microSD: los datos SE VAN A PERDER\r\n" );
             }
+
+            wdg_kick();    /* de vuelta al plazo normal */
         }
 
         /*
          * `timerpoll` se lee EN CADA VUELTA, no una sola vez al arrancar: así un
-         * cambio de configuración por consola —o del servidor, cuando exista—
-         * tiene efecto sin reiniciar el equipo.
-         *
-         * ⚠ `pdMS_TO_TICKS` sobre `timerpoll * 1000` puede desbordar un
-         * `uint32_t` recién a las 1193 horas, y el máximo configurable son 24 h,
-         * así que no hay problema; pero la cuenta va en 32 bits a propósito.
+         * cambio de configuración por consola —o del servidor— tiene efecto sin
+         * reiniciar el equipo.
          */
-        TickType_t xPeriodo = pdMS_TO_TICKS( ( uint32_t ) xCfgBase.usTimerPoll * 1000UL );
+        uint32_t ulSegundos = ( uint32_t ) xCfgBase.usTimerPoll;
 
-        xTicksProximoPoll = xLastWakeTime + xPeriodo;
+        xTicksProximoPoll = xLastWakeTime
+                            + pdMS_TO_TICKS( ulSegundos * 1000UL );
 
         /*
-         * `vTaskDelayUntil` y no `vTaskDelay`: el período se cuenta desde el
-         * despertar anterior, así que **lo que tarde el poleo no se acumula**.
-         * Con `vTaskDelay` el equipo se iría atrasando un poco en cada vuelta y
-         * al cabo de un día los registros no caerían en los minutos redondos.
+         * ⭐ LA ESPERA VA TROCEADA, y no es sólo por el watchdog.
+         *
+         * 1. **El watchdog** (paso 8) necesita que esta tarea dé señales de vida
+         *    cada 90 s, y `timerpoll` llega hasta 24 h. Troceando a 60 s la
+         *    tarea reporta durante toda la espera, así que un cuelgue suyo se
+         *    detecta en un minuto y medio y no al día siguiente.
+         *
+         * 2. ⛔ **Y de paso se arregla un desborde que estaba vivo.** El
+         *    comentario que había acá decía que `pdMS_TO_TICKS` sobre
+         *    `timerpoll * 1000` desbordaba recién a las 1193 horas, y es FALSO:
+         *    la macro **multiplica por `configTICK_RATE_HZ` antes de dividir por
+         *    1000**, así que a 512 Hz desborda un `uint32_t` a partir de
+         *    ~8388 s = **2,3 h**. Con `timerpoll` configurable hasta 86400 s, un
+         *    equipo puesto a polear cada 3 horas esperaba cualquier cosa. En
+         *    trozos de 60 s la cuenta ni se acerca al límite.
+         *    (`tkWan::prvEsperar()` ya tenía el número bien.)
+         *
+         * ⭐ `vTaskDelayUntil` repetido **conserva la no-deriva**: cada trozo se
+         * cuenta desde el despertar anterior, así que los trozos suman exacto y
+         * lo que tarde el poleo no se acumula. Con `vTaskDelay` los registros se
+         * irían corriendo de los minutos redondos a lo largo del día.
          */
-        vTaskDelayUntil( &xLastWakeTime, xPeriodo );
+        while( ulSegundos > 0UL )
+        {
+            uint32_t ulEste = ( ulSegundos > WDG_TROZO_ESPERA_S )
+                              ? WDG_TROZO_ESPERA_S : ulSegundos;
+
+            vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( ulEste * 1000UL ) );
+            ulSegundos -= ulEste;
+
+            wdg_kick();
+        }
     }
 }
 //------------------------------------------------------------------------------

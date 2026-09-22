@@ -4,6 +4,7 @@
 
 #include "tkFlow.h"
 #include "drv_valvula.h"
+#include "wdg.h"
 #include "frtos-io.h"
 
 TaskHandle_t xHandle_tkFlow;
@@ -37,7 +38,8 @@ static void prvMatarse( void )
     xprintf( "\r\ntkFlow:: MATADA. La valvula queda libre para 'ev'.\r\n" );
     xprintf( "         Para volver a operacion normal: 'reset'.\r\n" );
 
-    /* ⏳ acá va el `WD_stop_task()` cuando exista el watchdog */
+    /* Antes de suspender, por lo de siempre: ver `wdg.h`. */
+    wdg_stop_task();
 
     vTaskSuspend( NULL );   /* no retorna */
 }
@@ -45,6 +47,8 @@ static void prvMatarse( void )
 void tkFlow( void *pvParameters )
 {
     ( void ) pvParameters;
+
+    wdg_registrar( wdgTK_FLOW );
 
     vTaskDelay( pdMS_TO_TICKS( 30000 ) );
 
@@ -80,6 +84,8 @@ void tkFlow( void *pvParameters )
 
         ( void ) xTaskNotifyWait( 0U, 0xFFFFFFFFU, &ulOrden,
                                   pdMS_TO_TICKS( TKFLOW_MS_PERIODO ) );
+
+        wdg_kick();
 
         if( bMatada )
         {

@@ -4188,6 +4188,206 @@ Modbus.
 servidor aceptó igual— **pero el servidor está registrando señal 0 para este equipo**, y en campo ése
 es justo el dato que se quiere mirar cuando algo no transmite.
 
+## 🔨 Paso 8: el watchdog
+
+`Application/drivers/drv_wdt.{h,c}` (el perro de hardware) y
+`Application/tasks/wdg.{h,c}` (la lógica cooperativa), comando **`wdg`**. Portado de
+`SRC/XLIBS/watchdog.{h,c}` de FWDLGX. **Escrito el 2026-09-22, sin probar en banco todavía.**
+
+El motivo lo puso Pablo: *"Los dataloggers deben correr 7x24. La idea es que si algo falla, se
+detecte lo antes posible y con un reset se reestablezca."*
+
+```
+cada tarea ---wdg_kick()---> la tabla ---tkCtl la juzga---> drv_wdt_kick() ---> IWDG
+                                             |
+                                    si alguna vencio: DEJA DE PATEAR
+                                             |
+                                    el IWDG resetea en ~32 s
+```
+
+### ⭐ Plazo ÚNICO y corto, y las esperas largas TROCEADAS
+
+Es la decisión del paso, y **la corrigió Pablo**. Mi primera propuesta era que cada tarea declarara
+su propio plazo —largo si duerme mucho—, que parece más prolijo y **es peor**: `tkWan` en modo
+`DISCRETO` duerme hasta seis horas, así que su plazo tendría que ser de seis horas y un cuelgue suyo
+tardaría eso en detectarse.
+
+> *"La ventaja del fraccionamiento de esperas cada 120 segundos en los AVR es que nos asegurábamos
+> que nunca pasaba más de este tiempo para enterarnos que algo andaba mal."*
+
+El mecanismo correcto es al revés: **90 s para todas, y el que espera mucho parte la espera en
+trozos de 60 s y reporta en cada uno**. Dormir seis horas en trozos son 360 despertadas, contra las
+21.600 que ya hace `tkCtl` en ese rato: ruido.
+
+| Constante | Valor | Dónde |
+|---|---|---|
+| El plazo | **90 s** | `WDG_PLAZO_MS` |
+| El trozo de espera | **60 s** | `WDG_TROZO_ESPERA_S` |
+| La ventana del IWDG | **~32 s** (30,8 a 35,5 reales) | `drv_wdt.c` |
+
+90 = un trozo y medio. La holgura de 30 s cubre que un trozo se estire porque la tarea estaba
+haciendo algo cuando le tocaba, sin confundirlo con un cuelgue. El AVR usa 120 porque su trozo es de
+120; subirlo acá es conservador, bajarlo de 60 daría falsos positivos.
+
+### ⚠ Reportar no es lo mismo que ceder la CPU
+
+Una tarea puede estar viva —cediendo el procesador en cada `vTaskDelay()`— y aun así estar colgada:
+girando en un lazo que no avanza. **El watchdog vigila el progreso, no la ejecución.** Por eso el
+`wdg_kick()` no va en cualquier `vTaskDelay()`, sino donde pasar de nuevo significa que la tarea
+avanzó: una vuelta del lazo, un frame transmitido, un trozo cumplido.
+
+### ⭐ `wdg_kick()` NO recibe un identificador, y ahí está la parte que importa
+
+La primera versión tomaba un `wdg_tarea_t`, y eso tenía un agujero que sólo se ve mirando **quién
+ejecuta cada función**: `wan_sesion_ping()`, `wan_sesion_config()` y `wan_sesion_datos()` corren en
+`tkWan` cuando las llama la FSM, pero **en `tkCmd` cuando las llama `lte ping` / `lte conf` /
+`lte data`**. Un `wdg_report( wdgTK_WAN )` adentro de esas funciones le renovaría el plazo a una
+tarea que no es la que trabaja, y `tkCmd` —que puede pasarse varios minutos ahí— quedaría sin
+reportar: **el equipo se resetearía a mitad de un comando tipeado por un técnico**.
+
+Resolviendo por `xTaskGetCurrentTaskHandle()` eso no puede pasar. Es el mismo criterio que separó
+`peek()` de `pop()` o que puso `drv_lte_pwrkey( bApretado )` en vez de "poner PA5 en alto": **que la
+forma de usarlo mal no exista**.
+
+### ⭐ `tkCtl` no está en la tabla, y se vigila sola
+
+Es el juez y el único que patea. Si se cuelga, nadie patea y el IWDG resetea. Vigilarla sería
+vigilar al que vigila, y el hardware ya lo hace mejor.
+
+### ⭐ IWDG y no `NVIC_SystemReset()`: la causa tiene que viajar al servidor
+
+Dos razones, y la primera es de campo:
+
+- **La causa queda en `RCC_CSR.IWDGRSTF`**, que `tkCmd` ya lee al arrancar y que **viaja en el campo
+  `WDG` del `CONF_BASE`** (`wanRESET_IWDG`). Con un reset por software la causa sale como `SOFT`,
+  **indistinguible de un `reset` tipeado en la consola**: en campo no habría forma de saber si el
+  equipo se reinició solo.
+- **El IWDG es independiente del núcleo**: corre de su propio LSI y no lo puede desarmar un firmware
+  colgado, que es justo la situación en la que se lo necesita.
+
+Y por eso `prvJuzgar()` **no tiene ningún "resetear ahora"**: cuando algo no cierra, deja de patear
+y listo.
+
+⚠ El LSI cuesta ~200 nA, un 4 % del reposo de 5 µA. Es el precio del watchdog y está pago.
+
+### ⚠ Se configura por REGISTROS y no desde CubeMX — a propósito
+
+Va contra la regla de oro, así que la razón tiene que valer:
+
+1. **CubeMX pondría `MX_IWDG_Init()` en `main()`, antes del scheduler**, o sea que el perro
+   arrancaría cuando todavía no existe ninguna tarea que pueda patearlo. Habría que sacarlo de ahí
+   igual, y entonces el `.ioc` diría una cosa y el firmware haría otra — la desincronización que ya
+   costó un día con el LSE.
+2. El IWDG **no tiene nada que CubeMX aporte**: ni pines, ni NVIC, ni mux de reloj, ni `MspInit`.
+   Sólo tres constantes.
+
+De hecho hoy su módulo de la HAL ni siquiera está compilado (`HAL_IWDG_MODULE_ENABLED` comentado en
+`stm32l4xx_hal_conf.h`, y `stm32l4xx_hal_iwdg.c` no está copiado), así que usarlo obligaría a
+regenerar desde CubeMX para ganar cero. Son doce líneas contra el RM0351.
+
+### ⛔ Una vez arrancado NO SE PUEDE PARAR
+
+Es del silicio. Dos consecuencias que hay que reconocer:
+
+- **Si `Error_Handler()` se dispara después de arrancado, el equipo entra en ciclo de reset**:
+  destella el patrón, se resetea a los ~32 s, vuelve a fallar. Es visible y es mejor que un cuelgue
+  mudo, pero no hay que confundirlo con "la placa no arranca". **Antes del scheduler el perro
+  todavía no existe**, así que los destellos de diagnóstico del bring-up andan igual que siempre.
+- ⚠ **Depurando con breakpoints el equipo se resetearía solo.** Se evita con
+  `__HAL_DBGMCU_FREEZE_IWDG()`, que ya hace `drv_wdt_arrancar()`. (A diferencia de la serie F1, en el
+  L4 el DBGMCU no necesita que se le habilite el reloj.)
+
+### ⚠ El rollover del tick NO es teórico: son 97 días
+
+Con el tick a 512 Hz, un `uint32_t` de ticks da la vuelta cada **97 días**, y el equipo corre 7x24:
+ocurre unas cuatro veces por año. Por eso `prvVencida()` compara **por diferencia** y no con `>=` —
+con `>=`, un plazo fijado justo antes de la vuelta dejaría a la tarea viéndose sana durante 97 días.
+
+### ⛔ `tkCmd` dejó de bloquearse sin timeout
+
+Esperando un carácter con `portMAX_DELAY` la consola **no pasaba nunca por ningún lado** mientras
+nadie tipeara, así que no había forma de vigilarla — y es el único camino por el que un técnico en
+campo puede diagnosticar el equipo. Ahora el `frtos_read()` vuelve cada 60 s
+(`TKCMD_MS_TIMEOUT_RX`), reporta y se vuelve a bloquear. **El costo en consumo es una despertada por
+minuto**, contra las 60 que ya hace `tkCtl` en ese rato.
+
+⚠ Los comandos que cambian el timeout de `fdTERM` —`sense`, `keys`— tienen que devolverlo a **ese**
+valor y no a `portMAX_DELAY`, o la tarea deja de estar vigilada.
+
+⛔ Y `lte bridge` necesitó kick propio: es un lazo sin salida hasta que alguien teclea Ctrl-D, y el
+puente es justamente la herramienta que un técnico deja abierta mientras piensa. Sin el kick, el
+equipo se reseteaba a los 90 s de abrirlo.
+
+### ⚠ La prórroga es el último recurso, y hoy hay dos casos
+
+`wdg_kick_largo( ms )` renueva por un plazo declarado en vez de por 90 s. Es para lo que **no se
+puede trocear**: una llamada que no vuelve hasta terminar y que por dentro no tiene dónde reportar.
+
+| Caso | Prórroga |
+|---|---|
+| `f_mkfs()` — escribe las dos copias de la FAT **sector por sector** | 300 s |
+| `fs_sd_volcar_ventana()` — hasta 1984 líneas en una llamada | 120 s |
+
+⛔ **Donde se pueda reportar, se reporta**: es estrictamente mejor, porque el watchdog sigue
+vigilando. Una prórroga es una ventana de ceguera consentida, y por eso se declara con un número —
+quien la pide se hace responsable de él.
+
+⭐ **Y es por tarea, no global.** El AVR tiene un `sys_reset_in_progress` que suspende el watchdog
+entero mientras dura un formateo, así que durante esos segundos **ninguna** tarea queda vigilada.
+Acá una prórroga de `tkCmd` no le quita la vigilancia a `tkWan`.
+
+### ✅ `kill` desregistra, y sin eso el `kill` estaría roto
+
+`wdg_stop_task()` va **antes** del `vTaskSuspend()` en los tres `prvMatarse()`. Una tarea suspendida
+deja de reportar, así que sin desregistrarla el watchdog la daría por colgada y **resetearía el
+equipo justo mientras el operador trabaja el módulo a mano** — el síntoma más desconcertante
+posible. Es el `WD_stop_task()` del AVR, y ese detalle es lo que vuelve correcto a su `kill`.
+
+### ⛔ De paso apareció un desborde vivo en `tkSys`
+
+El comentario que había en el `vTaskDelayUntil` decía que `pdMS_TO_TICKS( timerpoll * 1000 )`
+desbordaba recién a las 1193 horas. **Es falso**: la macro **multiplica por `configTICK_RATE_HZ`
+antes de dividir por 1000**, así que a 512 Hz desborda un `uint32_t` a partir de ~8388 s = **2,3 h**.
+Con `timerpoll` configurable hasta 86400 s (24 h), un equipo puesto a polear cada 3 horas esperaba
+cualquier cosa.
+
+El fraccionamiento lo arregla de raíz —cada trozo es de 60 s— y de paso **`vTaskDelayUntil`
+repetido conserva la no-deriva**: los trozos suman exacto, así que los registros siguen cayendo en
+los minutos redondos. (`tkWan::prvEsperar()` ya tenía el número bien desde el 5d.)
+
+### El comando `wdg`
+
+Sin argumentos, porque no hay nada que configurar:
+
+```
+cmd>wdg
+WDG:: perro de hardware (IWDG): CORRIENDO, ventana ~32768 ms
+      plazo por tarea: 90000 ms   (trozo de espera: 60 s)
+      tkCmd      vigilada, le quedan 58000 ms
+      tkSys      vigilada, le quedan 41000 ms
+      tkWan      vigilada, le quedan 12000 ms
+      tkCtlPres  vigilada, le quedan 33000 ms
+      tkFlow     MATADA (fuera de la vigilancia, por 'kill')
+```
+
+⭐ Lo más útil que dice es cuáles están **sin registrar**: una tarea que arrancó y no figura ahí no
+se está vigilando, y eso desde afuera no se nota de ninguna otra forma.
+
+⚠ De paso `CMDLINE_MAX_COMMANDS` subió de 24 a **32**: con `wdg` se llegaba justo a 24, o sea otra
+vez al borde del bug que ya pasó una vez —cuando valía 16, `reboot` quedó sin registrar en silencio
+porque el aviso salía en medio del chorro del arranque—.
+
+### ⏳ Lo que falta probar en banco
+
+- Que el equipo **NO** se resetee en operación normal, que es el riesgo principal: un falso positivo
+  es peor que no tener watchdog. Conviene dejarlo corriendo unas horas en `CONTINUO` y mirar `wdg`.
+- Que **sí** se resetee ante un cuelgue de verdad. La forma barata de provocarlo es `kill` + revivir
+  a mano no existe, así que habría que agregar un comando de prueba temporal o pinchar con el
+  debugger — ⚠ ojo que el freeze del DBGMCU impide justamente eso.
+- ⚠ **Un `lte bridge` largo** y un `fs sd format borrar` en una tarjeta grande: son los dos casos
+  donde el plazo se estira a propósito.
+- Que la causa llegue al servidor como `WDG=3` (`wanRESET_IWDG`) tras un reset del perro.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -4233,7 +4433,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **6b** | Modbus: el enganche al poleo de `tkSys` | ✅ **VALIDADO el 2026-09-21** |
 | **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | ✅ **VALIDADO el 2026-09-22** |
 | ~~7b~~ | ~~`tkFlow`/flowcontrol~~ | ⛔ **ELIMINADO el 2026-09-22**: no se usa. Quedan sólo las órdenes `VOPEN`/`VCLOSE` |
-| 8 | Watchdog cooperativo + `tkCtl` definitivo | |
+| **8** | **Watchdog cooperativo + IWDG** | 🔨 **escrito, sin probar en banco** (`0.0.74`) |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo | |
 
 ✅ Los modos `PWR_RTU` y `PWR_SILENT` **entraron el 2026-09-12** — ver la sección de los cinco modos.

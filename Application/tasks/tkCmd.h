@@ -15,6 +15,22 @@
 #define tkCmd_STACK_SIZE    1024    /* palabras. Necesita lugar para vsnprintf */
 #define tkCmd_PRIORITY      ( tskIDLE_PRIORITY + 1 )
 
+/*------------------------------------------------------------------------------
+ * ⛔ El bloqueo de la consola TIENE timeout, y es por el watchdog.
+ *
+ * Esperando un carácter con `portMAX_DELAY` esta tarea no pasaba nunca por
+ * ningún lado mientras nadie tipeara, así que no había forma de vigilarla. Con
+ * el timeout vuelve una vez por minuto, reporta y se vuelve a bloquear.
+ *
+ * 60 s = el mismo trozo que usan `tkSys` y `tkWan` para partir sus esperas, y
+ * bien por debajo del plazo de 90 s de `wdg.h`. El costo en consumo es una
+ * despertada por minuto: nada al lado de las 60 que ya hace `tkCtl`.
+ *
+ * ⚠ Los comandos que cambian el timeout de `fdTERM` tienen que devolverlo a
+ * ESTE valor, no a `portMAX_DELAY`.
+ *----------------------------------------------------------------------------*/
+#define TKCMD_MS_TIMEOUT_RX     60000U
+
 void tkCmd( void *pvParameters );
 
 /*------------------------------------------------------------------------------

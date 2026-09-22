@@ -15,6 +15,7 @@
 #include "cfg_nvm.h"
 #include "drv_lte.h"
 #include "drv_rtc79410.h"
+#include "wdg.h"
 #include "frtos-io.h"
 #include "main.h"
 
@@ -233,6 +234,12 @@ static void prvLteConfBloques( const wan_conf_flags_t *pxFlags )
     for( i = 0U; i < ( uint8_t ) wanBLOQUE_NRO; i++ )
     {
         wan_bloque_t eBloque = ( wan_bloque_t ) i;
+
+        /* Un bloque por vuelta, cada uno con su ida y vuelta al servidor: seis
+           timeouts seguidos superan el plazo del watchdog sin que nada esté
+           colgado. Y como `wdg_kick()` resuelve por la tarea que corre, esto
+           sirve igual cuando la sesión la lanza `lte conf` desde la consola. */
+        wdg_kick();
 
         if( !wan_conf_pedido( pxFlags, eBloque ) )
         {
@@ -678,6 +685,12 @@ static bool prvLteLotes( void )
                 vTaskDelay( pdMS_TO_TICKS( LTE_DATA_MS_ENTRE_FRAMES ) );
             }
 
+            /* ⭐ Un lote son hasta 1984 líneas y varios minutos de transmisión.
+               Reportar por línea —en vez de pedir una prórroga por el lote
+               entero— deja al watchdog vigilando durante toda la operación, que
+               es justo la más larga que hace el equipo. */
+            wdg_kick();
+
             bHayActual = bHaySiguiente;
         }
 
@@ -811,6 +824,10 @@ bool wan_sesion_datos( void )
         usSinConfirmar++;
         usPendientes--;
         usEnviados++;
+
+        /* Un vaciado son hasta 1984 registros de a 10 con confirmación: por
+           frame, igual que en los lotes. */
+        wdg_kick();
 
         if( !bConfirmar )
         {
@@ -1063,6 +1080,10 @@ static bool wan_sesion_identificar( void )
 
     for( i = 0U; ( i < WAN_INTENTOS_RED ) && !bHayIp; i++ )
     {
+        /* ⭐ Estos reintentos SON la espera del registro a la red (ver el
+           comentario del estado OFFLINE): esperar no es colgarse. */
+        wdg_kick();
+
         if( i > 0U )
         {
             vTaskDelay( pdMS_TO_TICKS( WAN_MS_ENTRE_RED ) );
@@ -1186,11 +1207,15 @@ static void prvMatarse( void )
 {
 
     /*
-     * ⏳ Cuando exista el watchdog (paso 8), acá va el desregistro **antes** de
-     * suspender — `WD_stop_task()` del AVR hace las dos cosas juntas, y el orden
-     * importa: suspender una tarea que el watchdog sigue vigilando la daría por
-     * colgada y **resetearía el equipo justo mientras el operador trabaja**.
+     * ⭐ EL DESREGISTRO VA ANTES DE SUSPENDER, y el orden importa: una tarea
+     * suspendida deja de reportar, así que si el watchdog la siguiera vigilando
+     * la daría por colgada y **resetearía el equipo justo mientras el operador
+     * está trabajando el módulo a mano** — el síntoma más desconcertante
+     * posible. Es lo que hace `WD_stop_task()` del AVR, y es lo que vuelve
+     * correcto a su `kill`.
      */
+    wdg_stop_task();
+
     xprintf( "tkWan MATADA. El modem queda como esta, para trabajarlo a mano.\r\n" );
     xprintf( "Para volver a operacion normal: 'reset' (no hay como revivirla,\r\n" );
     xprintf( "y es a proposito: el reset garantiza un arranque limpio).\r\n" );
@@ -1310,7 +1335,11 @@ static void prvEsperar( uint32_t ulSegundos )
         vTaskDelay( pdMS_TO_TICKS( ulEste * 1000UL ) );
         ulSegundos -= ulEste;
 
-        /* ⏳ acá va el kick del watchdog */
+        /* ⭐ Acá está la mitad del watchdog que le toca a esta tarea: en modo
+           DISCRETO puede dormir seis horas, y sin este reporte un cuelgue suyo
+           tardaría todo eso en detectarse. Con el trozo de 60 s, minuto y
+           medio. */
+        wdg_kick();
     }
 }
 //------------------------------------------------------------------------------
@@ -1440,6 +1469,11 @@ static bool prvPingConReintentos( void )
             return true;
         }
 
+        /* ⚠ Sin esto el lazo entero son 5 intentos x 15 s de timeout = **75 s**,
+           que contra un plazo de 90 deja apenas 15 de margen para todo lo demás
+           que hace el estado OFFLINE. Un PING lento no es un cuelgue. */
+        wdg_kick();
+
         if( bMatada )
         {
             return false;
@@ -1472,6 +1506,8 @@ static void prvEstadoOffline( void )
 
     for( i = 0U; ( i < WAN_INTENTOS_AT ) && !bAt; i++ )
     {
+        wdg_kick();
+
         if( drv_lte_escape() == lteESC_OK )
         {
             bAt = true;
@@ -1595,6 +1631,9 @@ void tkWan( void *pvParameters )
 {
     ( void ) pvParameters;
 
+    /* Antes de la espera de arranque: el plazo corre desde que la tarea existe. */
+    wdg_registrar( wdgTK_WAN );
+
     vTaskDelay( pdMS_TO_TICKS( WAN_MS_ESPERA_ARRANQUE ) );
 
     xprintf( "\r\ntkWan arrancando (modo %s)\r\n", cfg_base_pwrmodo_str() );
@@ -1605,6 +1644,8 @@ void tkWan( void *pvParameters )
         {
             prvMatarse();   /* no retorna */
         }
+
+        wdg_kick();
 
         switch( eEstado )
         {

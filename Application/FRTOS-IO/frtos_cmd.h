@@ -35,7 +35,14 @@
  * La fase 2 agrega varios comandos más (poleo, frame, filesystem), así que se
  * dejó margen en vez de subir de a uno. Cuesta ~384 bytes de BSS sobre 256 KB.
  */
-#define CMDLINE_MAX_COMMANDS    24
+/*
+ * ⚠ CON MARGEN, Y POR UN BUG QUE YA PASÓ. Cuando esto valía 16 y se registró el
+ * comando 17, `reboot` quedó **sin registrar en silencio**: el driver lo avisaba
+ * pero el mensaje salía en medio del chorro del arranque, y desde afuera el
+ * síntoma era un comando que "no existe". Con `wdg` se llegaría justo a 24, o
+ * sea otra vez al borde.
+ */
+#define CMDLINE_MAX_COMMANDS    32
 #define MAX_INPUT_LENGTH        64
 #define CMDLINE_MAX_ARGS        16
 
