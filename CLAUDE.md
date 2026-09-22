@@ -3935,6 +3935,41 @@ práctica se resuelve solo, pero explica por qué conviene no hablarle apenas se
 **12 s** que espera el AVR antes del primer diálogo (2 de arranque + 10 de estabilización) no son un
 número caprichoso.
 
+#### ✅ El dialogo ANDA (banco, 2026-09-22), y el status confirma lo del dispositivo
+
+Con el arreglo del ruido, el primer diálogo con el control de presión:
+
+```
+MB TX (8):[64][03][00][01][00][01][DC][3F]
+MB: descartados 1 byte(s) de ruido antes de la respuesta
+MB RX (7):[64][03][02][00][0A][74][4B]
+```
+
+⭐ **El `0x0A` confirma en vivo lo que Pablo había dicho del dispositivo:**
+
+| `0000 1010` | |
+|---|---|
+| bit 7 = **0** | **IDLE** |
+| bits 1-0 = **`10`** = 2 | **V0 desconocida** |
+| bits 3-2 = **`10`** = 2 | **V1 desconocida** |
+
+Recién encendido **no sabe dónde están las válvulas** y lo dice en las dos. El valor `2` que en el
+código del AVR parecía un caso raro es, efectivamente, **el estado normal al arrancar** — y eso es lo
+que hace que la posición leída no sirva como fuente de verdad.
+
+##### `cpres status` respeta el estado previo de los rieles
+
+No es cosmético: ese comando existe para **medir cuánto tarda el dispositivo**, leyendo el status
+repetidamente después de una orden hasta que el bit RUN baje. Si apagara los rieles al terminar, cada
+lectura le cortaría la alimentación —y con eso **el dispositivo olvida las válvulas y reinicia su
+FSM**—, así que la medición sería imposible.
+
+A diferencia de `drv_cpres_comando()`, que sí hace el ciclo completo porque es la operación normal.
+
+⚠ Y cuando **sí** tiene que encenderlo, espera los **12 s** completos y no los 2 del transceiver: su
+tarea de RS485 aguarda a que su sistema termine de arrancar, así que hablarle antes es hablarle al
+vacío. Eso fue justamente lo que falló en el primer intento.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3953,7 +3988,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.66"        /* = VER                                 */
+#define FW_VERSION  "0.0.67"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 

@@ -4207,9 +4207,42 @@ static void prvCpresStatus( void )
         return;
     }
 
-    drv_rs485_power( rs485RAIL_CPRES, true );
-    drv_rs485_power( rs485RAIL_BUS,   true );
-    vTaskDelay( pdMS_TO_TICKS( DRV_CPRES_MS_ARRANQUE ) );
+    /*
+     * ⭐ RESPETA EL ESTADO PREVIO DE LOS RIELES, y no es un detalle cosmético.
+     *
+     * Este comando existe para **medir cuánto tarda el dispositivo**: leer el
+     * status repetidamente después de una orden hasta que el bit RUN baje. Si
+     * apagara los rieles al terminar, cada lectura le cortaría la alimentación
+     * —y con eso **el dispositivo olvida dónde están las válvulas y reinicia su
+     * FSM**—, así que la medición sería imposible.
+     *
+     * A diferencia de `drv_cpres_comando()`, que sí hace el ciclo completo
+     * porque es la operación normal.
+     */
+    bool bBusYaEstaba   = drv_rs485_power_estado( rs485RAIL_BUS );
+    bool bCpresYaEstaba = drv_rs485_power_estado( rs485RAIL_CPRES );
+
+    if( !bCpresYaEstaba )
+    {
+        drv_rs485_power( rs485RAIL_CPRES, true );
+    }
+
+    if( !bBusYaEstaba )
+    {
+        drv_rs485_power( rs485RAIL_BUS, true );
+    }
+
+    /*
+     * ⚠ Sólo se espera el arranque si hubo que ENCENDERLO. Y el tiempo es el
+     * largo, no los 2 s del transceiver: su tarea de RS485 espera a que el
+     * sistema termine de arrancar, así que hablarle antes es hablarle al vacío.
+     */
+    if( !bCpresYaEstaba )
+    {
+        xprintf( "esperando %u ms a que arranque el dispositivo...\r\n",
+                 ( unsigned ) ( DRV_CPRES_MS_ARRANQUE + DRV_CPRES_MS_ESTABILIZAR ) );
+        vTaskDelay( pdMS_TO_TICKS( DRV_CPRES_MS_ARRANQUE + DRV_CPRES_MS_ESTABILIZAR ) );
+    }
 
     eRes = drv_cpres_leer_status( &usStatus );
 
@@ -4236,8 +4269,18 @@ static void prvCpresStatus( void )
         xprintf( "\r\n" );
     }
 
-    drv_rs485_power( rs485RAIL_BUS,   false );
-    drv_rs485_power( rs485RAIL_CPRES, false );
+    /* Se deja como estaba: si el operador los había encendido, siguen encendidos
+       y puede repetir la lectura sin ciclar la alimentación. */
+    if( !bBusYaEstaba )
+    {
+        drv_rs485_power( rs485RAIL_BUS, false );
+    }
+
+    if( !bCpresYaEstaba )
+    {
+        drv_rs485_power( rs485RAIL_CPRES, false );
+    }
+
     drv_rs485_soltar_bus();
 }
 //------------------------------------------------------------------------------
