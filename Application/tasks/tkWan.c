@@ -411,13 +411,14 @@ void wan_sesion_config( void )
                      xFlags.bConsigna    ? " PRESION"  : "",
                      xFlags.bFlowcontrol ? " FLOWC"    : "" );
 
-            if( xFlags.bFlowcontrol )
-            {
-                /* Esperado y acordado: no mandamos FH, así que el servidor toma
-                   uno por defecto y lo pide siempre. Se ignora a propósito. */
-                xprintf( "  (FLOWC se pide SIEMPRE porque no mandamos su hash: se ignora)\r\n" );
-            }
-
+            /*
+             * ⛔ Acá había un aviso diciendo que `FLOWC` se pedía siempre porque
+             * no mandábamos su hash. **Dejó de ser cierto el 2026-09-22**, con
+             * el sexto hash: ahora el bloque existe y se configura como
+             * cualquier otro. Un mensaje que explica un comportamiento que ya no
+             * ocurre es peor que no tener mensaje — manda a no investigar algo
+             * que sí puede estar fallando.
+             */
             prvLteConfBloques( &xFlags );
             break;
 

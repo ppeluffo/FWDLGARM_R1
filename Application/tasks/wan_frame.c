@@ -437,6 +437,55 @@ static bool prvEsDelim( char cCh )
  * el campo se deja como estaba, que es lo correcto: el servidor no lo mandó.
  */
 static bool prvCampo( const char *pcRta, const char *pcClave, uint8_t ucToken,
+                      char *pcVal, uint16_t usSize );
+//------------------------------------------------------------------------------
+/*
+ * ⛔ COMO `prvCampo()` PERO CON LA CLAVE **SIN SEPARADOR**, y existe por una
+ * razón concreta que apareció en banco el 2026-09-22.
+ *
+ * El servidor separa los slots del flowcontrol con **dos puntos**, no con `=`:
+ *
+ *     CLASS=CONF_FLOWC&ENABLE=FALSE&S00:--,0000,CLOSE&S01:--,0000,CLOSE&…
+ *                             ↑ con '='        ↑ con ':'
+ *
+ * Buscar `"S00="` no matchea nada, y los slots quedaban sin configurar.
+ *
+ * ⭐ **El AVR no lo sufre justamente por lo que acá se había "mejorado"**: él
+ * busca `strstr(p, "S00")` sin separador y recién después tokeniza con
+ * `&,;:=`, así que le da igual cuál venga. Incluir el `=` en la búsqueda daba
+ * más precisión y costaba compatibilidad.
+ *
+ * ⚠ La precisión no se regala: acá se **exige que el carácter siguiente a la
+ * clave sea un separador** (`=` o `:`). Sin eso, buscar `S1` encontraría `S13` y
+ * tomaría el slot equivocado — que es exactamente el riesgo por el que el AVR
+ * necesita los dos dígitos.
+ */
+static bool prvCampoSep( const char *pcRta, const char *pcClave, uint8_t ucToken,
+                         char *pcVal, uint16_t usSize )
+{
+    char        pcConSep[ 12 ];
+    const char *pcSeps = "=:";
+    uint8_t     i;
+
+    if( ( pcClave == NULL ) || ( strlen( pcClave ) >= ( sizeof( pcConSep ) - 1U ) ) )
+    {
+        return false;
+    }
+
+    for( i = 0U; pcSeps[ i ] != '\0'; i++ )
+    {
+        snprintf( pcConSep, sizeof( pcConSep ), "%s%c", pcClave, pcSeps[ i ] );
+
+        if( prvCampo( pcRta, pcConSep, ucToken, pcVal, usSize ) )
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+//------------------------------------------------------------------------------
+static bool prvCampo( const char *pcRta, const char *pcClave, uint8_t ucToken,
                       char *pcVal, uint16_t usSize )
 {
     const char *p;
@@ -899,13 +948,13 @@ static wan_conf_rta_t prvAplicarFlowc( const char *pcRta )
          * incluido**: `S1=` no puede matchear dentro de `S13=`. El `strstr` del
          * AVR no lleva `=`, y por eso allá los dos dígitos eran obligatorios.
          */
-        snprintf( pcClave, sizeof( pcClave ), "S%02u=", ( unsigned ) i );
+        snprintf( pcClave, sizeof( pcClave ), "S%02u", ( unsigned ) i );
 
-        if( !prvCampo( pcRta, pcClave, 0U, pcDow, sizeof( pcDow ) ) )
+        if( !prvCampoSep( pcRta, pcClave, 0U, pcDow, sizeof( pcDow ) ) )
         {
-            snprintf( pcClave, sizeof( pcClave ), "S%u=", ( unsigned ) i );
+            snprintf( pcClave, sizeof( pcClave ), "S%u", ( unsigned ) i );
 
-            if( !prvCampo( pcRta, pcClave, 0U, pcDow, sizeof( pcDow ) ) )
+            if( !prvCampoSep( pcRta, pcClave, 0U, pcDow, sizeof( pcDow ) ) )
             {
                 continue;   /* este slot no vino: se deja como está */
             }
@@ -913,8 +962,8 @@ static wan_conf_rta_t prvAplicarFlowc( const char *pcRta )
 
         /* `pcClave` quedó con la forma que SÍ matcheó, así que los otros dos
            tokens salen del mismo slot y no de otro. */
-        ( void ) prvCampo( pcRta, pcClave, 1U, pcPtime,  sizeof( pcPtime  ) );
-        ( void ) prvCampo( pcRta, pcClave, 2U, pcAccion, sizeof( pcAccion ) );
+        ( void ) prvCampoSep( pcRta, pcClave, 1U, pcPtime,  sizeof( pcPtime  ) );
+        ( void ) prvCampoSep( pcRta, pcClave, 2U, pcAccion, sizeof( pcAccion ) );
 
         if( cfg_flowcontrol_set_slot( i, pcDow, pcPtime, pcAccion ) )
         {

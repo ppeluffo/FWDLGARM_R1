@@ -183,13 +183,23 @@ bool cfg_flowcontrol_set_slot( uint8_t ucSlot, const char *pcDow,
 
     uint8_t ucDow = prvParseDow( pcDow );
 
-    /* Un slot que queda libre no necesita hora ni acción: se apaga y listo. */
+    /*
+     * ⛔ Un slot LIBRE conserva igual su hora y su acción, y NO se fuerzan.
+     *
+     * La primera versión los pisaba con `0` y `OPEN` razonando que un slot
+     * apagado no los necesita. **Pero esos campos entran en el hash**: el
+     * servidor manda `S00:--,0000,CLOSE` —día inválido, pero acción `CLOSE`— y
+     * si acá se guardara `OPEN`, el `FH` nunca coincidiría con el suyo y pediría
+     * reconfigurar `FLOWC` en todas las sesiones.
+     *
+     * Es exactamente el modo de falla del `PST` de ainputs (2026-09-11): un
+     * campo que entra en el hash y que los dos lados no guardan igual **no
+     * cierra nunca**.
+     */
     if( ucDow >= CFG_FLOW_DOW_LIBRE )
     {
-        xCfgFlow.xSlot[ ucSlot ].ucDow   = CFG_FLOW_DOW_LIBRE;
-        xCfgFlow.xSlot[ ucSlot ].usPtime = 0U;
-        xCfgFlow.xSlot[ ucSlot ].bAbrir  = true;
-        return true;
+        xCfgFlow.xSlot[ ucSlot ].ucDow = CFG_FLOW_DOW_LIBRE;
+        /* y se sigue de largo: la hora y la acción se aplican abajo */
     }
 
     /* Un campo en NULL quiere decir "dejá ese campo como está" — la regla del
@@ -225,7 +235,8 @@ bool cfg_flowcontrol_set_slot( uint8_t ucSlot, const char *pcDow,
         return false;
     }
 
-    xCfgFlow.xSlot[ ucSlot ].ucDow   = ucDow;
+    xCfgFlow.xSlot[ ucSlot ].ucDow   = ( ucDow >= CFG_FLOW_DOW_LIBRE )
+                                       ? CFG_FLOW_DOW_LIBRE : ucDow;
     xCfgFlow.xSlot[ ucSlot ].usPtime = usPtime;
     xCfgFlow.xSlot[ ucSlot ].bAbrir  = bAbrir;
 

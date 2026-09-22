@@ -4201,6 +4201,51 @@ Verificado sin hardware con el `prvCampo()` real: **10 casos**, incluidos los tr
 contra una respuesta que además trae `S13=`, y que `S1=` **no** aparezca en una respuesta de dos
 dígitos (para que caiga al otro formato en vez de tomar basura).
 
+#### ⛔ Los slots venían con `:` y no con `=` (banco, 2026-09-22)
+
+La respuesta real del servidor:
+
+```
+<- "<html>CLASS=CONF_FLOWC&ENABLE=FALSE&S00:--,0000,CLOSE&S01:--,0000,CLOSE&…"
+                                 ↑ con '='        ↑ con ':'
+```
+
+**El `ENABLE` viene con `=` y los slots con `:`.** Buscando `"S00="` no matchea nada, así que no se
+configuraba ningún slot.
+
+⭐ **El AVR no lo sufre justamente por lo que acá se había "mejorado"**: él busca
+`strstr(p, "S00")` **sin separador** y recién después tokeniza con `&,;:=`, así que le da igual cuál
+venga. Incluir el `=` en la búsqueda daba más precisión y costaba compatibilidad.
+
+⚠ **Criterio de Pablo**: *"El servidor debe mandar tokens similares (el mismo separador) en todas las
+configuraciones. Si no, ajusto el servidor."* — o sea que lo correcto es `=`, como en `ainputs`,
+`counter` y `modbus`.
+
+**La tolerancia a los dos se deja igual**, y no como parche sino como red: **el AVR nunca se enteró
+de la inconsistencia**, así que si hay otros lugares del servidor con `:`, nadie lo habría notado.
+`prvCampoSep()` prueba `=` y `:`, y **exige que el separador esté** — sin eso, buscar `S1`
+encontraría `S13` y tomaría el slot equivocado, que es el riesgo por el que el AVR necesita los dos
+dígitos.
+
+#### ⛔ Un slot LIBRE conserva su hora y su acción
+
+La primera versión las pisaba con `0` y `OPEN`, razonando que un slot apagado no las necesita.
+**Pero esos campos entran en el hash**: el servidor manda `S00:--,0000,CLOSE` —día inválido, pero
+acción `CLOSE`— y si acá se guardara `OPEN`, el `FH` **no cerraría nunca**.
+
+Es exactamente el modo de falla del `PST` de ainputs: *un campo que entra en el hash y que los dos
+lados no guardan igual no cierra nunca.*
+
+#### ⏳ Y lo que queda abierto: con qué número guarda el servidor el día `--`
+
+El equipo lo guarda como **8**, que es lo que hace el AVR ante cualquier string que no reconoce. Pero
+**no se sabe qué número usa el servidor** para calcular su hash: si emitiera `[SLOT00:00,…]` contra
+nuestro `[SLOT00:08,…]`, el `FH` no cerraría por más que la configuración se aplique bien.
+
+⭐ **Lo destraba el `get_flowcontrol_hash_from_config()` del servidor**, igual que el de ainputs
+cerró lo del `PST` el 2026-09-11: se corre su lógica literal contra el C compilado para el host y se
+comparan los strings, no los valores.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -4219,7 +4264,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.71"        /* = VER                                 */
+#define FW_VERSION  "0.0.72"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
