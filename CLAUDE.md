@@ -4076,6 +4076,106 @@ no es lo mismo que una que falló recién.
 Las órdenes **`VOPEN`/`VCLOSE`/`EXT_V0/V1_*`** que el servidor manda en la respuesta a un frame de
 datos. `tkCtlPres_orden()` ya las recibe por notificación; **falta parsearlas en `wan_frame`**.
 
+## 🔨 Paso 7b: flowcontrol, con alcance recortado
+
+### ⚠ El nombre engaña: NO tiene nada que ver con el caudal
+
+Estuvo anotado en el plan como que **dependía del 2b** (el EMA del contador). **Es falso**, y salió
+al relevarlo el 2026-09-22 porque Pablo preguntó qué era.
+
+**Flowcontrol es un temporizador semanal para la electroválvula TOYI interna**: hasta **14 slots**
+`{día de la semana, hhmm, abrir|cerrar}`. No mira ningún caudal.
+
+⭐ Estructuralmente es **lo mismo que `tkCtlPres`**: tabla de horarios, igualdad exacta de `hhmm`,
+acción sobre una válvula. Lo que cambia es que el slot lleva el día, y que la válvula es un GPIO en
+vez de un dispositivo Modbus.
+
+**Y aclara una división que estaba difusa:**
+
+| Orden del servidor | Quién la ejecuta | Qué mueve |
+|---|---|---|
+| `VOPEN` / `VCLOSE` | **`tkFlow`** | la válvula TOYI **interna** |
+| `EXT_V0/V1_OPEN/CLOSE` | **`tkCtlPres`** | las del **control de presión** |
+
+Yo las tenía juntas como "lo que falta del paso 7": son dos destinos distintos.
+
+### 🔨 Lo que SÍ entra ahora (Pablo, 2026-09-22)
+
+Textual: *"Con tkFlow vamos a hacer sólo configuración y luego sólo implementamos las órdenes que se
+pueden mandar por tkWAN. No implementamos ahora la apertura y cierre de acuerdo a la tabla de
+horarios. Queda pendiente para el futuro."*
+
+- ✅ `cfg_flowcontrol` — el bloque de configuración con sus 14 slots y **su hash**
+- ✅ `tkFlow` — atiende `VOPEN` / `VCLOSE`
+- ✅ `tkCtlPres` recibe `EXT_V0/V1_*`, con lo que **se cierra el paso 7**
+- ⏳ **La tabla de horarios no se ejecuta**
+
+#### ⚠ Que la tabla no se ejecute HAY QUE GRITARLO
+
+`config` lo dice cada vez que la imprime:
+
+```
+  flowcontrol: false
+    (ningun slot configurado)
+    [!] los horarios NO se ejecutan todavia: solo se configuran.
+        La valvula se mueve por 'ev' o por orden del servidor.
+```
+
+Sin eso, un técnico configura slots, los ve guardados, y espera que la válvula se mueva sola. **Un
+equipo que *parece* hacer algo que no hace es peor que uno que no lo ofrece** — es el mismo criterio
+del `SIN_DATO` y del centinela `-9999`.
+
+### ⭐ Con esto se cierra el `FLOWC` que el servidor pedía SIEMPRE
+
+`CONF_ALL` manda ahora **los seis hashes**. Hasta acá iban cinco: faltaba el `FH`, y Pablo lo había
+autorizado como situación transitoria (2026-09-11) advirtiendo la consecuencia — *"el servidor tomará
+uno por defecto y mandará en la respuesta que debe pedir reconfigurar el flowcontrol"*.
+
+⚠ **Esa consecuencia era estructural**: con cinco hashes, `CONF_ALL` **nunca** podía contestar
+`CONFIG=OK`. Con el sexto, sí puede.
+
+⭐ **Pero la regla de que la FSM pase a transmitir datos aunque queden bloques pedidos SIGUE
+VALIENDO**, y no hay que relajarla ahora que el motivo original desapareció: es lo correcto ante
+*cualquier* bloque que no se pueda configurar. Si esperara el `OK`, un solo bloque rechazado dejaría
+al equipo sin transmitir una sola muestra.
+
+#### El hash, validado contra el AVR sin hardware
+
+Los strings salen literales de `flowControl_hash()`: `[TRUE]`/`[FALSE]` y `[SLOT%02d:%02d,%04d,OPEN]`
+por cada uno de los 14. Se corrió la réplica del AVR en Python contra la implementación real
+compilada para el host:
+
+| Configuración | AVR | equipo |
+|---|---|---|
+| defaults | `0x24` | **`0x24`** |
+| habilitado, sin slots | `0xCB` | **`0xCB`** |
+| `S0=LU,1230,OPEN` + `S1=MA,0650,CLOSE` | `0xC9` | **`0xC9`** |
+
+⚠ Los **defaults importan tanto como el formato**: `dow=8`, `ptime=0`, `action=OPEN`. Un equipo
+recién configurado tiene que dar el mismo hash que el servidor calcula para él, y eso sólo pasa si
+los valores de fábrica coinciden.
+
+⚠ Y el `%04d` de la hora: `650` se emite como **`0650`**. Un cero de menos cambia el hash entero.
+
+### ⛔ Dos cosas del AVR que NO se copian
+
+**1. Abrir la válvula al arrancar.** Si flowcontrol está deshabilitado, el AVR hace
+`VALVE_DEFAULT_ACTION()` = `VALVE_open()`. Acá **no**, y es la decisión del 2026-08-18: mover la
+válvula al energizar son **5 s de motor en cada reset** —incluidos los diez seguidos de una sesión de
+flasheo y los espurios que meta el watchdog—. En qué condiciones conviene hacerlo es política de la
+aplicación, que sigue sin definirse.
+
+**2. El chequeo del índice de slot.** El AVR usaba `slot > MAX` (=14), que **deja pasar el 14** y
+escribe fuera del array — con un índice que viene de `atoi()` de un comando **o del servidor**, o sea
+entrada no confiable. Está corregido allá; acá nace con `>=`.
+
+### ⚠ El orden de los `strstr` de las órdenes
+
+Se buscan las `EXT_*` **primero**, por ser las más específicas. El AVR las busca al revés y se salva
+por casualidad: `EXT_V0_OPEN` no contiene `VOPEN` porque entre la `V` y la `O` hay un `0`. Es una
+coincidencia demasiado frágil para copiarla — el día que aparezca una orden nueva que contenga a otra
+como subcadena, la corta se la llevaría puesta.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -4094,7 +4194,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.69"        /* = VER                                 */
+#define FW_VERSION  "0.0.70"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -4119,8 +4219,8 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5d** | **`tkWan`: la FSM. El equipo transmite solo** | ✅ **VALIDADO el 2026-09-21** |
 | **6a** | **Modbus: el motor** (transaccion, codecs, comando) | ✅ **VALIDADO el 2026-09-21** |
 | **6b** | Modbus: el enganche al poleo de `tkSys` | ✅ **VALIDADO el 2026-09-21** |
-| **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | ✅ **VALIDADO el 2026-09-22**; faltan las órdenes del servidor |
-| 7b | ⏳ **`tkFlow`/flowcontrol** — volvió al alcance el 2026-09-12; necesita el 2b | |
+| **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | ✅ **VALIDADO el 2026-09-22** |
+| **7b** | `tkFlow`/flowcontrol — ⚠ **NO depende del 2b** | 🔨 **config + órdenes, sin probar**. La tabla de horarios queda para el futuro |
 | 8 | Watchdog cooperativo + `tkCtl` definitivo | |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo | |
 

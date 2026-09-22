@@ -19,7 +19,8 @@ _Static_assert( sizeof( cfg_base_t )     <= ( CFG_NVM_AINPUTS_ADDR  - CFG_NVM_BA
 _Static_assert( sizeof( cfg_ainputs_t )  <= ( CFG_NVM_COUNTER_ADDR  - CFG_NVM_AINPUTS_ADDR  ), "cfg_ainputs_t no entra en su bloque" );
 _Static_assert( sizeof( cfg_counter_t )  <= ( CFG_NVM_MODBUS_ADDR   - CFG_NVM_COUNTER_ADDR  ), "cfg_counter_t no entra en su bloque" );
 _Static_assert( sizeof( cfg_modbus_t )   <= ( CFG_NVM_CONSIGNA_ADDR - CFG_NVM_MODBUS_ADDR   ), "cfg_modbus_t no entra en su bloque" );
-_Static_assert( sizeof( cfg_consigna_t ) <= ( CFG_NVM_FS_ADDR       - CFG_NVM_CONSIGNA_ADDR ), "cfg_consigna_t no entra en su bloque" );
+_Static_assert( sizeof( cfg_consigna_t ) <= ( CFG_NVM_FLOW_ADDR     - CFG_NVM_CONSIGNA_ADDR ), "cfg_consigna_t no entra en su bloque" );
+_Static_assert( sizeof( cfg_flowcontrol_t ) <= ( CFG_NVM_FS_ADDR   - CFG_NVM_FLOW_ADDR     ), "cfg_flowcontrol_t no entra en su bloque" );
 
 /*
  * Un bloque, una fila. Así `load_all` y `save_all` son un lazo y no cinco copias
@@ -42,6 +43,7 @@ static const cfg_bloque_t xBloques[] = {
     { "counter",  CFG_NVM_COUNTER_ADDR,  &xCfgCounter,  sizeof( xCfgCounter ),  cfg_counter_defaults  },
     { "modbus",   CFG_NVM_MODBUS_ADDR,   &xCfgModbus,   sizeof( xCfgModbus ),   cfg_modbus_defaults   },
     { "consigna", CFG_NVM_CONSIGNA_ADDR, &xCfgConsigna, sizeof( xCfgConsigna ), cfg_consigna_defaults },
+    { "flowc",    CFG_NVM_FLOW_ADDR,     &xCfgFlow,     sizeof( xCfgFlow ),     cfg_flowcontrol_defaults },
 };
 
 #define CFG_NRO_BLOQUES     ( sizeof( xBloques ) / sizeof( xBloques[ 0 ] ) )
@@ -197,18 +199,20 @@ void cfg_nvm_print_all( void )
     cfg_counter_print();
     cfg_modbus_print();
     cfg_consigna_print();
+    cfg_flowcontrol_print();
 
     /*
      * Los hashes son lo que se compara contra el servidor, así que se imprimen
      * con el mismo formato con el que viajan en el frame CONF_ALL. Es lo que
      * permite validarlos contra un equipo AVR sin necesidad de modem.
      */
-    xprintf( "Hashes: BH=0x%02X AH=0x%02X CH=0x%02X MH=0x%02X PH=0x%02X\r\n",
+    xprintf( "Hashes: BH=0x%02X AH=0x%02X CH=0x%02X MH=0x%02X PH=0x%02X FH=0x%02X\r\n",
              ( unsigned ) cfg_base_hash(),
              ( unsigned ) cfg_ainputs_hash(),
              ( unsigned ) cfg_counter_hash(),
              ( unsigned ) cfg_modbus_hash(),
-             ( unsigned ) cfg_consigna_hash() );
+             ( unsigned ) cfg_consigna_hash(),
+             ( unsigned ) cfg_flowcontrol_hash() );
 
     ( void ) cfg_nvm_chequear_nombres();
 }

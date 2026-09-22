@@ -49,6 +49,7 @@
 #include "cfg_counter.h"
 #include "cfg_modbus.h"
 #include "cfg_consigna.h"
+#include "cfg_flowcontrol.h"
 
 /*------------------------------------------------------------------------------
  * El mapa. Las direcciones son fijas y con hueco entre bloques: así un bloque
@@ -60,22 +61,26 @@
 #define CFG_NVM_COUNTER_ADDR    0x00100UL   /*  64 B reservados */
 #define CFG_NVM_MODBUS_ADDR     0x00140UL   /* 384 B reservados */
 #define CFG_NVM_CONSIGNA_ADDR   0x002C0UL   /*  64 B reservados */
+/* ⚠ 128 y no 64: los 14 slots son ~58 bytes y en un bloque de 64 quedarían al
+   filo. Un bloque no puede crecer sin mover a los que siguen, y mover uno
+   obligaría a reconfigurar todos los equipos en campo. */
+#define CFG_NVM_FLOW_ADDR       0x00300UL   /* 128 B reservados */
 
 /* Dónde empieza el filesystem. Todavía no se usa: lo reserva esta etapa para que
    el día que se escriba el FS no haya que discutir el mapa. */
 #define CFG_NVM_FS_ADDR         0x01000UL
 
 /*------------------------------------------------------------------------------
- * Carga los cinco bloques. Cada uno que falle el checksum queda con sus valores
+ * Carga los SEIS bloques. Cada uno que falle el checksum queda con sus valores
  * por defecto y se informa por consola.
  *
- * Devuelve true si los cinco cargaron bien. **Un false NO deja el equipo
+ * Devuelve true si los seis cargaron bien. **Un false NO deja el equipo
  * inutilizable**: arranca con defaults, que es lo que corresponde en un equipo
  * desatendido — mejor midiendo con la configuración de fábrica que sin arrancar.
  *----------------------------------------------------------------------------*/
 bool cfg_nvm_load_all( void );
 
-/* Guarda los cinco bloques, recalculando checksums. */
+/* Guarda los seis bloques, recalculando checksums. */
 bool cfg_nvm_save_all( void );
 
 /* Todos los bloques a sus valores por defecto, EN RAM: no toca la EEPROM hasta

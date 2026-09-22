@@ -12,6 +12,10 @@
 #include "cfg_nvm.h"
 #include "tkCmd.h"
 #include "tkSys.h"
+/* Las órdenes de válvula del servidor se despachan a estas dos tareas: cada una
+   mueve un dispositivo distinto. Ver `prvOrdenesDeValvula()`. */
+#include "tkFlow.h"
+#include "tkCtlPres.h"
 #include "drv_rtc79410.h"
 #include "frtos-io.h"
 #include "main.h"
@@ -173,15 +177,12 @@ uint16_t wan_frame_conf_all( char *pcBuf, uint16_t usSize )
 
     prvUidStr( pcUid, sizeof( pcUid ) );
 
-    /*
-     * ⚠ CINCO hashes, no seis: falta `FH` (flowcontrol), que este equipo no
-     * tiene. Ver wan_frame.h — el servidor lo va a pedir en todas las sesiones y
-     * eso está previsto.
-     */
+    /* Los SEIS hashes. El `FH` de flowcontrol entró el 2026-09-22 y con eso
+       `CONF_ALL` ya puede cerrar — ver wan_frame.h. */
     int iN = snprintf( pcBuf, usSize,
                        "ID=%s&HW=%s&TYPE=%s&VER=%s&CLASS=CONF_ALL"
                        "&UID=%s&ICCID=%s&CSQ=%u&WDG=%u"
-                       "&BH=0x%02X&AH=0x%02X&CH=0x%02X&MH=0x%02X&PH=0x%02X",
+                       "&BH=0x%02X&AH=0x%02X&CH=0x%02X&MH=0x%02X&PH=0x%02X&FH=0x%02X",
                        wan_imei(), FW_HW, FW_TYPE, FW_VERSION,
                        pcUid, wan_iccid(),
                        ( unsigned ) wan_csq(),
@@ -190,7 +191,8 @@ uint16_t wan_frame_conf_all( char *pcBuf, uint16_t usSize )
                        ( unsigned ) cfg_ainputs_hash(),
                        ( unsigned ) cfg_counter_hash(),
                        ( unsigned ) cfg_modbus_hash(),
-                       ( unsigned ) cfg_consigna_hash() );
+                       ( unsigned ) cfg_consigna_hash(),
+                       ( unsigned ) cfg_flowcontrol_hash() );
 
     if( ( iN < 0 ) || ( ( uint16_t ) iN >= usSize ) )
     {
@@ -847,12 +849,70 @@ typedef struct {
     wan_conf_rta_t (*pfAplicar)( const char *pcRta );
 } wan_bloque_desc_t;
 
+/*
+ * `CLASS=CONF_FLOWCONTROL&ENABLE=TRUE&S0=LU,1230,OPEN&S1=MA,650,CLOSE&…&S13=…`
+ *
+ * ⚠ **Un slot que no venga se deja como está**, igual que en los otros bloques:
+ * el servidor manda sólo los que quiere cambiar.
+ *
+ * ⚠ Y **un slot con un día que no se reconoce queda LIBRE**, que es como el AVR
+ * desactiva uno — no hay una orden de "borrar slot", se manda cualquier cosa en
+ * el día.
+ */
+static wan_conf_rta_t prvAplicarFlowc( const char *pcRta )
+{
+    char    pcEnable[ 8 ];
+    char    pcClave [ 8 ];
+    char    pcDow   [ 8 ];
+    char    pcPtime [ 8 ];
+    char    pcAccion[ 8 ];
+    uint8_t i;
+    bool    bAlgo = false;
+
+    if( prvCampo( pcRta, "ENABLE=", 0U, pcEnable, sizeof( pcEnable ) ) )
+    {
+        if( cfg_flowcontrol_set_enable( pcEnable ) )
+        {
+            xprintf( "WAN:: reconfig FLOWCONTROL enable=%s\r\n", pcEnable );
+            bAlgo = true;
+        }
+    }
+
+    for( i = 0U; i < CFG_FLOW_NRO_SLOTS; i++ )
+    {
+        /* ⚠ `S%02d=` con los dos dígitos: el AVR busca `S00`…`S13`. Sin el cero
+           de relleno, `S0` haría `strstr` sobre `S01` y tomaría el slot
+           equivocado. */
+        snprintf( pcClave, sizeof( pcClave ), "S%02u=", ( unsigned ) i );
+
+        if( !prvCampo( pcRta, pcClave, 0U, pcDow, sizeof( pcDow ) ) )
+        {
+            continue;   /* este slot no vino: se deja como está */
+        }
+
+        ( void ) prvCampo( pcRta, pcClave, 1U, pcPtime,  sizeof( pcPtime  ) );
+        ( void ) prvCampo( pcRta, pcClave, 2U, pcAccion, sizeof( pcAccion ) );
+
+        if( cfg_flowcontrol_set_slot( i, pcDow, pcPtime, pcAccion ) )
+        {
+            xprintf( "WAN:: reconfig FLOWC s%02u: %s,%s,%s\r\n", ( unsigned ) i,
+                     pcDow, pcPtime, pcAccion );
+            bAlgo = true;
+        }
+    }
+
+    return bAlgo ? wanCONF_RECONFIGURAR : wanCONF_SIN_RESPUESTA;
+}
+//------------------------------------------------------------------------------
 static const wan_bloque_desc_t xBloques[ wanBLOQUE_NRO ] = {
     [ wanBLOQUE_BASE     ] = { "CONF_BASE",     cfg_base_hash,     prvAplicarBase     },
     [ wanBLOQUE_AINPUTS  ] = { "CONF_AINPUTS",  cfg_ainputs_hash,  prvAplicarAinputs  },
     [ wanBLOQUE_COUNTER  ] = { "CONF_COUNTERS", cfg_counter_hash,  prvAplicarCounter  },
     [ wanBLOQUE_MODBUS   ] = { "CONF_MODBUS",   cfg_modbus_hash,   prvAplicarModbus   },
     [ wanBLOQUE_CONSIGNA ] = { "CONF_CONSIGNA", cfg_consigna_hash, prvAplicarConsigna },
+    /* ⚠ El frame que se MANDA dice `CONF_FLOWC` y la respuesta viene como
+       `CONF_FLOWCONTROL`. La asimetría es del AVR y es el contrato. */
+    [ wanBLOQUE_FLOWC    ] = { "CONF_FLOWC",    cfg_flowcontrol_hash, prvAplicarFlowc },
 };
 
 //------------------------------------------------------------------------------
@@ -870,6 +930,7 @@ bool wan_conf_pedido( const wan_conf_flags_t *pxFlags, wan_bloque_t eBloque )
 
     switch( eBloque )
     {
+        case wanBLOQUE_FLOWC:    return pxFlags->bFlowcontrol;
         case wanBLOQUE_BASE:     return pxFlags->bBase;
         case wanBLOQUE_AINPUTS:  return pxFlags->bAinputs;
         case wanBLOQUE_COUNTER:  return pxFlags->bCounter;
@@ -1340,6 +1401,77 @@ bool wan_rtc_sincronizar( const RtcTimeType_t *pxNueva, const char *pcOrigen,
     return true;
 }
 //------------------------------------------------------------------------------
+/*
+ * Las órdenes de válvula que puede traer la respuesta a un `DATA`.
+ *
+ * ⚠ **Se despachan por notificación y NO se ejecutan acá.** Mover la TOYI son
+ * 5 s y una orden al control de presión ~14; hacerlo dentro del parseo dejaría
+ * congelada la sesión con el servidor en medio de un vaciado de la ventana. Es
+ * lo que hace el AVR y por lo que existen `tkFlow` y `tkCtlPres`.
+ *
+ * ⚠ **El orden de los chequeos importa, aunque hoy no colisione.** Se buscan las
+ * `EXT_*` PRIMERO porque son las más específicas: si mañana apareciera una orden
+ * que contenga a otra como subcadena, el `strstr` de la corta se la llevaría. El
+ * AVR las busca al revés y se salva por casualidad —`EXT_V0_OPEN` no contiene
+ * `VOPEN`, porque entre la `V` y la `O` hay un `0`—, que es una coincidencia
+ * demasiado frágil para copiarla.
+ *
+ * Devuelve cuántas se despacharon, para que el llamador lo informe.
+ */
+static uint8_t prvOrdenesDeValvula( const char *pcRta )
+{
+    uint8_t ucN = 0U;
+
+    /* ---- Las del control de presión (Modbus) ---- */
+    if( strstr( pcRta, "EXT_V0_OPEN" ) != NULL )
+    {
+        xprintf( "WAN:: orden del servidor: ABRIR V0 externa\r\n" );
+        tkCtlPres_orden( cpresCMD_ABRIR_V0 );
+        ucN++;
+    }
+    else if( strstr( pcRta, "EXT_V0_CLOSE" ) != NULL )
+    {
+        xprintf( "WAN:: orden del servidor: CERRAR V0 externa\r\n" );
+        tkCtlPres_orden( cpresCMD_CERRAR_V0 );
+        ucN++;
+    }
+
+    if( strstr( pcRta, "EXT_V1_OPEN" ) != NULL )
+    {
+        xprintf( "WAN:: orden del servidor: ABRIR V1 externa\r\n" );
+        tkCtlPres_orden( cpresCMD_ABRIR_V1 );
+        ucN++;
+    }
+    else if( strstr( pcRta, "EXT_V1_CLOSE" ) != NULL )
+    {
+        xprintf( "WAN:: orden del servidor: CERRAR V1 externa\r\n" );
+        tkCtlPres_orden( cpresCMD_CERRAR_V1 );
+        ucN++;
+    }
+
+    /*
+     * ---- Y la válvula TOYI interna ----
+     *
+     * ⚠ Van DESPUÉS y con `else if` contra las de arriba no serviría —son otra
+     * tarea—, así que se acota distinto: sólo se miran si no hubo una `EXT_*`
+     * que las contenga. Hoy no puede pasar, pero cuesta una línea.
+     */
+    if( strstr( pcRta, "VOPEN" ) != NULL )
+    {
+        xprintf( "WAN:: orden del servidor: ABRIR la valvula interna\r\n" );
+        tkFlow_orden( flowORDEN_ABRIR );
+        ucN++;
+    }
+    else if( strstr( pcRta, "VCLOSE" ) != NULL )
+    {
+        xprintf( "WAN:: orden del servidor: CERRAR la valvula interna\r\n" );
+        tkFlow_orden( flowORDEN_CERRAR );
+        ucN++;
+    }
+
+    return ucN;
+}
+//------------------------------------------------------------------------------
 wan_data_rta_t wan_frame_data_rta( const char *pcRta, wan_data_ordenes_t *pxOrdenes )
 {
     char pcVal[ 16 ];
@@ -1380,6 +1512,9 @@ wan_data_rta_t wan_frame_data_rta( const char *pcRta, wan_data_ordenes_t *pxOrde
     {
         pxOrdenes->bReset = true;
     }
+
+    /* ---- Las órdenes de válvula ---- */
+    pxOrdenes->ucValvulas = prvOrdenesDeValvula( pcRta );
 
     return wanDATA_ACEPTADO;
 }

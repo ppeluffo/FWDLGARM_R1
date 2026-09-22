@@ -30,6 +30,7 @@
 #include "tkSys.h"
 #include "tkWan.h"
 #include "tkCtlPres.h"
+#include "tkFlow.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -483,6 +484,20 @@ int main(void)
                                          tkCtlPres_Stack,
                                          &tkCtlPres_TCB );
   if ( xHandle_tkCtlPres == NULL )
+  {
+    Error_Handler();
+  }
+
+  /* La valvula TOYI interna. Hoy solo atiende las ordenes del servidor; la tabla
+     de horarios de flowcontrol se configura pero todavia no se ejecuta. */
+  xHandle_tkFlow = xTaskCreateStatic( tkFlow,
+                                      "FLOW",
+                                      tkFlow_STACK_SIZE,
+                                      NULL,
+                                      tkFlow_PRIORITY,
+                                      tkFlow_Stack,
+                                      &tkFlow_TCB );
+  if ( xHandle_tkFlow == NULL )
   {
     Error_Handler();
   }

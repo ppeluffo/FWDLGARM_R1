@@ -200,17 +200,22 @@ bool wan_csq_valido( void );
  * El frame de CONFIGURACIÓN: manda un hash por bloque y el servidor contesta
  * cuáles quiere reconfigurar.
  *
- * ⚠ **Van CINCO hashes, no seis.** El AVR manda además `FH`, el de
- * *flowcontrol*, que en este equipo no existe. Pablo lo autorizó explícitamente
- * (2026-09-11): *"puede no mandar el FH, pero el servidor tomará uno por defecto
- * y mandará en la respuesta que debe pedir reconfigurar el flowcontrol. Luego si
- * el datalogger no lo hace, no pasa nada"*.
+ * ✅ **Van los SEIS hashes.** Durante un tiempo fueron cinco: faltaba el `FH`,
+ * el de flowcontrol, porque ese bloque no existía en este equipo. Pablo lo
+ * autorizó como situación transitoria (2026-09-11) advirtiendo la consecuencia:
+ * *"el servidor tomará uno por defecto y mandará en la respuesta que debe pedir
+ * reconfigurar el flowcontrol"*.
  *
- * O sea que el servidor va a pedir `FLOWC` en **todas** las sesiones. Es
- * inofensivo, pero obliga a una cosa: **la máquina de estados tiene que pasar a
- * transmitir datos aunque queden bloques pedidos sin configurar.** Si esperara
- * un `CONFIG=OK` que nunca va a llegar, el equipo no mandaría una sola muestra.
- *----------------------------------------------------------------------------*/
+ * ⚠ **Esa consecuencia era estructural y ahora se terminó**: con cinco hashes,
+ * `CONF_ALL` **nunca** podía contestar `CONFIG=OK` y pedía `FLOWC` en todas las
+ * sesiones. Con el sexto, sí puede.
+ *
+ * ⭐ **Pero la regla de que la FSM pase a transmitir datos aunque queden bloques
+ * pedidos SIGUE VALIENDO**, y no hay que relajarla ahora que el motivo original
+ * desapareció: es lo correcto ante *cualquier* bloque que no se pueda
+ * configurar. Si esperara el `OK`, un solo bloque rechazado dejaría al equipo
+ * sin transmitir una sola muestra.
+ */
 uint16_t wan_frame_conf_all( char *pcBuf, uint16_t usSize );
 
 /*------------------------------------------------------------------------------
@@ -245,6 +250,7 @@ typedef enum {
     wanBLOQUE_COUNTER,
     wanBLOQUE_MODBUS,
     wanBLOQUE_CONSIGNA,
+    wanBLOQUE_FLOWC,
     wanBLOQUE_NRO          /* centinela: cuántos son */
 } wan_bloque_t;
 
@@ -303,8 +309,15 @@ wan_conf_rta_t wan_conf_aplicar( wan_bloque_t eBloque, const char *pcRta );
  *   CLOCK=YYMMDDhhmm   pone en hora el equipo
  *   RESET              reiniciar
  *
- * ⏳ `VOPEN`/`VCLOSE` y `EXT_V0/V1_*` mueven válvulas y **van con el paso 7**,
- * que es donde vive esa política. Acá se ignoran.
+ * ✅ Y desde el 2026-09-22, las **seis órdenes de válvula**:
+ *
+ *   VOPEN / VCLOSE                 la válvula TOYI **interna**  -> `tkFlow`
+ *   EXT_V0_OPEN  / EXT_V0_CLOSE    la V0 del **control de presión** -> `tkCtlPres`
+ *   EXT_V1_OPEN  / EXT_V1_CLOSE    la V1        "        "
+ *
+ * ⚠ **Ninguna se ejecuta acá: se despachan por notificación.** Mover la TOYI son
+ * 5 s y una orden al control de presión son ~14; hacerlo dentro del parseo
+ * dejaría la sesión con el servidor congelada en medio de un vaciado.
  *----------------------------------------------------------------------------*/
 typedef enum {
     wanDATA_ACEPTADO = 0,   /* el servidor contestó `CLASS=DATA`              */
@@ -335,8 +348,9 @@ typedef enum {
  * volvería a transmitir lo mismo después del reset.
  */
 typedef struct {
-    bool bClock;    /* vino un `CLOCK=` válido y se aplicó */
-    bool bReset;    /* el servidor pide reiniciar          */
+    bool bClock;     /* vino un `CLOCK=` válido y se aplicó */
+    bool bReset;     /* el servidor pide reiniciar          */
+    uint8_t ucValvulas;  /* cuántas órdenes de válvula se despacharon */
 } wan_data_ordenes_t;
 
 wan_data_rta_t wan_frame_data_rta( const char *pcRta, wan_data_ordenes_t *pxOrdenes );

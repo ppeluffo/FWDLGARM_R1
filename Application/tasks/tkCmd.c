@@ -15,6 +15,7 @@
 #include "drv_modbus.h"
 #include "drv_cpres.h"
 #include "tkCtlPres.h"
+#include "tkFlow.h"
 #include "modbus.h"
 #include "drv_ina3221.h"
 #include "drv_sd.h"
@@ -679,6 +680,8 @@ static void cmdStatus( void )
                     wan_estado_str() );
     prvEstadoTarea( "tkCPres", xHandle_tkCtlPres, tkCtlPres_STACK_SIZE,
                     tkCtlPres_matada(), NULL );
+    prvEstadoTarea( "tkFlow", xHandle_tkFlow, tkFlow_STACK_SIZE,
+                    tkFlow_matada(), NULL );
 
     /*
      * ---- La doble consigna ----
@@ -3208,6 +3211,9 @@ static void prvConfigUso( void )
     xprintf( "  config pst <s>                  settle time de los sensores 4-20\r\n" );
     xprintf( "  config counter <enable> <name> <magpp> <caudal|pulsos> <qmax> <alpha>\r\n" );
     xprintf( "  config consigna <enable> <diurna_hhmm> <nocturna_hhmm>\r\n" );
+    xprintf( "  config flow enable <true|false>\r\n" );
+    xprintf( "  config flow slot <0..13> <LU|MA|MI|JU|VI|SA|DO> <hhmm> <OPEN|CLOSE>\r\n" );
+    xprintf( "       [!] los horarios se GUARDAN pero todavia NO se ejecutan\r\n" );
     xprintf( "\r\n" );
     xprintf( "  config modbus enable <true|false>\r\n" );
     xprintf( "  config modbus localaddr <1..247>\r\n" );
@@ -3224,6 +3230,7 @@ static void prvKillUso( void )
     xprintf( "  kill wan     mata tkWan: deja el modem libre para 'lte ...'\r\n" );
     xprintf( "  kill sys     mata tkSys: deja de polear y de escribir la ventana\r\n" );
     xprintf( "  kill cpres   mata tkCtlPres: deja libre el control de presion\r\n" );
+    xprintf( "  kill flow    mata tkFlow: deja libre la valvula TOYI para 'ev'\r\n" );
     xprintf( "\r\n" );
     xprintf( "  NO hay forma de revivir una tarea, y es a proposito: despues de\r\n" );
     xprintf( "  trabajar a mano se hace 'reset' y el equipo arranca limpio.\r\n" );
@@ -3266,6 +3273,19 @@ static void cmdKill( void )
         xprintf( "tkWan esta en %s; kill pedido, se mata en su proxima vuelta.\r\n",
                  wan_estado_str() );
         wan_pedir_kill();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "flow" ) == 0 )
+    {
+        if( tkFlow_matada() )
+        {
+            xprintf( "tkFlow ya estaba matada\r\n" );
+            return;
+        }
+
+        xprintf( "kill pedido: tkFlow se mata en su proxima vuelta.\r\n" );
+        tkFlow_pedir_kill();
         return;
     }
 
@@ -3406,6 +3426,28 @@ static void cmdConfig( void )
         {
             bOk = cfg_counter_set( argv[ 2 ], argv[ 3 ], argv[ 4 ], argv[ 5 ],
                                    argv[ 6 ], argv[ 7 ] );
+        }
+        else
+        {
+            prvConfigUso();
+            return;
+        }
+    }
+
+    else if( strcmp( argv[ 1 ], "flow" ) == 0 )
+    {
+        /* config flow enable <true|false>
+           config flow slot <0..13> <LU..DO> <hhmm> <OPEN|CLOSE>  */
+        if( ( ucArgs >= 3U ) && ( argv[ 2 ] != NULL ) &&
+            ( strcmp( argv[ 2 ], "enable" ) == 0 ) )
+        {
+            bOk = cfg_flowcontrol_set_enable( argv[ 3 ] );
+        }
+        else if( ( ucArgs >= 6U ) && ( argv[ 6 ] != NULL ) &&
+                 ( strcmp( argv[ 2 ], "slot" ) == 0 ) )
+        {
+            bOk = cfg_flowcontrol_set_slot( ( uint8_t ) atol( argv[ 3 ] ),
+                                            argv[ 4 ], argv[ 5 ], argv[ 6 ] );
         }
         else
         {
