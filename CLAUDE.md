@@ -3970,6 +3970,46 @@ A diferencia de `drv_cpres_comando()`, que sí hace el ciclo completo porque es 
 tarea de RS485 aguarda a que su sistema termine de arrancar, así que hablarle antes es hablarle al
 vacío. Eso fue justamente lo que falló en el primer intento.
 
+#### ⭐ La espera larga es por el MOVIMIENTO, no por el arranque (Pablo, 2026-09-22)
+
+Corrige un tiempo que estaba mal repartido. Textual: *"en la medida que NO movemos las
+electroválvulas, no hay que esperar más de 1 segundo para que el micro de la doble consigna se active
+y responda. La espera larga es sólo cuando damos algún comando que mueve las válvulas."*
+
+⛔ **El AVR espera 10 s antes del primer diálogo** (`cpres_send_command()`), y yo lo había copiado
+suponiendo que el dispositivo tardaba en estar listo — su tarea de RS485 aguarda un `starting_flag`,
+lo cual parecía confirmarlo. **No es así**: arranca y contesta en un segundo, y esos 10 s eran
+precaución heredada.
+
+| | antes | ahora |
+|---|---|---|
+| Leer el status sin mover nada | 12 s | **1 s** |
+| Un ciclo de consigna completo | ~45 s | **~14 s** |
+
+⏳ Lo que sigue sin medir es cuánto tarda **el movimiento** (`MS_EJECUCION`, 10 s). Pablo lo dejó
+así: *"son sólo 2 movimientos al día."*
+
+#### ⚠ Y `cpres status` avisa cuando apaga los rieles
+
+Porque si no, el comando **siguiente** falla con `el riel del RS485 esta apagado` y parece un error de
+la nada. Pasó en banco: un `cpres status` con los rieles apagados los prende, lee, los apaga — y el
+`modbus write` que venía después se encontró con el bus muerto.
+
+⭐ **La orden completa quedó validada en la misma corrida:**
+
+```
+cmd>modbus write 100 1 1              <- abrir V0
+OK: sla=100 reg=1 <- 1 ; el esclavo devolvio 0x000A
+
+cmd>cpres status
+status = 0x08: IDLE
+  V0: abierta            <- ya NO es "desconocida"
+  V1: desconocida        <- ésta no se movió, así que sigue sin saberse
+```
+
+Las dos cosas que confirma: el FC06 **entra** —y devuelve el status, no el eco— y **la posición pasa
+a conocerse sólo para la válvula que se movió**, que es exactamente lo que describe el dispositivo.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3988,7 +4028,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.67"        /* = VER                                 */
+#define FW_VERSION  "0.0.68"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 

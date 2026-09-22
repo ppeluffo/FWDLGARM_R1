@@ -29,7 +29,8 @@
  *   3. esperar y **volver a leer hasta IDLE** — recién ahí la consigna se
  *      aplicó de verdad.
  *
- * Una consigna completa tarda **30 a 45 s**.
+ * Una consigna completa tarda **~14 s** si todo sale al primer intento, y hasta
+ * ~30 s con reintentos. Casi todo eso es el movimiento.
  *
  * ---------------------------------------------------------------------------
  * ⛔ EL DISPOSITIVO NO RECUERDA DÓNDE QUEDARON LAS VÁLVULAS
@@ -93,12 +94,27 @@ const char *drv_cpres_cmd_str( cpres_cmd_t eCmd );
 #define DRV_CPRES_BIT_RUN           7U      /* 1 = trabajando, 0 = idle */
 
 /*------------------------------------------------------------------------------
- * Los tiempos, todos del AVR. ⏳ Están sin medir contra el equipo real: son un
- * punto de partida generoso, no una especificación.
+ * ⭐ LOS TIEMPOS: LA ESPERA LARGA ES POR EL MOVIMIENTO, NO POR EL ARRANQUE
+ *
+ * Dato de Pablo (2026-09-22), y corrige lo que estaba puesto: *"en la medida que
+ * NO movemos las electroválvulas, no hay que esperar más de 1 segundo para que
+ * el micro de la doble consigna se active y responda. La espera larga es sólo
+ * cuando damos algún comando que mueve las válvulas."*
+ *
+ * ⛔ **Lo que había estaba mal repartido.** El AVR espera **10 s antes del primer
+ * diálogo** (`cpres_send_command()`), y yo lo había copiado suponiendo que el
+ * dispositivo tardaba en estar listo —su tarea de RS485 aguarda un
+ * `starting_flag`, lo cual parecía confirmarlo—. **No es así**: arranca y
+ * contesta en un segundo, y esos 10 s eran precaución heredada.
+ *
+ * La consecuencia es concreta: **un ciclo completo pasa de ~45 s a ~20 s**, y
+ * una lectura de status sin mover nada, de 12 s a 1.
+ *
+ * ⏳ Lo que sigue sin medir es `MS_EJECUCION` — cuánto tarda de verdad el
+ * movimiento. Pablo lo dejó así por ahora: *"son sólo 2 movimientos al día."*
  *----------------------------------------------------------------------------*/
-#define DRV_CPRES_MS_ARRANQUE    2000U   /* tras dar energía, antes de hablarle  */
-#define DRV_CPRES_MS_ESTABILIZAR 10000U  /* el AVR espera esto antes del 1er FC03 */
-#define DRV_CPRES_MS_EJECUCION   10000U  /* tras el FC06, antes de releer         */
+#define DRV_CPRES_MS_ARRANQUE    1000U   /* dar energía y que conteste: 1 s      */
+#define DRV_CPRES_MS_EJECUCION   10000U  /* ⏳ tras el FC06: el MOVIMIENTO        */
 #define DRV_CPRES_MS_ENTRE_IDLE   5000U  /* entre reintentos de "¿ya terminaste?" */
 #define DRV_CPRES_MS_APAGADO     2000U   /* tras cortar, antes de devolver        */
 #define DRV_CPRES_INTENTOS_IDLE      3U
@@ -114,9 +130,9 @@ const char *drv_cpres_cmd_str( cpres_cmd_t eCmd );
  * consigna tiene que esperar el bus **sin timeout corto**, y esa decisión es de
  * política, no de driver. Ver `drv_rs485_tomar_bus()`.
  *
- * Bloquea entre 30 y 45 s. Durante casi todo ese tiempo el micro **duerme**: lo
- * único que hay encendido es un GPIO, que sobrevive al Stop 2. Es el mismo
- * razonamiento del INA3221 y de la válvula TOYI.
+ * Bloquea ~14 s en el caso bueno. Durante casi todo ese tiempo el micro
+ * **duerme**: lo único que hay encendido es un GPIO, que sobrevive al Stop 2. Es
+ * el mismo razonamiento del INA3221 y de la válvula TOYI.
  *----------------------------------------------------------------------------*/
 bool drv_cpres_comando( cpres_cmd_t eCmd );
 

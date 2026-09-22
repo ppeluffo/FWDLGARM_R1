@@ -4232,16 +4232,11 @@ static void prvCpresStatus( void )
         drv_rs485_power( rs485RAIL_BUS, true );
     }
 
-    /*
-     * ⚠ Sólo se espera el arranque si hubo que ENCENDERLO. Y el tiempo es el
-     * largo, no los 2 s del transceiver: su tarea de RS485 espera a que el
-     * sistema termine de arrancar, así que hablarle antes es hablarle al vacío.
-     */
+    /* Sólo se espera si hubo que encenderlo, y **un segundo alcanza**: leer el
+       status no mueve nada. Ver `drv_cpres.h`. */
     if( !bCpresYaEstaba )
     {
-        xprintf( "esperando %u ms a que arranque el dispositivo...\r\n",
-                 ( unsigned ) ( DRV_CPRES_MS_ARRANQUE + DRV_CPRES_MS_ESTABILIZAR ) );
-        vTaskDelay( pdMS_TO_TICKS( DRV_CPRES_MS_ARRANQUE + DRV_CPRES_MS_ESTABILIZAR ) );
+        vTaskDelay( pdMS_TO_TICKS( DRV_CPRES_MS_ARRANQUE ) );
     }
 
     eRes = drv_cpres_leer_status( &usStatus );
@@ -4279,6 +4274,13 @@ static void prvCpresStatus( void )
     if( !bCpresYaEstaba )
     {
         drv_rs485_power( rs485RAIL_CPRES, false );
+
+        /*
+         * ⚠ Se avisa, porque si no el comando SIGUIENTE falla con "el riel está
+         * apagado" y parece un error de la nada. Pasó en banco el 2026-09-22.
+         */
+        xprintf( "\r\n(los rieles quedaron como estaban: APAGADOS. Para encadenar\r\n" );
+        xprintf( " comandos: 'rs485 on cpres' + 'rs485 on bus' primero)\r\n" );
     }
 
     drv_rs485_soltar_bus();

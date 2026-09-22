@@ -147,14 +147,9 @@ bool drv_cpres_comando( cpres_cmd_t eCmd )
     /* ---- Energía ---- */
     drv_rs485_power( rs485RAIL_CPRES, true );
     drv_rs485_power( rs485RAIL_BUS,   true );
+    /* Un segundo: lo único que hace falta para que conteste. Los 10 s extra que
+       espera el AVR acá eran precaución heredada — ver el header. */
     vTaskDelay( pdMS_TO_TICKS( DRV_CPRES_MS_ARRANQUE ) );
-
-    /*
-     * ⏳ Los 10 s del AVR antes del primer diálogo. Están sin medir: el número
-     * sale de `cpres_send_command()` y nadie verificó cuánto necesita de verdad
-     * el dispositivo. Con el equipo en el banco se puede acortar.
-     */
-    vTaskDelay( pdMS_TO_TICKS( DRV_CPRES_MS_ESTABILIZAR ) );
 
     /* ---- 1. ¿Está libre? ---- */
     if( !prvEsperarIdle( "antes de la orden" ) )
