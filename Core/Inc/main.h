@@ -169,7 +169,7 @@ void Error_Handler(void);
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
 #define FW_NOMBRE              "FWDLGARM_R1"   /* el del banner, NO el del frame */
-#define FW_VERSION             "0.0.72"
+#define FW_VERSION             "0.0.73"
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*

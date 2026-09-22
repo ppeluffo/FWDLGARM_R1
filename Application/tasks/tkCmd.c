@@ -3211,9 +3211,6 @@ static void prvConfigUso( void )
     xprintf( "  config pst <s>                  settle time de los sensores 4-20\r\n" );
     xprintf( "  config counter <enable> <name> <magpp> <caudal|pulsos> <qmax> <alpha>\r\n" );
     xprintf( "  config consigna <enable> <diurna_hhmm> <nocturna_hhmm>\r\n" );
-    xprintf( "  config flow enable <true|false>\r\n" );
-    xprintf( "  config flow slot <0..13> <LU|MA|MI|JU|VI|SA|DO> <hhmm> <OPEN|CLOSE>\r\n" );
-    xprintf( "       [!] los horarios se GUARDAN pero todavia NO se ejecutan\r\n" );
     xprintf( "\r\n" );
     xprintf( "  config modbus enable <true|false>\r\n" );
     xprintf( "  config modbus localaddr <1..247>\r\n" );
@@ -3426,28 +3423,6 @@ static void cmdConfig( void )
         {
             bOk = cfg_counter_set( argv[ 2 ], argv[ 3 ], argv[ 4 ], argv[ 5 ],
                                    argv[ 6 ], argv[ 7 ] );
-        }
-        else
-        {
-            prvConfigUso();
-            return;
-        }
-    }
-
-    else if( strcmp( argv[ 1 ], "flow" ) == 0 )
-    {
-        /* config flow enable <true|false>
-           config flow slot <0..13> <LU..DO> <hhmm> <OPEN|CLOSE>  */
-        if( ( ucArgs >= 3U ) && ( argv[ 2 ] != NULL ) &&
-            ( strcmp( argv[ 2 ], "enable" ) == 0 ) )
-        {
-            bOk = cfg_flowcontrol_set_enable( argv[ 3 ] );
-        }
-        else if( ( ucArgs >= 6U ) && ( argv[ 6 ] != NULL ) &&
-                 ( strcmp( argv[ 2 ], "slot" ) == 0 ) )
-        {
-            bOk = cfg_flowcontrol_set_slot( ( uint8_t ) atol( argv[ 3 ] ),
-                                            argv[ 4 ], argv[ 5 ], argv[ 6 ] );
         }
         else
         {

@@ -4076,175 +4076,83 @@ no es lo mismo que una que falló recién.
 Las órdenes **`VOPEN`/`VCLOSE`/`EXT_V0/V1_*`** que el servidor manda en la respuesta a un frame de
 datos. `tkCtlPres_orden()` ya las recibe por notificación; **falta parsearlas en `wan_frame`**.
 
-## 🔨 Paso 7b: flowcontrol, con alcance recortado
+## ⛔ FLOWCONTROL: se implementó entero y se ELIMINÓ el mismo día (2026-09-22)
 
-### ⚠ El nombre engaña: NO tiene nada que ver con el caudal
+Decisión de Pablo, y queda anotada porque **el trabajo de volver a ponerlo no es el problema; el
+problema sería no saber por qué se sacó**:
 
-Estuvo anotado en el plan como que **dependía del 2b** (el EMA del contador). **Es falso**, y salió
-al relevarlo el 2026-09-22 porque Pablo preguntó qué era.
+> *"Eliminamos todo lo que tiene que ver con FLOWC. Esta es una funcionalidad que aún no la estamos
+> usando así que no vamos a ensuciar el firmware con features que no se usan. Ya modifiqué el
+> servidor de modo que no responda más a la configuración con un FLOWC. Tampoco tenemos que mandar el
+> hash."*
 
-**Flowcontrol es un temporizador semanal para la electroválvula TOYI interna**: hasta **14 slots**
-`{día de la semana, hhmm, abrir|cerrar}`. No mira ningún caudal.
+Se borró: `cfg_flowcontrol.{h,c}`, su bloque en la EEPROM, el hash **`FH`**, el `CONF_FLOWC`, su
+aplicador y los comandos `config flow`. **Las dos puntas están de acuerdo**: el servidor ya no lo pide
+y el equipo manda **cinco hashes**.
 
-⭐ Estructuralmente es **lo mismo que `tkCtlPres`**: tabla de horarios, igualdad exacta de `hhmm`,
-acción sobre una válvula. Lo que cambia es que el slot lleva el día, y que la válvula es un GPIO en
-vez de un dispositivo Modbus.
+⚠ **Esto NO es volver a la situación transitoria de antes.** Hasta el 2026-09-11 se mandaban cinco
+hashes porque el bloque no existía **y el servidor sí lo esperaba**, así que `CONF_ALL` no podía
+contestar `CONFIG=OK` nunca. Ahora los cinco son el contrato completo.
 
-**Y aclara una división que estaba difusa:**
+⭐ **La regla de que la FSM pase a transmitir datos aunque queden bloques pedidos sigue valiendo
+igual**, y no hay que relajarla ahora que el motivo original desapareció: era lo correcto ante el
+`FLOWC` que no se podía satisfacer, y lo sigue siendo ante *cualquier* bloque que falle.
 
-| Orden del servidor | Quién la ejecuta | Qué mueve |
+### Qué era, por si alguna vez vuelve
+
+⚠ **El nombre engaña y por eso estuvo mal anotado en el plan**: figuraba como que dependía del paso
+2b (el EMA del contador). **Es falso.** Flowcontrol es **un temporizador semanal para la
+electroválvula TOYI interna**: 14 slots `{día, hhmm, abrir|cerrar}`, sin relación con ningún caudal.
+
+Estructuralmente es **lo mismo que `tkCtlPres`**: tabla de horarios, igualdad exacta de `hhmm`,
+acción sobre una válvula. Si vuelve, eso ya está resuelto ahí.
+
+El contrato, relevado y **validado contra la réplica del AVR** antes de borrarlo (los tres casos
+coincidieron: `0x24` en defaults, `0xCB` habilitado, `0xC9` con dos slots):
+
+```
+hash:      [TRUE] o [FALSE], y por cada slot  [SLOT%02d:%02d,%04d,OPEN|CLOSE]
+defaults:  enabled=false, dow=8, ptime=0, action=OPEN
+frame:     CLASS=CONF_FLOWC&HASH=0x..      <- se MANDA como CONF_FLOWC
+respuesta: CLASS=CONF_FLOWCONTROL&ENABLE=..&S00:--,0000,CLOSE&..   <- y vuelve como CONF_FLOWCONTROL
+```
+
+`0x00300` en la EEPROM **queda libre y sin reutilizar**: si vuelve, que caiga donde estaba.
+
+### ⭐ Lo que SÍ quedó, y no es flowcontrol
+
+**`tkFlow`**, reducida a una sola cosa: atender las órdenes **`VOPEN` / `VCLOSE`** que el servidor
+manda en la respuesta a un frame de datos, sobre la **válvula TOYI interna**.
+
+| Orden del servidor | Quién | Qué mueve |
 |---|---|---|
-| `VOPEN` / `VCLOSE` | **`tkFlow`** | la válvula TOYI **interna** |
-| `EXT_V0/V1_OPEN/CLOSE` | **`tkCtlPres`** | las del **control de presión** |
+| `VOPEN` / `VCLOSE` | **`tkFlow`** | la TOYI **interna** (un GPIO) |
+| `EXT_V0/V1_OPEN/CLOSE` | **`tkCtlPres`** | las del **control de presión** (Modbus) |
 
-Yo las tenía juntas como "lo que falta del paso 7": son dos destinos distintos.
+⭐ **Van por notificación y no por llamada directa**: mover la TOYI son 5 s y una orden al control de
+presión ~14, y hacerlo dentro de `tkWan` dejaría la sesión con el servidor congelada en medio de un
+vaciado. Es lo que hace el AVR y por lo que existen las dos tareas.
 
-### 🔨 Lo que SÍ entra ahora (Pablo, 2026-09-22)
+⚠ Y `tkFlow` **no abre la válvula al arrancar**, aunque el AVR sí lo haga
+(`VALVE_DEFAULT_ACTION()` = `VALVE_open()`): es la decisión del 2026-08-18 — son 5 s de motor en cada
+reset, incluidos los diez seguidos de una sesión de flasheo.
 
-Textual: *"Con tkFlow vamos a hacer sólo configuración y luego sólo implementamos las órdenes que se
-pueden mandar por tkWAN. No implementamos ahora la apertura y cierre de acuerdo a la tabla de
-horarios. Queda pendiente para el futuro."*
+### Tres cosas que se aprendieron y NO se borran con el código
 
-- ✅ `cfg_flowcontrol` — el bloque de configuración con sus 14 slots y **su hash**
-- ✅ `tkFlow` — atiende `VOPEN` / `VCLOSE`
-- ✅ `tkCtlPres` recibe `EXT_V0/V1_*`, con lo que **se cierra el paso 7**
-- ⏳ **La tabla de horarios no se ejecuta**
-
-#### ⚠ Que la tabla no se ejecute HAY QUE GRITARLO
-
-`config` lo dice cada vez que la imprime:
-
-```
-  flowcontrol: false
-    (ningun slot configurado)
-    [!] los horarios NO se ejecutan todavia: solo se configuran.
-        La valvula se mueve por 'ev' o por orden del servidor.
-```
-
-Sin eso, un técnico configura slots, los ve guardados, y espera que la válvula se mueva sola. **Un
-equipo que *parece* hacer algo que no hace es peor que uno que no lo ofrece** — es el mismo criterio
-del `SIN_DATO` y del centinela `-9999`.
-
-### ⭐ Con esto se cierra el `FLOWC` que el servidor pedía SIEMPRE
-
-`CONF_ALL` manda ahora **los seis hashes**. Hasta acá iban cinco: faltaba el `FH`, y Pablo lo había
-autorizado como situación transitoria (2026-09-11) advirtiendo la consecuencia — *"el servidor tomará
-uno por defecto y mandará en la respuesta que debe pedir reconfigurar el flowcontrol"*.
-
-⚠ **Esa consecuencia era estructural**: con cinco hashes, `CONF_ALL` **nunca** podía contestar
-`CONFIG=OK`. Con el sexto, sí puede.
-
-⭐ **Pero la regla de que la FSM pase a transmitir datos aunque queden bloques pedidos SIGUE
-VALIENDO**, y no hay que relajarla ahora que el motivo original desapareció: es lo correcto ante
-*cualquier* bloque que no se pueda configurar. Si esperara el `OK`, un solo bloque rechazado dejaría
-al equipo sin transmitir una sola muestra.
-
-#### El hash, validado contra el AVR sin hardware
-
-Los strings salen literales de `flowControl_hash()`: `[TRUE]`/`[FALSE]` y `[SLOT%02d:%02d,%04d,OPEN]`
-por cada uno de los 14. Se corrió la réplica del AVR en Python contra la implementación real
-compilada para el host:
-
-| Configuración | AVR | equipo |
-|---|---|---|
-| defaults | `0x24` | **`0x24`** |
-| habilitado, sin slots | `0xCB` | **`0xCB`** |
-| `S0=LU,1230,OPEN` + `S1=MA,0650,CLOSE` | `0xC9` | **`0xC9`** |
-
-⚠ Los **defaults importan tanto como el formato**: `dow=8`, `ptime=0`, `action=OPEN`. Un equipo
-recién configurado tiene que dar el mismo hash que el servidor calcula para él, y eso sólo pasa si
-los valores de fábrica coinciden.
-
-⚠ Y el `%04d` de la hora: `650` se emite como **`0650`**. Un cero de menos cambia el hash entero.
-
-### ⛔ Dos cosas del AVR que NO se copian
-
-**1. Abrir la válvula al arrancar.** Si flowcontrol está deshabilitado, el AVR hace
-`VALVE_DEFAULT_ACTION()` = `VALVE_open()`. Acá **no**, y es la decisión del 2026-08-18: mover la
-válvula al energizar son **5 s de motor en cada reset** —incluidos los diez seguidos de una sesión de
-flasheo y los espurios que meta el watchdog—. En qué condiciones conviene hacerlo es política de la
-aplicación, que sigue sin definirse.
-
-**2. El chequeo del índice de slot.** El AVR usaba `slot > MAX` (=14), que **deja pasar el 14** y
-escribe fuera del array — con un índice que viene de `atoi()` de un comando **o del servidor**, o sea
-entrada no confiable. Está corregido allá; acá nace con `>=`.
-
-### ⚠ El orden de los `strstr` de las órdenes
-
-Se buscan las `EXT_*` **primero**, por ser las más específicas. El AVR las busca al revés y se salva
-por casualidad: `EXT_V0_OPEN` no contiene `VOPEN` porque entre la `V` y la `O` hay un `0`. Es una
-coincidencia demasiado frágil para copiarla — el día que aparezca una orden nueva que contenga a otra
-como subcadena, la corta se la llevaría puesta.
-
-#### ⛔ `S0=` o `S00=`: el comentario del AVR y su código se contradicen
-
-Encontrado al revisar el parseo (2026-09-22), y **puede ser un bug vivo en el AVR de producción**:
-
-| | |
-|---|---|
-| Su **comentario** | `…&S0=LU,1230,OPEN&S1=MA,650,CLOSE&…&S13=…` — **un dígito** |
-| Su **código** | `snprintf_P( str_base, …, PSTR("S%02d"), slot )` → busca `S00`, `S01` |
-
-Si el servidor manda un dígito, **el AVR no encuentra los slots 0 a 9** y sólo configura del 10 al 13.
-
-Es exactamente el patrón que ya apareció con `CONF_COUNTERS` —el comentario mostraba cuatro campos y
-el código parseaba seis— y **ahí el comentario tenía razón**.
-
-**Acá se prueban las dos formas**, que cuesta una línea y cierra el caso sin depender de cuál de las
-dos versiones describe al servidor real.
-
-⚠ **Y eso sólo es seguro porque `prvCampo()` busca la clave CON el `=` incluido**: `S1=` no puede
-matchear dentro de `S13=`. El `strstr` del AVR no lleva `=`, y por eso allá los dos dígitos eran
-obligatorios — sin ellos, `S1` habría encontrado `S13` y tomado el slot equivocado.
-
-Verificado sin hardware con el `prvCampo()` real: **10 casos**, incluidos los tres tokens de `S1=`
-contra una respuesta que además trae `S13=`, y que `S1=` **no** aparezca en una respuesta de dos
-dígitos (para que caiga al otro formato en vez de tomar basura).
-
-#### ⛔ Los slots venían con `:` y no con `=` (banco, 2026-09-22)
-
-La respuesta real del servidor:
-
-```
-<- "<html>CLASS=CONF_FLOWC&ENABLE=FALSE&S00:--,0000,CLOSE&S01:--,0000,CLOSE&…"
-                                 ↑ con '='        ↑ con ':'
-```
-
-**El `ENABLE` viene con `=` y los slots con `:`.** Buscando `"S00="` no matchea nada, así que no se
-configuraba ningún slot.
-
-⭐ **El AVR no lo sufre justamente por lo que acá se había "mejorado"**: él busca
-`strstr(p, "S00")` **sin separador** y recién después tokeniza con `&,;:=`, así que le da igual cuál
-venga. Incluir el `=` en la búsqueda daba más precisión y costaba compatibilidad.
-
-⚠ **Criterio de Pablo**: *"El servidor debe mandar tokens similares (el mismo separador) en todas las
-configuraciones. Si no, ajusto el servidor."* — o sea que lo correcto es `=`, como en `ainputs`,
-`counter` y `modbus`.
-
-**La tolerancia a los dos se deja igual**, y no como parche sino como red: **el AVR nunca se enteró
-de la inconsistencia**, así que si hay otros lugares del servidor con `:`, nadie lo habría notado.
-`prvCampoSep()` prueba `=` y `:`, y **exige que el separador esté** — sin eso, buscar `S1`
-encontraría `S13` y tomaría el slot equivocado, que es el riesgo por el que el AVR necesita los dos
-dígitos.
-
-#### ⛔ Un slot LIBRE conserva su hora y su acción
-
-La primera versión las pisaba con `0` y `OPEN`, razonando que un slot apagado no las necesita.
-**Pero esos campos entran en el hash**: el servidor manda `S00:--,0000,CLOSE` —día inválido, pero
-acción `CLOSE`— y si acá se guardara `OPEN`, el `FH` **no cerraría nunca**.
-
-Es exactamente el modo de falla del `PST` de ainputs: *un campo que entra en el hash y que los dos
-lados no guardan igual no cierra nunca.*
-
-#### ⏳ Y lo que queda abierto: con qué número guarda el servidor el día `--`
-
-El equipo lo guarda como **8**, que es lo que hace el AVR ante cualquier string que no reconoce. Pero
-**no se sabe qué número usa el servidor** para calcular su hash: si emitiera `[SLOT00:00,…]` contra
-nuestro `[SLOT00:08,…]`, el `FH` no cerraría por más que la configuración se aplique bien.
-
-⭐ **Lo destraba el `get_flowcontrol_hash_from_config()` del servidor**, igual que el de ainputs
-cerró lo del `PST` el 2026-09-11: se corre su lógica literal contra el C compilado para el host y se
-comparan los strings, no los valores.
+1. ⛔ **El comentario del AVR y su código se contradicen en los slots.** El comentario dice
+   `S0=…,S13=…` (un dígito) y el código busca `S%02d` → `S00`. **Si el servidor manda un dígito, el
+   AVR no encuentra los slots 0 a 9.** Puede ser un bug vivo en producción. Es el mismo patrón de
+   `CONF_COUNTERS`, donde el comentario mostraba cuatro campos y el código parseaba seis — y **ahí el
+   comentario tenía razón**.
+2. ⛔ **El servidor separaba los slots con `:` y no con `=`** (`S00:--,0000,CLOSE`), mientras que el
+   `ENABLE` iba con `=`. ⚠ **Criterio de Pablo**: *"El servidor debe mandar tokens similares (el mismo
+   separador) en todas las configuraciones."* El AVR nunca se enteró de la inconsistencia porque
+   busca sin separador y después tokeniza con `&,;:=` — o sea que **si hay otros lugares del servidor
+   con `:`, nadie lo habría notado**.
+3. ⚠ **Un campo que entra en el hash y que los dos lados no guardan igual no cierra nunca.** Acá el
+   candidato era el día `--` de un slot vacío: el equipo lo guarda como `8` y no se llegó a saber qué
+   número usa el servidor. Es el modo de falla del `PST` de ainputs, y la herramienta que lo resuelve
+   es la misma: comparar **los strings** del hash, no los valores.
 
 ### ⚠ La versión sube en CADA entrega a banco
 
@@ -4264,7 +4172,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.72"        /* = VER                                 */
+#define FW_VERSION  "0.0.73"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -4290,7 +4198,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **6a** | **Modbus: el motor** (transaccion, codecs, comando) | ✅ **VALIDADO el 2026-09-21** |
 | **6b** | Modbus: el enganche al poleo de `tkSys` | ✅ **VALIDADO el 2026-09-21** |
 | **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | ✅ **VALIDADO el 2026-09-22** |
-| **7b** | `tkFlow`/flowcontrol — ⚠ **NO depende del 2b** | 🔨 **config + órdenes, sin probar**. La tabla de horarios queda para el futuro |
+| ~~7b~~ | ~~`tkFlow`/flowcontrol~~ | ⛔ **ELIMINADO el 2026-09-22**: no se usa. Quedan sólo las órdenes `VOPEN`/`VCLOSE` |
 | 8 | Watchdog cooperativo + `tkCtl` definitivo | |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo | |
 

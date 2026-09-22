@@ -5,20 +5,16 @@
  * `FWDLGX_tkFlow.c`.
  *
  * ---------------------------------------------------------------------------
- * 🔨 ALCANCE DE ESTA ETAPA (Pablo, 2026-09-22)
+ * ⛔ FLOWCONTROL SE ELIMINÓ ENTERO (2026-09-22)
  *
- * Textual: *"Con tkFlow vamos a hacer sólo configuración y luego sólo
- * implementamos las órdenes que se pueden mandar por tkWAN. No implementamos
- * ahora la apertura y cierre de acuerdo a la tabla de horarios. Queda pendiente
- * para el futuro."*
+ * Esta tarea llegó a tener un bloque de configuración con 14 slots horarios
+ * —`cfg_flowcontrol`—, su hash `FH` y su `CONF_FLOWC`. **Se borró todo** por
+ * decisión de Pablo: *"Esta es una funcionalidad que aún no la estamos usando,
+ * así que no vamos a ensuciar el firmware con features que no se usan."* El
+ * servidor se ajustó para no pedirlo.
  *
- * O sea que hoy esta tarea hace **una sola cosa**: atender las órdenes
- * `VOPEN` / `VCLOSE` que el servidor manda en la respuesta a un frame de datos.
- * La tabla semanal de `cfg_flowcontrol` **se configura y viaja en el hash, pero
- * no se ejecuta** — y `config` lo dice cada vez que la imprime, para que nadie
- * configure horarios creyendo que van a disparar.
- *
- * ⏳ El lugar donde va el servicio de la tabla está marcado en el `.c`.
+ * Lo que queda es **sólo esto**: atender las órdenes `VOPEN` / `VCLOSE` que el
+ * servidor manda en la respuesta a un frame de datos.
  *
  * ---------------------------------------------------------------------------
  * ⭐ POR QUÉ UNA TAREA Y NO UNA LLAMADA DIRECTA DESDE `tkWan`
@@ -53,9 +49,8 @@
 #define tkFlow_STACK_SIZE       384
 #define tkFlow_PRIORITY         ( tskIDLE_PRIORITY + 1 )
 
-/* ⏳ Cuando entre la tabla de horarios, este período tiene que ser **menor a
-   60 s** por la misma razón que en `tkCtlPres`: la resolución de la tabla es el
-   minuto, así que hay que muestrear al doble para no perder un slot. */
+/* Sólo es el timeout de la espera de órdenes: sin tabla de horarios no hay nada
+   periódico que hacer, y existe nada más que para poder atender un `kill`. */
 #define TKFLOW_MS_PERIODO         45000U
 
 void tkFlow( void *pvParameters );

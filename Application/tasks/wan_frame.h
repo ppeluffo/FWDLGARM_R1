@@ -200,21 +200,23 @@ bool wan_csq_valido( void );
  * El frame de CONFIGURACIÓN: manda un hash por bloque y el servidor contesta
  * cuáles quiere reconfigurar.
  *
- * ✅ **Van los SEIS hashes.** Durante un tiempo fueron cinco: faltaba el `FH`,
- * el de flowcontrol, porque ese bloque no existía en este equipo. Pablo lo
- * autorizó como situación transitoria (2026-09-11) advirtiendo la consecuencia:
- * *"el servidor tomará uno por defecto y mandará en la respuesta que debe pedir
- * reconfigurar el flowcontrol"*.
+ * ⛔ **Van CINCO hashes: el `FH` de flowcontrol NO se manda, y es deliberado.**
  *
- * ⚠ **Esa consecuencia era estructural y ahora se terminó**: con cinco hashes,
- * `CONF_ALL` **nunca** podía contestar `CONFIG=OK` y pedía `FLOWC` en todas las
- * sesiones. Con el sexto, sí puede.
+ * Ese bloque llegó a estar implementado —configuración, hash y parseo— y **se
+ * eliminó entero el 2026-09-22** por decisión de Pablo: *"Esta es una
+ * funcionalidad que aún no la estamos usando, así que no vamos a ensuciar el
+ * firmware con features que no se usan."*
  *
- * ⭐ **Pero la regla de que la FSM pase a transmitir datos aunque queden bloques
- * pedidos SIGUE VALIENDO**, y no hay que relajarla ahora que el motivo original
- * desapareció: es lo correcto ante *cualquier* bloque que no se pueda
- * configurar. Si esperara el `OK`, un solo bloque rechazado dejaría al equipo
- * sin transmitir una sola muestra.
+ * ⚠ **Y el servidor se ajustó para acompañarlo**: ya no pide `FLOWC` ni espera
+ * su hash. O sea que esto **no es la situación transitoria de antes** —donde
+ * `CONF_ALL` nunca podía cerrar porque faltaba un hash que el servidor sí
+ * esperaba—: ahora las dos puntas están de acuerdo en que son cinco.
+ *
+ * ⭐ **La regla de que la FSM pase a transmitir datos aunque queden bloques
+ * pedidos sigue valiendo igual.** Era lo correcto cuando existía el `FLOWC` que
+ * no se podía satisfacer, y lo sigue siendo ante *cualquier* bloque que falle:
+ * si esperara el `OK`, uno solo rechazado dejaría al equipo sin transmitir una
+ * muestra.
  */
 uint16_t wan_frame_conf_all( char *pcBuf, uint16_t usSize );
 
@@ -229,6 +231,9 @@ typedef struct {
     bool bCounter;
     bool bModbus;
     bool bConsigna;
+    /* ⚠ Se PARSEA aunque el bloque no exista: si un servidor viejo lo pidiera,
+       verlo en la consola explica por qué la configuración no cierra. Sin esto
+       parecería un error del equipo. */
     bool bFlowcontrol;
 } wan_conf_flags_t;
 
@@ -250,7 +255,6 @@ typedef enum {
     wanBLOQUE_COUNTER,
     wanBLOQUE_MODBUS,
     wanBLOQUE_CONSIGNA,
-    wanBLOQUE_FLOWC,
     wanBLOQUE_NRO          /* centinela: cuántos son */
 } wan_bloque_t;
 

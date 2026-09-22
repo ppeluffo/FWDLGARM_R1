@@ -3,7 +3,6 @@
  */
 
 #include "tkFlow.h"
-#include "cfg_flowcontrol.h"
 #include "drv_valvula.h"
 #include "frtos-io.h"
 
@@ -49,8 +48,7 @@ void tkFlow( void *pvParameters )
 
     vTaskDelay( pdMS_TO_TICKS( 30000 ) );
 
-    xprintf( "\r\ntkFlow arrancando (flowcontrol %s)\r\n",
-             xCfgFlow.bEnabled ? "habilitado" : "deshabilitado" );
+    xprintf( "\r\ntkFlow arrancando (valvula interna: ordenes del servidor)\r\n" );
 
     /*
      * ⛔ EL AVR ABRE LA VÁLVULA AL ARRANCAR Y ACÁ NO SE COPIA.
@@ -105,18 +103,15 @@ void tkFlow( void *pvParameters )
         }
 
         /*
-         * ⏳ ACÁ VA EL SERVICIO DE LA TABLA DE HORARIOS, cuando se implemente.
+         * ⏳ Acá iría un servicio periódico si alguna vez vuelve la tabla de
+         * horarios. Hoy no hay ninguno: la tarea **sólo espera órdenes**, y el
+         * timeout del `xTaskNotifyWait()` existe nada más que para poder
+         * atender un `kill`.
          *
-         * La forma ya está resuelta en `tkCtlPres`: leer la hora, comparar
-         * `dow*10000 + hhmm` contra cada slot por **igualdad exacta**, y después
-         * de actuar **esperar al cambio de minuto** para que la segunda muestra
-         * del mismo minuto no repita la orden.
-         *
-         * ⚠ Y hay que sumarle lo que `tkCtlPres` ya tiene y que acá va a valer
-         * igual: **con la hora no confiable no se actúa**. Tras un arranque en
-         * frío el RTC da `2001-01-01 00:xx`, y ese `hhmm` puede coincidir con un
-         * slot por casualidad — cerrar la válvula a la hora equivocada es peor
-         * que no cerrarla.
+         * Si vuelve, la forma ya está resuelta en `tkCtlPres`: igualdad exacta
+         * de la hora, espera al cambio de minuto después de actuar, y **no
+         * actuar con la hora no confiable** — tras un arranque en frío el RTC da
+         * `2001-01-01 00:xx` y eso puede coincidir con un slot por casualidad.
          */
     }
 }

@@ -177,12 +177,12 @@ uint16_t wan_frame_conf_all( char *pcBuf, uint16_t usSize )
 
     prvUidStr( pcUid, sizeof( pcUid ) );
 
-    /* Los SEIS hashes. El `FH` de flowcontrol entró el 2026-09-22 y con eso
-       `CONF_ALL` ya puede cerrar — ver wan_frame.h. */
+    /* ⛔ CINCO hashes: el `FH` de flowcontrol NO va, y el servidor tampoco lo
+       espera desde el 2026-09-22. Ver wan_frame.h. */
     int iN = snprintf( pcBuf, usSize,
                        "ID=%s&HW=%s&TYPE=%s&VER=%s&CLASS=CONF_ALL"
                        "&UID=%s&ICCID=%s&CSQ=%u&WDG=%u"
-                       "&BH=0x%02X&AH=0x%02X&CH=0x%02X&MH=0x%02X&PH=0x%02X&FH=0x%02X",
+                       "&BH=0x%02X&AH=0x%02X&CH=0x%02X&MH=0x%02X&PH=0x%02X",
                        wan_imei(), FW_HW, FW_TYPE, FW_VERSION,
                        pcUid, wan_iccid(),
                        ( unsigned ) wan_csq(),
@@ -191,8 +191,7 @@ uint16_t wan_frame_conf_all( char *pcBuf, uint16_t usSize )
                        ( unsigned ) cfg_ainputs_hash(),
                        ( unsigned ) cfg_counter_hash(),
                        ( unsigned ) cfg_modbus_hash(),
-                       ( unsigned ) cfg_consigna_hash(),
-                       ( unsigned ) cfg_flowcontrol_hash() );
+                       ( unsigned ) cfg_consigna_hash() );
 
     if( ( iN < 0 ) || ( ( uint16_t ) iN >= usSize ) )
     {
@@ -436,55 +435,6 @@ static bool prvEsDelim( char cCh )
  * Devuelve false si la clave no está o el token está vacío — y en los dos casos
  * el campo se deja como estaba, que es lo correcto: el servidor no lo mandó.
  */
-static bool prvCampo( const char *pcRta, const char *pcClave, uint8_t ucToken,
-                      char *pcVal, uint16_t usSize );
-//------------------------------------------------------------------------------
-/*
- * ⛔ COMO `prvCampo()` PERO CON LA CLAVE **SIN SEPARADOR**, y existe por una
- * razón concreta que apareció en banco el 2026-09-22.
- *
- * El servidor separa los slots del flowcontrol con **dos puntos**, no con `=`:
- *
- *     CLASS=CONF_FLOWC&ENABLE=FALSE&S00:--,0000,CLOSE&S01:--,0000,CLOSE&…
- *                             ↑ con '='        ↑ con ':'
- *
- * Buscar `"S00="` no matchea nada, y los slots quedaban sin configurar.
- *
- * ⭐ **El AVR no lo sufre justamente por lo que acá se había "mejorado"**: él
- * busca `strstr(p, "S00")` sin separador y recién después tokeniza con
- * `&,;:=`, así que le da igual cuál venga. Incluir el `=` en la búsqueda daba
- * más precisión y costaba compatibilidad.
- *
- * ⚠ La precisión no se regala: acá se **exige que el carácter siguiente a la
- * clave sea un separador** (`=` o `:`). Sin eso, buscar `S1` encontraría `S13` y
- * tomaría el slot equivocado — que es exactamente el riesgo por el que el AVR
- * necesita los dos dígitos.
- */
-static bool prvCampoSep( const char *pcRta, const char *pcClave, uint8_t ucToken,
-                         char *pcVal, uint16_t usSize )
-{
-    char        pcConSep[ 12 ];
-    const char *pcSeps = "=:";
-    uint8_t     i;
-
-    if( ( pcClave == NULL ) || ( strlen( pcClave ) >= ( sizeof( pcConSep ) - 1U ) ) )
-    {
-        return false;
-    }
-
-    for( i = 0U; pcSeps[ i ] != '\0'; i++ )
-    {
-        snprintf( pcConSep, sizeof( pcConSep ), "%s%c", pcClave, pcSeps[ i ] );
-
-        if( prvCampo( pcRta, pcConSep, ucToken, pcVal, usSize ) )
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-//------------------------------------------------------------------------------
 static bool prvCampo( const char *pcRta, const char *pcClave, uint8_t ucToken,
                       char *pcVal, uint16_t usSize )
 {
@@ -898,83 +848,6 @@ typedef struct {
     wan_conf_rta_t (*pfAplicar)( const char *pcRta );
 } wan_bloque_desc_t;
 
-/*
- * `CLASS=CONF_FLOWCONTROL&ENABLE=TRUE&S0=LU,1230,OPEN&S1=MA,650,CLOSE&…&S13=…`
- *
- * ⚠ **Un slot que no venga se deja como está**, igual que en los otros bloques:
- * el servidor manda sólo los que quiere cambiar.
- *
- * ⚠ Y **un slot con un día que no se reconoce queda LIBRE**, que es como el AVR
- * desactiva uno — no hay una orden de "borrar slot", se manda cualquier cosa en
- * el día.
- */
-static wan_conf_rta_t prvAplicarFlowc( const char *pcRta )
-{
-    char    pcEnable[ 8 ];
-    char    pcClave [ 8 ];
-    char    pcDow   [ 8 ];
-    char    pcPtime [ 8 ];
-    char    pcAccion[ 8 ];
-    uint8_t i;
-    bool    bAlgo = false;
-
-    if( prvCampo( pcRta, "ENABLE=", 0U, pcEnable, sizeof( pcEnable ) ) )
-    {
-        if( cfg_flowcontrol_set_enable( pcEnable ) )
-        {
-            xprintf( "WAN:: reconfig FLOWCONTROL enable=%s\r\n", pcEnable );
-            bAlgo = true;
-        }
-    }
-
-    for( i = 0U; i < CFG_FLOW_NRO_SLOTS; i++ )
-    {
-        /*
-         * ⛔ SE ACEPTAN LAS DOS FORMAS, `S00=` y `S0=`, y no es exceso de celo:
-         * **el comentario del AVR y su código se contradicen**.
-         *
-         *   el comentario:  `…&S0=LU,1230,OPEN&S1=MA,650,CLOSE&…&S13=…`
-         *   el código:      `snprintf_P( str_base, …, PSTR("S%02d"), slot )`
-         *
-         * O sea que si el servidor manda un dígito, **el AVR no encuentra los
-         * slots 0 a 9** y sólo configura del 10 al 13. Es el mismo patrón que ya
-         * apareció con `CONF_COUNTERS`, donde el comentario mostraba cuatro
-         * campos y el código parseaba seis — y ahí **el comentario tenía razón**.
-         *
-         * Probar las dos cuesta una línea y cierra el caso sin depender de cuál
-         * de las dos versiones describe al servidor real.
-         *
-         * ⚠ Esto sólo es seguro porque `prvCampo()` busca la clave **con el `=`
-         * incluido**: `S1=` no puede matchear dentro de `S13=`. El `strstr` del
-         * AVR no lleva `=`, y por eso allá los dos dígitos eran obligatorios.
-         */
-        snprintf( pcClave, sizeof( pcClave ), "S%02u", ( unsigned ) i );
-
-        if( !prvCampoSep( pcRta, pcClave, 0U, pcDow, sizeof( pcDow ) ) )
-        {
-            snprintf( pcClave, sizeof( pcClave ), "S%u", ( unsigned ) i );
-
-            if( !prvCampoSep( pcRta, pcClave, 0U, pcDow, sizeof( pcDow ) ) )
-            {
-                continue;   /* este slot no vino: se deja como está */
-            }
-        }
-
-        /* `pcClave` quedó con la forma que SÍ matcheó, así que los otros dos
-           tokens salen del mismo slot y no de otro. */
-        ( void ) prvCampoSep( pcRta, pcClave, 1U, pcPtime,  sizeof( pcPtime  ) );
-        ( void ) prvCampoSep( pcRta, pcClave, 2U, pcAccion, sizeof( pcAccion ) );
-
-        if( cfg_flowcontrol_set_slot( i, pcDow, pcPtime, pcAccion ) )
-        {
-            xprintf( "WAN:: reconfig FLOWC s%02u: %s,%s,%s\r\n", ( unsigned ) i,
-                     pcDow, pcPtime, pcAccion );
-            bAlgo = true;
-        }
-    }
-
-    return bAlgo ? wanCONF_RECONFIGURAR : wanCONF_SIN_RESPUESTA;
-}
 //------------------------------------------------------------------------------
 static const wan_bloque_desc_t xBloques[ wanBLOQUE_NRO ] = {
     [ wanBLOQUE_BASE     ] = { "CONF_BASE",     cfg_base_hash,     prvAplicarBase     },
@@ -982,9 +855,6 @@ static const wan_bloque_desc_t xBloques[ wanBLOQUE_NRO ] = {
     [ wanBLOQUE_COUNTER  ] = { "CONF_COUNTERS", cfg_counter_hash,  prvAplicarCounter  },
     [ wanBLOQUE_MODBUS   ] = { "CONF_MODBUS",   cfg_modbus_hash,   prvAplicarModbus   },
     [ wanBLOQUE_CONSIGNA ] = { "CONF_CONSIGNA", cfg_consigna_hash, prvAplicarConsigna },
-    /* ⚠ El frame que se MANDA dice `CONF_FLOWC` y la respuesta viene como
-       `CONF_FLOWCONTROL`. La asimetría es del AVR y es el contrato. */
-    [ wanBLOQUE_FLOWC    ] = { "CONF_FLOWC",    cfg_flowcontrol_hash, prvAplicarFlowc },
 };
 
 //------------------------------------------------------------------------------
@@ -1002,7 +872,6 @@ bool wan_conf_pedido( const wan_conf_flags_t *pxFlags, wan_bloque_t eBloque )
 
     switch( eBloque )
     {
-        case wanBLOQUE_FLOWC:    return pxFlags->bFlowcontrol;
         case wanBLOQUE_BASE:     return pxFlags->bBase;
         case wanBLOQUE_AINPUTS:  return pxFlags->bAinputs;
         case wanBLOQUE_COUNTER:  return pxFlags->bCounter;
