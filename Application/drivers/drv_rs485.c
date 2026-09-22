@@ -3,6 +3,7 @@
  */
 
 #include "drv_rs485.h"
+#include "semphr.h"
 #include "drv_uart.h"
 #include "pwr_lock.h"
 #include "main.h"
@@ -58,6 +59,13 @@ static void prvPinesBus( bool bActivos )
 }
 
 //------------------------------------------------------------------------------
+/*
+ * El mutex del bus. **Estático**, como todo lo demás de este firmware: no toca
+ * el heap y existe desde antes del scheduler.
+ */
+static StaticSemaphore_t xBusMutexBuf;
+static SemaphoreHandle_t xBusMutex = NULL;
+
 bool drv_rs485_init( void )
 {
     /* Explícito aunque los pull-down de 100 K ya los dejan apagados: el firmware
@@ -67,7 +75,29 @@ bool drv_rs485_init( void )
         drv_rs485_power( ( rs485_rail_t ) i, false );
     }
 
-    return true;
+    xBusMutex = xSemaphoreCreateMutexStatic( &xBusMutexBuf );
+
+    return ( xBusMutex != NULL );
+}
+//------------------------------------------------------------------------------
+bool drv_rs485_tomar_bus( TickType_t xTicksToWait )
+{
+    if( xBusMutex == NULL )
+    {
+        /* Antes de `drv_rs485_init()` no hay con qué serializar, pero tampoco hay
+           dos tareas: no bloquear es lo correcto y no esconde nada. */
+        return true;
+    }
+
+    return ( xSemaphoreTake( xBusMutex, xTicksToWait ) == pdTRUE );
+}
+//------------------------------------------------------------------------------
+void drv_rs485_soltar_bus( void )
+{
+    if( xBusMutex != NULL )
+    {
+        ( void ) xSemaphoreGive( xBusMutex );
+    }
 }
 //------------------------------------------------------------------------------
 void drv_rs485_power( rs485_rail_t eRail, bool bOn )

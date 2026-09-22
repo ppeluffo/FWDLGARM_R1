@@ -3681,6 +3681,143 @@ el `head` sobra.
 De paso, el bloque que quedó se movió **después del contador**, para que la consola y el frame se
 lean en el mismo orden.
 
+## 🔨 Paso 7: la doble consigna del control de presión
+
+`Application/drivers/drv_cpres.{h,c}` (el diálogo) y `Application/tasks/tkCtlPres.{h,c}` (cuándo),
+más el comando `cpres`. Portado de `ULIBS/cpres.c` + `XLIBS/consignas.c` + `FWDLGX_tkCtlPres.c`.
+
+Es un dispositivo Modbus en el RS485, esclavo **`0x64`** fijo, registro **1**, alimentado por
+`EN_PWR_CPRES` (PB15). **Por eso el paso 6 iba antes**: sin el motor Modbus esto no se puede hacer.
+
+### ⭐ Una consigna no es una escritura: es una SECUENCIA que tarda
+
+El dato que lo explica lo dio Pablo (**2026-09-22**) y no está en el código del AVR: **las
+electroválvulas se mueven de a una, por consumo**, nunca a la vez. O sea que el FC06 sólo *arranca*
+el trabajo; el dispositivo después se toma su tiempo.
+
+Por eso el registro tiene el **bit 7 = RUN**, y por eso el diálogo son tres pasos donde ninguno
+sobra:
+
+1. leer el status y **esperar IDLE** — con el dispositivo trabajando, una orden nueva pisaría la
+   anterior;
+2. escribir el comando (FC06);
+3. esperar y **releer hasta IDLE** — recién ahí la consigna se aplicó.
+
+**Una consigna completa tarda 30 a 45 s.** Durante casi todo ese tiempo el micro **duerme**: lo único
+encendido es un GPIO, que sobrevive al Stop 2 — el mismo razonamiento del INA3221 y la válvula TOYI.
+
+### ⛔ El dispositivo NO recuerda dónde quedaron las válvulas
+
+Dato de Pablo (2026-09-22): **al perder alimentación olvida la posición**; la sabe recién después de
+una orden. Y eso explica un valor del status que parecía un caso raro: los bits de posición admiten
+`2` y `3` = *desconocido*, y **ése es el estado normal cada vez que se lo enciende**.
+
+⚠ **La posición FÍSICA sí sobrevive** —las válvulas quedan donde las dejaron, confirmado por Pablo—
+así que lo que se pierde es *quién lo sabe*, no el estado del proceso. Tres consecuencias:
+
+- **La posición leída no sirve como fuente de verdad**: el driver la informa para diagnóstico y nada
+  más.
+- **La orden es siempre absoluta**, nunca diferencial.
+- **El único que podría saber qué consigna está aplicada es el datalogger.**
+
+#### ⛔ Y por eso NO se guarda la consigna aplicada, aunque se podría
+
+Se evaluó ponerla en la SRAM del MCP79410 —que sobrevive al reset— para ahorrarse el movimiento del
+arranque. **Se descartó, y el argumento es el que importa:**
+
+| | |
+|---|---|
+| Si el datalogger **recuerda** y recuerda **mal** —alguien movió las válvulas a mano, la pila falló— | **no lo corrige nunca**: queda con la consigna equivocada indefinidamente |
+| Si **aplica siempre al arrancar** | es **autocorrectivo**: si estaba bien el movimiento es redundante, y si estaba mal lo arregla |
+
+Con un dispositivo que no puede informar su estado, esa propiedad vale más que el movimiento que se
+ahorra. **El AVR tiene razón y se copia tal cual.**
+
+⚠ Lo que ningún diseño resuelve acá: si alguien mueve las válvulas a mano, el datalogger no se entera
+hasta la próxima consigna.
+
+### ⭐ Por qué 45 segundos: es muestreo al DOBLE de la resolución
+
+La explicación es de Pablo y el número no es arbitrario. La configuración tiene resolución de **un
+minuto**, así que muestreando cada 45 s **siempre caen una o dos muestras dentro de la ventana**:
+*"La prioridad es que se ejecute la consigna si está configurada; que no se pierda."*
+
+Por eso la comparación es de **igualdad exacta** de `hhmm` y no hace falta ninguna ventana, ni
+recordar "ya se aplicó hoy", ni ningún estado.
+
+⚠ **Y por eso hay que esperar al cambio de minuto después de ejecutar.** Si caen dos muestras en el
+mismo minuto, la segunda volvería a mandar la orden. **El AVR se salva por accidente**: la consigna
+tarda 30-45 s, así que el chequeo siguiente cae inevitablemente en otro minuto. Acá es **explícito**
+(`prvEsperarCambioDeMinuto()`), porque depender de cuánto tarde el dispositivo es depender de un
+número que no controlamos y que otro equipo podría bajar.
+
+⭐ **El resultado es que el período se autoajusta**: cuando no hay nada que hacer muestrea rápido y no
+pierde; cuando ejecuta, se sale del minuto y no repite.
+
+ℹ️ **De paso, una preocupación mía que no era**: propuse cambiar la igualdad exacta por una ventana
+—"¿qué consigna corresponde ahora?"— para no perder la consigna si se saltaba una vuelta. Pablo lo
+desarmó con dos preguntas: con el tick a 512 Hz que esta tarea no corra en 45 s no es realista, y
+**la ventana introducía un problema nuevo** —la condición seguiría siendo cierta las doce horas, así
+que ante un dispositivo mudo reintentaría cada 45 s—. El diseño del AVR ya estaba bien.
+
+### ⚠ El mutex del bus RS485 pasa a ser obligatorio
+
+`tkSys` polea Modbus y `tkCtlPres` habla con el control de presión **por el mismo transceiver**.
+Hasta ahora `drv_rs485` no tenía exclusión porque había un solo usuario; el AVR sí la tiene
+(`sem_RS485`).
+
+Sin ella, una consigna que caiga en medio de un poleo **intercala tramas**. Los CRC las descartan
+—así que no hay datos falsos, que es lo importante— pero **los dos lados fallan sin entender por
+qué** y el poleo pierde canales.
+
+⚠ **Protege la SESIÓN, no la transacción.** Ponerlo adentro de `drv_modbus` no alcanzaría: cada
+transacción quedaría atómica, pero una tarea podría **apagar el riel** mientras la otra está en medio
+de su diálogo. Y el handshake del control de presión sólo tiene sentido si nadie se mete entre sus
+tres pasos.
+
+Los dos lados lo piden distinto, y la diferencia es deliberada:
+
+| Quién | Espera | Por qué |
+|---|---|---|
+| `tkCtlPres` | **`portMAX_DELAY`** | perder la vuelta sería **perder la consigna** justo en el minuto en que había que aplicarla. Es el `rs485_ENTER_CRITICAL()` del AVR |
+| `tkSys` | 60 s, y si no lo consigue **saltea el poleo** marcando los canales inválidos | mejor perder un poleo de Modbus que colgar a la tarea que además mide las analógicas, el RTC y guarda el registro |
+
+### ⛔ Con la hora no confiable NO se aplica ninguna consigna
+
+Diferencia deliberada con el AVR, que no lo chequea. Tras un arranque en frío el MCP79410 devuelve
+`2001-01-01 00:xx`, y ese `hhmm` puede coincidir con una consigna configurada **por casualidad**.
+
+**Aplicar la consigna nocturna a las diez de la mañana es peor que no aplicar nada**: el equipo de
+presión queda operando mal y nadie se entera. Se usa el mismo chequeo que `tkSys` —la firma de la
+SRAM más el año de compilación—.
+
+⚠ El costo es que tras un arranque en frío la consigna queda sin aplicar **hasta que el reloj se
+ponga en hora**, lo que pasa en la primera sesión con el `AT+CCLK?` del módulo o el `CLOCK=` del
+servidor.
+
+### El comando `cpres`
+
+```
+cpres                     configuracion, riel y estado de la tarea
+cpres status              lee el registro del dispositivo
+cpres diurna | nocturna   aplica una consigna
+cpres open|close v0|v1    mueve una valvula externa
+```
+
+⚠ **`cpres status` es la única forma de ver el registro sin mandar una orden**, y sirve para medir
+cuánto tarda de verdad el dispositivo: leerlo antes y después de una orden acota los tiempos que hoy
+son los del AVR y están **sin verificar**.
+
+⚠ Los comandos **no pasan por `tkCtlPres`**: si la tarea está viva puede aplicar una consigna en el
+medio. Para trabajar tranquilo, **`kill cpres`** — mismo criterio que `kill wan`.
+
+### ⏳ Lo que este paso NO incluye todavía
+
+Las órdenes **`VOPEN`/`VCLOSE`/`EXT_V0/V1_*`** que el servidor manda en la respuesta a un frame de
+datos. La infraestructura está —`tkCtlPres_orden()` las recibe por notificación, que es lo que hace
+el AVR para que `tkWan` no se bloquee 45 s en medio de una sesión— pero **falta parsearlas en
+`wan_frame`**. Entran después de validar la consigna, que es lo que se puede probar hoy.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3699,7 +3836,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.62"        /* = VER                                 */
+#define FW_VERSION  "0.0.63"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -3724,7 +3861,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5d** | **`tkWan`: la FSM. El equipo transmite solo** | ✅ **VALIDADO el 2026-09-21** |
 | **6a** | **Modbus: el motor** (transaccion, codecs, comando) | ✅ **VALIDADO el 2026-09-21** |
 | **6b** | Modbus: el enganche al poleo de `tkSys` | ✅ **VALIDADO el 2026-09-21** |
-| 7 | Consigna (`tkCtlPres`) — ⚠ **es Modbus**: depende del 6a | |
+| **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | 🔨 **escrito, sin probar** |
 | 7b | ⏳ **`tkFlow`/flowcontrol** — volvió al alcance el 2026-09-12; necesita el 2b | |
 | 8 | Watchdog cooperativo + `tkCtl` definitivo | |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo | |

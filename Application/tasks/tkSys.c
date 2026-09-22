@@ -188,6 +188,34 @@ static void prvPolearModbus( dataRcd_t *pxDr )
         return;
     }
 
+    /*
+     * ⚠ El BUS es compartido con `tkCtlPres`, que le habla al control de presión
+     * por el mismo transceiver. Se toma antes de encenderlo y se suelta al
+     * final: si el otro está en medio de una consigna, acá se espera.
+     *
+     * El timeout es generoso pero finito: una consigna completa son 30-45 s. Si
+     * ni así se libera, hay algo trabado y **es mejor perder este poleo de
+     * Modbus que colgar a `tkSys`**, que además mide las analógicas, el RTC y
+     * guarda el registro.
+     */
+    if( !drv_rs485_tomar_bus( pdMS_TO_TICKS( 60000 ) ) )
+    {
+        uint8_t j;
+
+        xprintf( "MODBUS:: el bus RS485 esta ocupado: se saltea el poleo\r\n" );
+
+        for( j = 0U; j < CFG_MODBUS_NRO_CANALES; j++ )
+        {
+            if( xCfgModbus.xCanal[ j ].bEnabled )
+            {
+                pxDr->usInvalidos |= ( uint16_t ) ( dataINVALIDO_MODBUS0 << j );
+            }
+        }
+
+        drv_rs485_power( rs485RAIL_QMBUS, false );
+        return;
+    }
+
     /* El transceiver se prende recién ahora: está listo en microsegundos y
        mientras tanto no tiene sentido tenerlo consumiendo. Prenderlo toma
        `pwrLOCK_RS485`, que es lo que evita que el tickless se coma bytes de las
@@ -250,6 +278,8 @@ static void prvPolearModbus( dataRcd_t *pxDr )
     {
         drv_rs485_power( rs485RAIL_QMBUS, false );
     }
+
+    drv_rs485_soltar_bus();
 }
 //------------------------------------------------------------------------------
 bool tkSys_poll( dataRcd_t *pxDr )

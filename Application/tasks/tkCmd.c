@@ -13,6 +13,8 @@
 #include "drv_rtc79410.h"
 #include "drv_rs485.h"
 #include "drv_modbus.h"
+#include "drv_cpres.h"
+#include "tkCtlPres.h"
 #include "modbus.h"
 #include "drv_ina3221.h"
 #include "drv_sd.h"
@@ -296,6 +298,7 @@ static void cmdEe( void );
 static void cmdRtc( void );
 static void cmdRs485( void );
 static void cmdModbus( void );
+static void cmdCpres( void );
 static void cmdIna( void );
 static void cmdSd( void );
 static void cmdVin( void );
@@ -318,6 +321,7 @@ static void prvEeUso   ( void );
 static void prvRtcUso  ( void );
 static void prvRs485Uso( void );
 static void prvModbusUso( void );
+static void prvCpresUso( void );
 static void prvInaUso  ( void );
 static void prvSdUso   ( void );
 static void prvVinUso  ( void );
@@ -472,6 +476,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "rtc",    cmdRtc    );
     FRTOS_CMD_register( "rs485",  cmdRs485  );
     FRTOS_CMD_register( "modbus", cmdModbus );
+    FRTOS_CMD_register( "cpres",  cmdCpres  );
     FRTOS_CMD_register( "ina",    cmdIna    );
     FRTOS_CMD_register( "sd",     cmdSd     );
     FRTOS_CMD_register( "vin",    cmdVin    );
@@ -674,6 +679,13 @@ static void cmdStatus( void )
         xprintf( "  tkWan : %4u de %u   (estado: %s)\r\n",
                  ( unsigned ) uxTaskGetStackHighWaterMark( xHandle_tkWan ), tkWan_STACK_SIZE,
                  wan_estado_str() );
+    }
+
+    if( xHandle_tkCtlPres != NULL )
+    {
+        xprintf( "  tkCPres: %4u de %u\r\n",
+                 ( unsigned ) uxTaskGetStackHighWaterMark( xHandle_tkCtlPres ),
+                 tkCtlPres_STACK_SIZE );
     }
 }
 //------------------------------------------------------------------------------
@@ -3089,6 +3101,7 @@ static void prvKillUso( void )
 {
     xprintf( "  kill wan     mata tkWan: deja el modem libre para 'lte ...'\r\n" );
     xprintf( "  kill sys     mata tkSys: deja de polear y de escribir la ventana\r\n" );
+    xprintf( "  kill cpres   mata tkCtlPres: deja libre el control de presion\r\n" );
     xprintf( "\r\n" );
     xprintf( "  NO hay forma de revivir una tarea, y es a proposito: despues de\r\n" );
     xprintf( "  trabajar a mano se hace 'reset' y el equipo arranca limpio.\r\n" );
@@ -3131,6 +3144,20 @@ static void cmdKill( void )
         xprintf( "tkWan esta en %s; kill pedido, se mata en su proxima vuelta.\r\n",
                  wan_estado_str() );
         wan_pedir_kill();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "cpres" ) == 0 )
+    {
+        if( tkCtlPres_matada() )
+        {
+            xprintf( "tkCtlPres ya estaba matada\r\n" );
+            return;
+        }
+
+        xprintf( "kill pedido: tkCtlPres se mata en su proxima vuelta (hasta 45 s).\r\n" );
+        xprintf( "Si esta en medio de una consigna, termina primero.\r\n" );
+        tkCtlPres_pedir_kill();
         return;
     }
 
@@ -4055,4 +4082,145 @@ static void cmdModbus( void )
     }
 
     prvModbusUso();
+}
+//------------------------------------------------------------------------------
+static void prvCpresUso( void )
+{
+    xprintf( "cpres                     estado: configuracion y riel\r\n" );
+    xprintf( "cpres status              lee el registro del dispositivo\r\n" );
+    xprintf( "cpres diurna              aplica la consigna DIURNA\r\n" );
+    xprintf( "cpres nocturna            aplica la consigna NOCTURNA\r\n" );
+    xprintf( "cpres open  v0 | v1       abre una valvula externa\r\n" );
+    xprintf( "cpres close v0 | v1       la cierra\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "⚠ cada orden tarda 30-45 s: el dispositivo mueve las electrovalvulas\r\n" );
+    xprintf( "  de a una por consumo, y hay que esperar a que termine.\r\n" );
+    xprintf( "⚠ estos comandos NO pasan por tkCtlPres: si la tarea esta viva puede\r\n" );
+    xprintf( "  aplicar una consigna en el medio. Para trabajar tranquilo: kill cpres\r\n" );
+}
+//------------------------------------------------------------------------------
+/*
+ * Lee el status con el riel encendido. Es la única forma de ver el registro sin
+ * mandar una orden — y sirve para medir cuánto tarda de verdad el dispositivo.
+ */
+static void prvCpresStatus( void )
+{
+    uint16_t    usStatus = 0U;
+    mb_result_t eRes;
+
+    if( !drv_rs485_tomar_bus( pdMS_TO_TICKS( 60000 ) ) )
+    {
+        xprintf( "el bus RS485 esta ocupado\r\n" );
+        return;
+    }
+
+    drv_rs485_power( rs485RAIL_CPRES, true );
+    drv_rs485_power( rs485RAIL_BUS,   true );
+    vTaskDelay( pdMS_TO_TICKS( DRV_CPRES_MS_ARRANQUE ) );
+
+    eRes = drv_cpres_leer_status( &usStatus );
+
+    if( eRes == mbOK )
+    {
+        xprintf( "status = 0x%02X: %s\r\n", ( unsigned ) usStatus,
+                 drv_cpres_status_idle( usStatus ) ? "IDLE" : "TRABAJANDO" );
+        xprintf( "  V0: %s\r\n", drv_cpres_status_v0( usStatus ) );
+        xprintf( "  V1: %s\r\n", drv_cpres_status_v1( usStatus ) );
+        xprintf( "\r\n" );
+        xprintf( "⚠ la posicion es SOLO diagnostico: el dispositivo la olvida al\r\n" );
+        xprintf( "  quedarse sin alimentacion, asi que recien encendido dice\r\n" );
+        xprintf( "  'desconocida' hasta que reciba una orden.\r\n" );
+    }
+    else
+    {
+        xprintf( "ERROR: %s", drv_modbus_error_str( eRes ) );
+
+        if( eRes == mbEXCEPCION )
+        {
+            xprintf( " (codigo %u)", ( unsigned ) drv_modbus_ultima_excepcion() );
+        }
+
+        xprintf( "\r\n" );
+    }
+
+    drv_rs485_power( rs485RAIL_BUS,   false );
+    drv_rs485_power( rs485RAIL_CPRES, false );
+    drv_rs485_soltar_bus();
+}
+//------------------------------------------------------------------------------
+static void prvCpresOrden( cpres_cmd_t eCmd )
+{
+    if( !drv_rs485_tomar_bus( pdMS_TO_TICKS( 60000 ) ) )
+    {
+        xprintf( "el bus RS485 esta ocupado\r\n" );
+        return;
+    }
+
+    ( void ) drv_cpres_comando( eCmd );
+
+    drv_rs485_soltar_bus();
+}
+//------------------------------------------------------------------------------
+static void cmdCpres( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        xprintf( "consignas    : %s\r\n",
+                 xCfgConsigna.bEnabled ? "HABILITADAS" : "deshabilitadas" );
+        xprintf( "  diurna     : %04d\r\n",   ( int ) xCfgConsigna.usDiurna );
+        xprintf( "  nocturna   : %04d\r\n",   ( int ) xCfgConsigna.usNocturna );
+        xprintf( "riel cpres   : %s\r\n",
+                 drv_rs485_power_estado( rs485RAIL_CPRES ) ? "ENCENDIDO" : "apagado" );
+        xprintf( "esclavo      : 0x%02X, registro %u\r\n",
+                 ( unsigned ) DRV_CPRES_SLAVE, ( unsigned ) DRV_CPRES_REG );
+        xprintf( "tarea        : %s\r\n",
+                 tkCtlPres_matada() ? "MATADA" : "viva (chequea cada 45 s)" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "status" ) == 0 )
+    {
+        prvCpresStatus();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "diurna" ) == 0 )
+    {
+        prvCpresOrden( cpresCMD_CONSIGNA_DIURNA );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "nocturna" ) == 0 )
+    {
+        prvCpresOrden( cpresCMD_CONSIGNA_NOCTURNA );
+        return;
+    }
+
+    bool bOpen  = ( strcmp( argv[ 1 ], "open"  ) == 0 );
+    bool bClose = ( strcmp( argv[ 1 ], "close" ) == 0 );
+
+    if( bOpen || bClose )
+    {
+        if( ( ucArgs < 2U ) || ( argv[ 2 ] == NULL ) )
+        {
+            prvCpresUso();
+            return;
+        }
+
+        if( strcmp( argv[ 2 ], "v0" ) == 0 )
+        {
+            prvCpresOrden( bOpen ? cpresCMD_ABRIR_V0 : cpresCMD_CERRAR_V0 );
+            return;
+        }
+
+        if( strcmp( argv[ 2 ], "v1" ) == 0 )
+        {
+            prvCpresOrden( bOpen ? cpresCMD_ABRIR_V1 : cpresCMD_CERRAR_V1 );
+            return;
+        }
+    }
+
+    prvCpresUso();
 }

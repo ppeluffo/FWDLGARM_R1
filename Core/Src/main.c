@@ -29,6 +29,7 @@
 #include "tkCmd.h"
 #include "tkSys.h"
 #include "tkWan.h"
+#include "tkCtlPres.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -467,6 +468,21 @@ int main(void)
                                      tkWan_Stack,
                                      &tkWan_TCB );
   if ( xHandle_tkWan == NULL )
+  {
+    Error_Handler();
+  }
+
+  /* La doble consigna del control de presion. Arranca aunque este deshabilitada:
+     asi se la puede habilitar desde la consola sin reiniciar, y el comando
+     'cpres' funciona igual para probar el dispositivo a mano. */
+  xHandle_tkCtlPres = xTaskCreateStatic( tkCtlPres,
+                                         "CPRES",
+                                         tkCtlPres_STACK_SIZE,
+                                         NULL,
+                                         tkCtlPres_PRIORITY,
+                                         tkCtlPres_Stack,
+                                         &tkCtlPres_TCB );
+  if ( xHandle_tkCtlPres == NULL )
   {
     Error_Handler();
   }

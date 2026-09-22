@@ -63,6 +63,31 @@ typedef enum {
    después de drv_uart_init(), que es quien crea los semáforos. */
 bool drv_rs485_init( void );
 
+/*------------------------------------------------------------------------------
+ * ⭐ EL BUS ES DE UN SOLO DUEÑO POR VEZ
+ *
+ * Dos tareas lo usan: `tkSys` para polear los canales Modbus y `tkCtlPres` para
+ * hablarle al control de presión. **Por el mismo transceiver.**
+ *
+ * Sin exclusión, una consigna que caiga en medio de un poleo intercala tramas.
+ * Los CRC las descartan —así que no hay datos falsos, que es lo importante— pero
+ * **los dos lados fallan sin entender por qué** y el poleo pierde canales. El
+ * AVR tiene lo mismo (`rs485_ENTER_CRITICAL()`).
+ *
+ * ⚠ **Protege la SESIÓN completa, no la transacción.** Poner el mutex adentro de
+ * `drv_modbus` no alcanzaría: cada transacción quedaría atómica, pero una tarea
+ * podría **apagar el riel** mientras la otra está en medio de su diálogo. Y el
+ * handshake del control de presión —leer status, escribir, releer status— sólo
+ * tiene sentido si nadie se mete entre esos tres pasos.
+ *
+ * `xTicksToWait` puede ser `portMAX_DELAY`, y para la consigna **tiene que
+ * serlo**: si se pidiera con un timeout corto y se perdiera la vuelta, la
+ * consigna se saltearía justo el minuto en que había que aplicarla. Ver
+ * `tkCtlPres.h`.
+ *----------------------------------------------------------------------------*/
+bool drv_rs485_tomar_bus ( TickType_t xTicksToWait );
+void drv_rs485_soltar_bus( void );
+
 /*
  * Prende o apaga un riel.
  *
