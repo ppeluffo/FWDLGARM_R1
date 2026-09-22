@@ -4176,6 +4176,31 @@ por casualidad: `EXT_V0_OPEN` no contiene `VOPEN` porque entre la `V` y la `O` h
 coincidencia demasiado frágil para copiarla — el día que aparezca una orden nueva que contenga a otra
 como subcadena, la corta se la llevaría puesta.
 
+#### ⛔ `S0=` o `S00=`: el comentario del AVR y su código se contradicen
+
+Encontrado al revisar el parseo (2026-09-22), y **puede ser un bug vivo en el AVR de producción**:
+
+| | |
+|---|---|
+| Su **comentario** | `…&S0=LU,1230,OPEN&S1=MA,650,CLOSE&…&S13=…` — **un dígito** |
+| Su **código** | `snprintf_P( str_base, …, PSTR("S%02d"), slot )` → busca `S00`, `S01` |
+
+Si el servidor manda un dígito, **el AVR no encuentra los slots 0 a 9** y sólo configura del 10 al 13.
+
+Es exactamente el patrón que ya apareció con `CONF_COUNTERS` —el comentario mostraba cuatro campos y
+el código parseaba seis— y **ahí el comentario tenía razón**.
+
+**Acá se prueban las dos formas**, que cuesta una línea y cierra el caso sin depender de cuál de las
+dos versiones describe al servidor real.
+
+⚠ **Y eso sólo es seguro porque `prvCampo()` busca la clave CON el `=` incluido**: `S1=` no puede
+matchear dentro de `S13=`. El `strstr` del AVR no lleva `=`, y por eso allá los dos dígitos eran
+obligatorios — sin ellos, `S1` habría encontrado `S13` y tomado el slot equivocado.
+
+Verificado sin hardware con el `prvCampo()` real: **10 casos**, incluidos los tres tokens de `S1=`
+contra una respuesta que además trae `S13=`, y que `S1=` **no** aparezca en una respuesta de dos
+dígitos (para que caiga al otro formato en vez de tomar basura).
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -4194,7 +4219,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.70"        /* = VER                                 */
+#define FW_VERSION  "0.0.71"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 

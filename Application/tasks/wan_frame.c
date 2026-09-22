@@ -880,16 +880,39 @@ static wan_conf_rta_t prvAplicarFlowc( const char *pcRta )
 
     for( i = 0U; i < CFG_FLOW_NRO_SLOTS; i++ )
     {
-        /* ⚠ `S%02d=` con los dos dígitos: el AVR busca `S00`…`S13`. Sin el cero
-           de relleno, `S0` haría `strstr` sobre `S01` y tomaría el slot
-           equivocado. */
+        /*
+         * ⛔ SE ACEPTAN LAS DOS FORMAS, `S00=` y `S0=`, y no es exceso de celo:
+         * **el comentario del AVR y su código se contradicen**.
+         *
+         *   el comentario:  `…&S0=LU,1230,OPEN&S1=MA,650,CLOSE&…&S13=…`
+         *   el código:      `snprintf_P( str_base, …, PSTR("S%02d"), slot )`
+         *
+         * O sea que si el servidor manda un dígito, **el AVR no encuentra los
+         * slots 0 a 9** y sólo configura del 10 al 13. Es el mismo patrón que ya
+         * apareció con `CONF_COUNTERS`, donde el comentario mostraba cuatro
+         * campos y el código parseaba seis — y ahí **el comentario tenía razón**.
+         *
+         * Probar las dos cuesta una línea y cierra el caso sin depender de cuál
+         * de las dos versiones describe al servidor real.
+         *
+         * ⚠ Esto sólo es seguro porque `prvCampo()` busca la clave **con el `=`
+         * incluido**: `S1=` no puede matchear dentro de `S13=`. El `strstr` del
+         * AVR no lleva `=`, y por eso allá los dos dígitos eran obligatorios.
+         */
         snprintf( pcClave, sizeof( pcClave ), "S%02u=", ( unsigned ) i );
 
         if( !prvCampo( pcRta, pcClave, 0U, pcDow, sizeof( pcDow ) ) )
         {
-            continue;   /* este slot no vino: se deja como está */
+            snprintf( pcClave, sizeof( pcClave ), "S%u=", ( unsigned ) i );
+
+            if( !prvCampo( pcRta, pcClave, 0U, pcDow, sizeof( pcDow ) ) )
+            {
+                continue;   /* este slot no vino: se deja como está */
+            }
         }
 
+        /* `pcClave` quedó con la forma que SÍ matcheó, así que los otros dos
+           tokens salen del mismo slot y no de otro. */
         ( void ) prvCampo( pcRta, pcClave, 1U, pcPtime,  sizeof( pcPtime  ) );
         ( void ) prvCampo( pcRta, pcClave, 2U, pcAccion, sizeof( pcAccion ) );
 
