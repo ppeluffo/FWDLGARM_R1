@@ -3818,6 +3818,35 @@ datos. La infraestructura está —`tkCtlPres_orden()` las recibe por notificaci
 el AVR para que `tkWan` no se bloquee 45 s en medio de una sesión— pero **falta parsearlas en
 `wan_frame`**. Entran después de validar la consigna, que es lo que se puede probar hoy.
 
+### Tres arreglos de la consola (Pablo, 2026-09-22)
+
+- **`modbus` y `cpres` no figuraban en el `help`.** Registrar un comando y agregarlo a la tabla de
+  ayuda son **dos pasos independientes**, y el segundo es fácil de olvidar porque el comando funciona
+  igual. Ahora están los dos.
+- **`status` dice si cada tarea está viva o matada.** Hacía falta: el `kill` es **cooperativo**, así
+  que entre pedirlo y que ocurra pasa hasta una vuelta entera de esa tarea, y no había forma de
+  confirmar que se hubiera suspendido de verdad. Se informan **los dos estados por separado**
+  —`MATADA` cuando `eTaskGetState()` dice `eSuspended`, y `kill PEDIDO (todavia corriendo)` cuando la
+  bandera está puesta pero la tarea no llegó—, porque confundirlos haría creer que se puede tocar el
+  periférico **mientras la tarea todavía lo usa**.
+- **`status` muestra la ocupación de la ventana**: registros ocupados, libres y el porcentaje, más
+  los **pisados** si los hubo y los lotes de la microSD sin transmitir. No es un adorno: es **cuánto
+  aguanta el equipo sin transmitir**, y los pisados son registros que ya se perdieron — información
+  de campo que antes había que ir a buscar con `fs`.
+
+#### ⛔ Y de paso: el `help` MENTÍA sobre el parser
+
+Decía *"(matchea por prefijo: 'res'/'reb', 'st'/'se'…)"*, y eso **dejó de ser cierto el
+2026-09-08**, cuando el parser pasó a exigir el comando completo. Quedó ahí catorce días.
+
+**Una ayuda que miente es peor que no tener ayuda**: el que la lee prueba `st`, no funciona, y
+termina dudando de la consola en vez del texto. Ahora dice `el comando va COMPLETO: 'status', no
+'st'`.
+
+⚠ Y el propio `help <comando>` **todavía matcheaba por prefijo**, que era la última pieza del
+mecanismo viejo: `help c` caía en el primer comando que empezara con `c` sin decir por qué. Ahora usa
+igualdad, la misma regla que el parser.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3836,7 +3865,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.63"        /* = VER                                 */
+#define FW_VERSION  "0.0.64"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 

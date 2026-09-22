@@ -322,6 +322,9 @@ static void prvRtcUso  ( void );
 static void prvRs485Uso( void );
 static void prvModbusUso( void );
 static void prvCpresUso( void );
+static void prvEstadoTarea( const char *pcNombre, TaskHandle_t xHandle,
+                            uint16_t usStack, bool bKillPedido,
+                            const char *pcExtra );
 static void prvInaUso  ( void );
 static void prvSdUso   ( void );
 static void prvVinUso  ( void );
@@ -560,6 +563,8 @@ static const cmd_ayuda_t xAyuda[] = {
     { "ee",     "EEPROM M24M01 (128 KB): leer, escribir y test",         prvEeUso      },
     { "rtc",    "RTC externo MCP79410: hora, validez y cortes",          prvRtcUso     },
     { "rs485",  "bus RS485 y los 3 rieles de alimentacion",              prvRs485Uso   },
+    { "modbus", "Modbus RTU: poleo de canales y lectura generica",        prvModbusUso  },
+    { "cpres",  "control de presion: consignas y valvulas externas",      prvCpresUso   },
     { "ina",    "INA3221: medida de los lazos de 4-20 mA",               prvInaUso     },
     { "sd",     "tarjeta microSD: energia, arranque y sectores",         prvSdUso      },
     { "vin",    "tension de los rieles: 12 V y VDDA (3V3)",              prvVinUso     },
@@ -596,9 +601,13 @@ static void cmdHelp( void )
 
         xprintf( "\r\n  [+] tiene mas opciones: 'help <comando>'\r\n" );
 
-        /* El parser matchea por PREFIJO, así que 'r' y 're' caen en 'reset', que
-           es el primero registrado, y 's' cae en 'status'. */
-        xprintf( "  (matchea por prefijo: 'res'/'reb', 'st'/'se', 'rt'/'rs', 'i2'/'in')\r\n" );
+        /*
+         * ⛔ Acá decía "matchea por prefijo: 'res'/'reb', 'st'/'se'…" y **era
+         * mentira desde el 2026-09-08**, cuando el parser pasó a exigir el
+         * comando completo. Una ayuda que miente es peor que no tener ayuda: el
+         * que la lee prueba 'st', no funciona, y termina dudando de la consola.
+         */
+        xprintf( "\r\n  el comando va COMPLETO: 'status', no 'st'\r\n" );
         return;
     }
 
@@ -607,9 +616,11 @@ static void cmdHelp( void )
 
     for( uint32_t i = 0U; i < AYUDA_COUNT; i++ )
     {
-        /* Por prefijo y no por igualdad, para que 'help rs' funcione igual que
-           'rs': una sola regla de matcheo en toda la consola. */
-        if( strncmp( xAyuda[ i ].pcNombre, argv[ 1 ], xLargo ) == 0 )
+        /* Igualdad, no prefijo: la misma regla que usa el parser de comandos
+           desde el 2026-09-08. Con prefijo, 'help c' caería en el primero que
+           empiece con c y el que pregunta no sabría por qué. */
+        if( ( strlen( xAyuda[ i ].pcNombre ) == xLargo ) &&
+            ( strncmp( xAyuda[ i ].pcNombre, argv[ 1 ], xLargo ) == 0 ) )
         {
             xprintf( "%s - %s\r\n\r\n", xAyuda[ i ].pcNombre, xAyuda[ i ].pcResumen );
 
@@ -658,35 +669,113 @@ static void cmdStatus( void )
      * son los que van a valer: antes de campo hay que rehacer la medición sobre
      * un binario Release.
      */
-    xprintf( "stacks libres (minimo desde el arranque, en palabras):\r\n" );
-    xprintf( "  tkCmd : %4u de %u\r\n",
+    xprintf( "tareas (stack libre minimo en palabras, y estado):\r\n" );
+    xprintf( "  tkCmd  : %4u de %-5u activa (soy yo)\r\n",
              ( unsigned ) uxTaskGetStackHighWaterMark( NULL ), tkCmd_STACK_SIZE );
 
-    if( xHandle_tkCtl != NULL )
+    prvEstadoTarea( "tkCtl", xHandle_tkCtl, tkCtl_STACK_SIZE, false, NULL );
+    prvEstadoTarea( "tkSys", xHandle_tkSys, tkSys_STACK_SIZE, false, NULL );
+    prvEstadoTarea( "tkWan", xHandle_tkWan, tkWan_STACK_SIZE, wan_matada(),
+                    wan_estado_str() );
+    prvEstadoTarea( "tkCPres", xHandle_tkCtlPres, tkCtlPres_STACK_SIZE,
+                    tkCtlPres_matada(), NULL );
+
+    /*
+     * ---- La memoria de registros ----
+     *
+     * ⭐ Pedido de Pablo (2026-09-22). No es un adorno: es **cuánto aguanta el
+     * equipo sin transmitir**. Con la ventana llena se empiezan a pisar los
+     * registros más viejos, y saberlo de un vistazo —sin tener que correr
+     * `fs`— es lo que dice si un equipo viene teniendo problemas de enlace.
+     */
+    fs_datos_stats_t xFs;
+    fs_sd_stats_t    xSd;
+
+    fs_datos_stats( &xFs );
+
+    xprintf( "memoria de registros (la ventana, en la EEPROM):\r\n" );
+    xprintf( "  ocupados : %u de %u", ( unsigned ) xFs.usCount,
+             ( unsigned ) xFs.usLength );
+
+    if( xFs.usLength > 0U )
     {
-        xprintf( "  tkCtl : %4u de %u\r\n",
-                 ( unsigned ) uxTaskGetStackHighWaterMark( xHandle_tkCtl ), tkCtl_STACK_SIZE );
+        xprintf( "  (%u%%)", ( unsigned ) ( ( 100UL * xFs.usCount ) / xFs.usLength ) );
     }
 
-    if( xHandle_tkSys != NULL )
+    xprintf( "\r\n  libres   : %u\r\n",
+             ( unsigned ) ( xFs.usLength - xFs.usCount ) );
+
+    /*
+     * ⚠ Los PISADOS se informan sólo si los hay, pero cuando los hay importan
+     * mucho: son registros que se perdieron porque la ventana dio la vuelta sin
+     * poder transmitir ni volcar a la microSD. Es información de campo, no un
+     * contador de diagnóstico.
+     */
+    if( xFs.ulPisados > 0UL )
     {
-        xprintf( "  tkSys : %4u de %u\r\n",
-                 ( unsigned ) uxTaskGetStackHighWaterMark( xHandle_tkSys ), tkSys_STACK_SIZE );
+        xprintf( "  [!] PISADOS: %lu registros perdidos por ventana llena\r\n",
+                 ( unsigned long ) xFs.ulPisados );
     }
 
-    if( xHandle_tkWan != NULL )
+    /* Los lotes de la microSD salen de la FAT en la SRAM del RTC, así que se
+       saben sin encender la tarjeta. */
+    fs_sd_stats( &xSd );
+
+    if( xSd.usLotes > 0U )
     {
-        xprintf( "  tkWan : %4u de %u   (estado: %s)\r\n",
-                 ( unsigned ) uxTaskGetStackHighWaterMark( xHandle_tkWan ), tkWan_STACK_SIZE,
-                 wan_estado_str() );
+        xprintf( "  lotes en la microSD sin transmitir: %u\r\n",
+                 ( unsigned ) xSd.usLotes );
+    }
+}
+//------------------------------------------------------------------------------
+/*
+ * Una línea por tarea: stack libre y **si está viva o matada**.
+ *
+ * ⭐ Pedido de Pablo (2026-09-22), y hace falta: después de un `kill` no había
+ * forma de confirmar que la tarea se había suspendido de verdad — y el `kill`
+ * es cooperativo, así que entre pedirlo y que ocurra pasa hasta una vuelta
+ * entera de esa tarea.
+ *
+ * Por eso se informan los dos estados por separado: `eTaskGetState()` dice si ya
+ * se suspendió, y la bandera del módulo dice si está pedido pero todavía no
+ * ocurrió. Confundirlos haría creer que se puede tocar el periférico cuando la
+ * tarea todavía lo está usando.
+ */
+static void prvEstadoTarea( const char *pcNombre, TaskHandle_t xHandle,
+                            uint16_t usStack, bool bKillPedido,
+                            const char *pcExtra )
+{
+    const char *pcEstado;
+
+    if( xHandle == NULL )
+    {
+        xprintf( "  %-7s: NO EXISTE\r\n", pcNombre );
+        return;
     }
 
-    if( xHandle_tkCtlPres != NULL )
+    if( eTaskGetState( xHandle ) == eSuspended )
     {
-        xprintf( "  tkCPres: %4u de %u\r\n",
-                 ( unsigned ) uxTaskGetStackHighWaterMark( xHandle_tkCtlPres ),
-                 tkCtlPres_STACK_SIZE );
+        pcEstado = "MATADA";
     }
+    else if( bKillPedido )
+    {
+        pcEstado = "kill PEDIDO (todavia corriendo)";
+    }
+    else
+    {
+        pcEstado = "activa";
+    }
+
+    xprintf( "  %-7s: %4u de %-5u %s", pcNombre,
+             ( unsigned ) uxTaskGetStackHighWaterMark( xHandle ),
+             ( unsigned ) usStack, pcEstado );
+
+    if( pcExtra != NULL )
+    {
+        xprintf( " (%s)", pcExtra );
+    }
+
+    xprintf( "\r\n" );
 }
 //------------------------------------------------------------------------------
 /*
