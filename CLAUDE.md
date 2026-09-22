@@ -4154,6 +4154,40 @@ reset, incluidos los diez seguidos de una sesión de flasheo.
    número usa el servidor. Es el modo de falla del `PST` de ainputs, y la herramienta que lo resuelve
    es la misma: comparar **los strings** del hash, no los valores.
 
+### ⭐ `CONFIG=OK`: el contrato de configuración CIERRA COMPLETO (banco, 2026-09-22)
+
+```
+-> …&CLASS=CONF_ALL&UID=…&ICCID=…&CSQ=…&WDG=…&BH=…&AH=…&CH=…&MH=…&PH=…
+<- "<html>CLASS=CONF_ALL&CONFIG=OK</html>"
+
+CONFIG=OK: la configuracion del equipo coincide con la del servidor
+```
+
+**Es la primera vez.** Hasta acá `CONF_ALL` **no podía** contestar `OK` ni con la configuración
+perfecta: el servidor pedía un `FLOWC` que el equipo no mandaba, y eso era estructural, no un
+desajuste. Con el bloque eliminado de las dos puntas, los cinco hashes son el contrato entero.
+
+⭐ Y cierra una cadena que empezó el 2026-09-11: la predicción del hash en el host, la aplicación en
+el equipo, la aceptación del servidor, y ahora **el acuerdo completo**.
+
+La vuelta salió entera: `PING` → `CONF_ALL` con `OK` → `ONLINE_DATA` → `1 de 1 confirmados`.
+
+#### ⏳ Pendiente menor: el `CSQ` viaja en 0
+
+```
+tkWan:: IMEI 860909055244702, senal 0 dBm negativos (NO es una medida)
+```
+
+**Ese valor es imposible**: con `|dBm| = 113 − 2·rssi` no hay entero que dé 0 (56 da 1 y 57 da −1).
+O sea que **`wan_csq_set()` no llegó a llamarse** — el `strstr( pcRta, "+CSQ:" )` no encontró nada,
+así que la respuesta al `AT+CSQ` no llegó o llegó desfasada. Es probablemente el mismo fenómeno de
+las respuestas rezagadas que ya apareció con los acuses de los `DATANR` y con el ruido del DE en
+Modbus.
+
+⚠ **No bloquea** —el `CSQ` es identidad, no configuración, y no entra en ningún hash, por eso el
+servidor aceptó igual— **pero el servidor está registrando señal 0 para este equipo**, y en campo ése
+es justo el dato que se quiere mirar cuando algo no transmite.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
