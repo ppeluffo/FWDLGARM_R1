@@ -163,17 +163,31 @@ bool drv_cpres_comando( cpres_cmd_t eCmd )
     }
 
     /* ---- 2. La orden ---- */
-    mb_result_t eRes = drv_modbus_escribir( DRV_CPRES_SLAVE, DRV_CPRES_REG,
-                                            ( uint16_t ) eCmd );
+    uint16_t    usRta = 0U;
+    mb_result_t eRes  = drv_modbus_escribir( DRV_CPRES_SLAVE, DRV_CPRES_REG,
+                                             ( uint16_t ) eCmd, &usRta );
+
+    if( eRes == mbOK )
+    {
+        /*
+         * ⭐ La respuesta al FC06 de ESTE dispositivo es su registro de status,
+         * no el eco del valor (ver `drv_modbus_escribir()`). O sea que ya dice
+         * si el trabajo arrancó, sin pagar una lectura extra.
+         */
+        xprintf( "CPRES:: orden aceptada, status 0x%02X (%s)\r\n",
+                 ( unsigned ) usRta,
+                 drv_cpres_status_idle( usRta ) ? "todavia IDLE" : "TRABAJANDO" );
+    }
 
     if( eRes != mbOK )
     {
         /*
-         * ⭐ Acá el eco del FC06 se verifica de verdad (lo hace
-         * `drv_modbus_escribir()`), y en este dispositivo eso importa más que en
-         * ningún otro: el AVR no lo mira, así que **una escritura rechazada se
-         * ve idéntica a una exitosa** y el equipo se queda esperando un
-         * movimiento que nunca arrancó.
+         * Lo que se verifica es **la dirección del registro**, no el valor: este
+         * dispositivo devuelve su status en vez del eco (ver
+         * `drv_modbus_escribir()`). Aun así el chequeo vale: el AVR no mira
+         * nada, así que para él **una escritura rechazada se ve idéntica a una
+         * exitosa** y el equipo se queda esperando un movimiento que nunca
+         * arrancó.
          */
         xprintf( "CPRES:: no se pudo escribir la orden: %s\r\n",
                  drv_modbus_error_str( eRes ) );

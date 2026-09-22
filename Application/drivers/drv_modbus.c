@@ -398,8 +398,14 @@ mb_result_t drv_modbus_leer( uint8_t ucSla, uint8_t ucFcode, uint16_t usReg,
     return mbOK;
 }
 //------------------------------------------------------------------------------
-mb_result_t drv_modbus_escribir( uint8_t ucSla, uint16_t usReg, uint16_t usValor )
+mb_result_t drv_modbus_escribir( uint8_t ucSla, uint16_t usReg, uint16_t usValor,
+                                 uint16_t *pusRespuesta )
 {
+    if( pusRespuesta != NULL )
+    {
+        *pusRespuesta = 0U;
+    }
+
     if( !drv_rs485_power_estado( rs485RAIL_BUS ) )
     {
         return mbBUS_APAGADO;
@@ -423,20 +429,26 @@ mb_result_t drv_modbus_escribir( uint8_t ucSla, uint16_t usReg, uint16_t usValor
     }
 
     /*
-     * ⭐ La respuesta de un 06 correcto es el **eco exacto** del pedido, y acá
-     * se verifica. El AVR lo deja pasar —*"No se analiza la respuesta ya que es
-     * echo"*— y con eso una escritura que el esclavo aplicó a otro registro, o
-     * con otro valor, se ve **idéntica a una exitosa**.
+     * ⚠ Se verifica **la dirección del registro**, que sí es eco, y NO el valor.
      *
-     * Importa justo donde más duele: la consigna del control de presión escribe
-     * un comando de válvula y después pregunta si terminó. Si la escritura no
-     * entró, lo que se está esperando no va a pasar nunca.
+     * El control de presión de Spymovil devuelve **su registro de status** en el
+     * lugar del valor escrito: se ve en `modbus_slave_process_frame06()` de su
+     * firmware (`tx_buffer[5] = systemVars.status_register`) y en sus propias
+     * capturas —a un pedido de `05` contesta `01`—. Exigir el eco del valor lo
+     * rechazaría siempre, y con eso la consigna **nunca podría funcionar**.
+     *
+     * Lo que sí se verifica sigue teniendo valor: que conteste sobre otro
+     * registro significa que no entendió el pedido.
      */
     if( ( sLeidos < 8 ) ||
-        ( pucRx[ 2 ] != pucTx[ 2 ] ) || ( pucRx[ 3 ] != pucTx[ 3 ] ) ||
-        ( pucRx[ 4 ] != pucTx[ 4 ] ) || ( pucRx[ 5 ] != pucTx[ 5 ] ) )
+        ( pucRx[ 2 ] != pucTx[ 2 ] ) || ( pucRx[ 3 ] != pucTx[ 3 ] ) )
     {
         return mbLARGO_INESPERADO;
+    }
+
+    if( pusRespuesta != NULL )
+    {
+        *pusRespuesta = ( ( uint16_t ) pucRx[ 4 ] << 8 ) | pucRx[ 5 ];
     }
 
     return mbOK;

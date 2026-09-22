@@ -143,12 +143,25 @@ mb_result_t drv_modbus_leer( uint8_t ucSla, uint8_t ucFcode, uint16_t usReg,
 /*------------------------------------------------------------------------------
  * Escribe un registro (función 06).
  *
- * ⚠ La respuesta de un 06 correcto es **el eco del pedido**, y acá se verifica:
- * un esclavo que conteste otro registro u otro valor no hizo lo que se le pidió.
- * El AVR no lo mira (*"No se analiza la respuesta ya que es echo"*), así que una
- * escritura rechazada se ve idéntica a una exitosa.
+ * La norma dice que la respuesta es **el eco del pedido**, y acá se verifica
+ * **la dirección del registro**: un esclavo que conteste sobre otro registro no
+ * entendió lo que se le pidió. El AVR no mira nada (*"No se analiza la respuesta
+ * ya que es echo"*), así que una escritura rechazada se le ve idéntica a una
+ * exitosa.
+ *
+ * ⛔ **Pero el VALOR devuelto NO se verifica, y no es una omisión.** El control
+ * de presión de Spymovil **no devuelve el eco del valor: devuelve su registro de
+ * status** — se ve en `modbus_slave_process_frame06()` de su firmware, y en sus
+ * propias capturas: a un pedido de `05` contesta `01`, y a uno de `06` contesta
+ * `04`. Exigir el eco lo rechazaría **siempre**.
+ *
+ * ⭐ Y ese valor es información útil, no un estorbo: es el status **con el bit
+ * RUN ya puesto**, o sea la confirmación de que el trabajo arrancó. Por eso sale
+ * por `pusRespuesta` (puede ser NULL) en vez de descartarse — ahorra una lectura
+ * inmediata después de la orden.
  *----------------------------------------------------------------------------*/
-mb_result_t drv_modbus_escribir( uint8_t ucSla, uint16_t usReg, uint16_t usValor );
+mb_result_t drv_modbus_escribir( uint8_t ucSla, uint16_t usReg, uint16_t usValor,
+                                 uint16_t *pusRespuesta );
 
 /* El código de la última excepción recibida (1 = función ilegal, 2 = dirección
    ilegal, 3 = dato ilegal, 4 = falla del esclavo…). Sólo vale tras `mbEXCEPCION`. */

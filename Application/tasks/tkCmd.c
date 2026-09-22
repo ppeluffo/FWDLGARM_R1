@@ -4149,12 +4149,16 @@ static void cmdModbus( void )
         uint8_t     ucSla   = ( uint8_t )  atol( argv[ 2 ] );
         uint16_t    usReg   = ( uint16_t ) atol( argv[ 3 ] );
         uint16_t    usValor = ( uint16_t ) atol( argv[ 4 ] );
-        mb_result_t eRes    = drv_modbus_escribir( ucSla, usReg, usValor );
+        uint16_t    usRta   = 0U;
+        mb_result_t eRes    = drv_modbus_escribir( ucSla, usReg, usValor, &usRta );
 
         if( eRes == mbOK )
         {
-            xprintf( "OK: sla=%u reg=%u <- %u (el esclavo confirmo el eco)\r\n",
-                     ( unsigned ) ucSla, ( unsigned ) usReg, ( unsigned ) usValor );
+            /* ⚠ El valor devuelto NO tiene por qué ser el eco: el control de
+               presión contesta su status. Por eso se informa aparte. */
+            xprintf( "OK: sla=%u reg=%u <- %u ; el esclavo devolvio 0x%04X\r\n",
+                     ( unsigned ) ucSla, ( unsigned ) usReg, ( unsigned ) usValor,
+                     ( unsigned ) usRta );
         }
         else
         {

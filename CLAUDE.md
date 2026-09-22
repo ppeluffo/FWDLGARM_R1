@@ -3896,6 +3896,45 @@ se esperaría el timeout entero por una respuesta que ya llegó completa.
 validó sin verlo. El ruido del DE estaba ahí igual; lo que cambió es que un dispositivo más lento
 deja la ventana abierta para que se note.
 
+#### ⛔ Este dispositivo NO devuelve el eco del FC06: devuelve su STATUS
+
+Salió de leer su firmware (`SPQ_AVRDA/AUXBOARDS/CONTROL_PRESION/`, que Pablo pasó el 2026-09-22), y
+**habría hecho fallar la consigna siempre**:
+
+```c
+/* modbus_slave_process_frame06() */
+mbus_cb.tx_buffer[4] = 0x0;                          // Reg.value
+mbus_cb.tx_buffer[5] = systemVars.status_register;   // <- el STATUS, no el eco
+```
+
+Sus propias capturas lo muestran: a un pedido de `05` contesta `01`, y a uno de `06` contesta `04`.
+Mi `drv_modbus_escribir()` exigía el eco **del valor** y lo habría rechazado en cada orden.
+
+Ahora se verifica **sólo la dirección del registro**, que sí es eco y sigue teniendo valor: un
+esclavo que conteste sobre otro registro no entendió el pedido.
+
+⭐ **Y el valor devuelto pasó de estorbo a dato útil**: es el status **con el bit RUN ya puesto**, o
+sea la confirmación de que el trabajo arrancó. Sale por `pusRespuesta`, así que `drv_cpres` lo informa
+sin pagar una lectura extra.
+
+#### Lo demás que confirmó su firmware
+
+| | |
+|---|---|
+| **Velocidad** | `frtos_open(fdRS485, 9600)`, 8N1 — igual que nosotros |
+| **Dirección** | `MODBUS_LOCALADDR 0x64` = 100 |
+| **FC03 reg 1** | status: responde 7 bytes (`5 + 2·1`), con el status en el byte bajo |
+| ℹ️ **FC03 reg 2** | **WATER LEVEL** — un registro que no sabíamos que existía. No se usa hoy |
+
+⚠ **Su FSM de recepción no tiene timeout ni valida CRC: cuenta 8 bytes.** Si alguna vez se
+desincroniza —un byte espurio después de su dirección— **se queda esperando para siempre** y no se
+recupera sola: hay que cortarle la alimentación. Como el datalogger se la corta en cada orden, en la
+práctica se resuelve solo, pero explica por qué conviene no hablarle apenas se enciende.
+
+⚠ **Y su tarea de RS485 espera `starting_flag`**, o sea que el dispositivo tarda en estar listo. Los
+**12 s** que espera el AVR antes del primer diálogo (2 de arranque + 10 de estabilización) no son un
+número caprichoso.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3914,7 +3953,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.65"        /* = VER                                 */
+#define FW_VERSION  "0.0.66"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
