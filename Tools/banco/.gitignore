@@ -1,0 +1,8 @@
+# Los logs son de cada corrida: no se versionan.
+logs/
+__pycache__/
+*.pyc
+
+# referencia.json SÍ se versiona a propósito: es el estado conocido bueno de los
+# hashes, y un cambio suyo tiene que quedar registrado en el mismo commit que el
+# cambio de firmware que lo produjo.
