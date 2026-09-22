@@ -3847,6 +3847,55 @@ termina dudando de la consola en vez del texto. Ahora dice `el comando va COMPLE
 mecanismo viejo: `help c` caía en el primer comando que empezara con `c` sin decir por qué. Ahora usa
 igualdad, la misma regla que el parser.
 
+#### ⛔ El bus mete un byte de RUIDO, y la lectura por trama lo tomaba por la respuesta
+
+Encontrado en banco el **2026-09-22**, en la primera prueba contra el control de presión:
+
+```
+MB TX (8):[64][03][00][01][00][01][DC][3F]
+MB RX (1):[00]                              <- y ahí se cortaba
+ERROR: trama demasiado corta
+```
+
+La trama de salida era **idéntica byte a byte** a la capturada del AVR, así que ese lado estaba
+descartado de entrada.
+
+⭐ **Lo que cerró el diagnóstico fue pedirle a una dirección que NO EXISTE**: `modbus read 99 …`
+devolvió exactamente el mismo `[00]`. O sea que **el byte lo genera el bus, no el esclavo** — es el
+artefacto que deja la línea al soltarse el DE: sin nadie manejando el par, el receptor ve un nivel
+indefinido, interpreta un start bit falso y entrega un byte de ceros.
+
+Es el mismo método de siempre —**cambiar una sola cosa y ver si el síntoma sigue**— y costó un
+comando.
+
+⚠ **Y el bug era nuestro.** `drv_rs485_read_frame()` espera el primer byte y a partir de ahí corta al
+primer silencio de `t3.5`, así que ese byte espurio **terminaba la lectura** y la respuesta de verdad
+—que llega decenas de ms después— se perdía.
+
+⭐ **Por qué el AVR no lo sufre, y es el patrón de los acuses rezagados otra vez**: aquel **acumula
+todo durante un segundo** en un buffer lineal y recién después busca la respuesta ahí adentro, así
+que la basura del principio le queda delante sin molestar. Leer una trama delimitada por silencio es
+mejor para todo lo demás —bloquea en el kernel en vez de polear cada 50 ms— pero **tiene que tolerar
+lo que aquel buffer toleraba sin pensarlo**.
+
+`prvLeerRespuesta()` lo resuelve con tres cosas, y ninguna sobra:
+
+1. **Sigue leyendo** hasta juntar el largo esperado o agotar el timeout total, en vez de conformarse
+   con la primera trama.
+2. **Descarta el prefijo hasta la dirección del esclavo.** Modbus RTU no tiene byte de inicio, así
+   que lo primero que puede ser una respuesta es el SLA: cualquier cosa antes es ruido por
+   definición.
+3. **Trunca al largo esperado**, porque el mismo artefacto puede aparecer **después** — y ahí sería
+   peor: el CRC se calcularía tomando el byte de ruido como parte de la trama y **fallaría una
+   respuesta buena**.
+
+⚠ Una **excepción** son 5 bytes y no el largo esperado, así que se reconoce por el bit 7 del fcode o
+se esperaría el timeout entero por una respuesta que ya llegó completa.
+
+ℹ️ **Esto no apareció con el caudalímetro** —que contesta rápido y bien— y por eso el paso 6 se
+validó sin verlo. El ruido del DE estaba ahí igual; lo que cambió es que un dispositivo más lento
+deja la ventana abierta para que se note.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -3865,7 +3914,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.64"        /* = VER                                 */
+#define FW_VERSION  "0.0.65"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
