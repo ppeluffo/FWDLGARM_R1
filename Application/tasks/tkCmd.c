@@ -681,6 +681,39 @@ static void cmdStatus( void )
                     tkCtlPres_matada(), NULL );
 
     /*
+     * ---- La doble consigna ----
+     *
+     * ⭐ Pedido de Pablo (2026-09-22). Sólo si está habilitada: si no lo está,
+     * la línea sería ruido en cada `status`.
+     *
+     * ⚠ Dice **"desde que arrancó"** a propósito. Es una creencia en RAM que se
+     * pierde con el reset —ver `tkCtlPres.h`, donde se explica por qué NO se
+     * persiste— así que no hay que leerla como el estado del dispositivo, que de
+     * hecho nadie puede saber.
+     */
+    if( xCfgConsigna.bEnabled )
+    {
+        bool        bOk   = false;
+        uint16_t    usHhmm = 0U;
+        cpres_cmd_t eUlt  = tkCtlPres_ultima_consigna( &bOk, &usHhmm );
+
+        xprintf( "doble consigna: diurna %04d, nocturna %04d\r\n",
+                 ( int ) xCfgConsigna.usDiurna, ( int ) xCfgConsigna.usNocturna );
+
+        if( eUlt == cpresCMD_NINGUNO )
+        {
+            xprintf( "  ninguna aplicada desde que arranco el equipo\r\n" );
+        }
+        else
+        {
+            xprintf( "  ultima: %s a las %02d:%02d -> %s\r\n",
+                     drv_cpres_cmd_str( eUlt ),
+                     ( int ) ( usHhmm / 100U ), ( int ) ( usHhmm % 100U ),
+                     bOk ? "OK" : "FALLO" );
+        }
+    }
+
+    /*
      * ---- La memoria de registros ----
      *
      * ⭐ Pedido de Pablo (2026-09-22). No es un adorno: es **cuánto aguanta el

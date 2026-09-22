@@ -155,10 +155,15 @@ mb_result_t drv_modbus_leer( uint8_t ucSla, uint8_t ucFcode, uint16_t usReg,
  * propias capturas: a un pedido de `05` contesta `01`, y a uno de `06` contesta
  * `04`. Exigir el eco lo rechazaría **siempre**.
  *
- * ⭐ Y ese valor es información útil, no un estorbo: es el status **con el bit
- * RUN ya puesto**, o sea la confirmación de que el trabajo arrancó. Por eso sale
- * por `pusRespuesta` (puede ser NULL) en vez de descartarse — ahorra una lectura
- * inmediata después de la orden.
+ * ⚠ Y ese valor es información útil, pero **no dice que el trabajo arrancó**.
+ * Verificado en banco el 2026-09-22: devolvió `0x0A`, o sea **IDLE**, justo
+ * después de aceptar una consigna. Su firmware lo explica —notifica a su propia
+ * tarea y contesta enseguida con el status **de antes**—, así que el bit RUN lo
+ * pone después.
+ *
+ * Lo que confirma entonces es que **el dispositivo estaba libre cuando aceptó**.
+ * Sale por `pusRespuesta` (puede ser NULL) porque eso igual vale, pero
+ * **interpretarlo como "ya empezó" sería un error**.
  *----------------------------------------------------------------------------*/
 mb_result_t drv_modbus_escribir( uint8_t ucSla, uint16_t usReg, uint16_t usValor,
                                  uint16_t *pusRespuesta );

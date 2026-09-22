@@ -3681,7 +3681,7 @@ el `head` sobra.
 De paso, el bloque que quedó se movió **después del contador**, para que la consola y el frame se
 lean en el mismo orden.
 
-## 🔨 Paso 7: la doble consigna del control de presión
+## ✅ Paso 7: la doble consigna del control de presión
 
 `Application/drivers/drv_cpres.{h,c}` (el diálogo) y `Application/tasks/tkCtlPres.{h,c}` (cuándo),
 más el comando `cpres`. Portado de `ULIBS/cpres.c` + `XLIBS/consignas.c` + `FWDLGX_tkCtlPres.c`.
@@ -4010,6 +4010,72 @@ status = 0x08: IDLE
 Las dos cosas que confirma: el FC06 **entra** —y devuelve el status, no el eco— y **la posición pasa
 a conocerse sólo para la válvula que se movió**, que es exactamente lo que describe el dispositivo.
 
+### ✅ Paso 7 VALIDADO EN BANCO (2026-09-22): la consigna se aplica SOLA
+
+```
+cmd>config
+  consigna: true, diurna=1222, nocturna=2300
+cmd>rtc
+  fecha/hora: 2026-09-22 12:21:59 (mar)
+
+tkCtlPres:: son las 12:22 -> consigna DIURNA
+CPRES:: consigna DIURNA
+CPRES:: orden aceptada, status 0x0A (todavia IDLE)
+CPRES:: consigna DIURNA: OK
+```
+
+| Criterio | Resultado |
+|---|---|
+| ⭐ **La tarea dispara sola a la hora exacta** | ✅ 12:22, sin que nadie tipeara nada |
+| El ciclo completo del driver | ✅ `OK` |
+| No se repitió dentro del minuto | ✅ la espera al cambio de minuto hizo lo suyo |
+| El `status` nuevo | ✅ `tkSys MATADA`, `tkWan MATADA (APAGADO)`, `tkCPres activa` |
+
+#### ⛔ `todavia IDLE` es lo NORMAL, y desmiente un comentario que yo había escrito
+
+Ayer anoté que el valor devuelto por el FC06 era *"el status con el bit RUN ya puesto, o sea la
+confirmación de que el trabajo arrancó"*. **La traza lo desmiente**: devolvió `0x0A` —IDLE— justo
+después de aceptar la consigna.
+
+Su firmware lo explica, y es obvio una vez visto:
+
+```c
+xTaskNotify( xHandle_tkSys, 0x01, eSetBits );        // avisa a su propia tarea
+...
+mbus_cb.tx_buffer[5] = systemVars.status_register;   // y contesta el status de ANTES
+```
+
+**Contesta antes de arrancar el trabajo.** Lo que ese valor confirma es que **el dispositivo estaba
+libre cuando aceptó la orden** — que también sirve, pero es otra cosa.
+
+⚠ **Y de ahí sale por qué la espera a ciegas después del FC06 no es pereza**: si se leyera el status
+enseguida, devolvería el IDLE *de antes* y el comando se daría por terminado **sin que nada se haya
+movido**. Con los 10 s contra un movimiento que dura más, el caso no se puede dar; si alguna vez ese
+número se acorta, hay que reemplazarlo por *"esperar a ver el RUN puesto y recién entonces esperar a
+que baje"*.
+
+#### `status` informa la última consigna aplicada
+
+Pedido de Pablo (2026-09-22), y sólo aparece si la doble consigna está habilitada:
+
+```
+doble consigna: diurna 1222, nocturna 2300
+  ultima: consigna DIURNA a las 12:22 -> OK
+```
+
+⚠ Dice **"desde que arrancó el equipo"** cuando no hay ninguna, y eso es a propósito: **es una
+creencia en RAM que se pierde con el reset**. No se persiste por lo explicado más arriba —recordarla
+mal sería peor que no recordarla, porque el equipo dejaría de corregir— así que sirve para ver *qué
+hizo el equipo*, **no** para saber en qué estado está el dispositivo, que de hecho nadie puede saber.
+
+La **hora** de la última aplicación se informa porque importa: una consigna que falló hace diez horas
+no es lo mismo que una que falló recién.
+
+### ⏳ Lo que falta del paso 7
+
+Las órdenes **`VOPEN`/`VCLOSE`/`EXT_V0/V1_*`** que el servidor manda en la respuesta a un frame de
+datos. `tkCtlPres_orden()` ya las recibe por notificación; **falta parsearlas en `wan_frame`**.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -4028,7 +4094,7 @@ viajan en el frame:
 ```c
 #define FW_NOMBRE   "FWDLGARM_R1"   /* el BANNER de la consola, NO el frame */
 #define FW_TYPE     "FWDLGARM"      /* = TYPE: el tipo de firmware, SIN revisión */
-#define FW_VERSION  "0.0.68"        /* = VER                                 */
+#define FW_VERSION  "0.0.69"        /* = VER                                 */
 #define FW_HW       "SPQ_ARM_R1"    /* = HW: la PLACA, con su revisión       */
 ```
 
@@ -4053,7 +4119,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5d** | **`tkWan`: la FSM. El equipo transmite solo** | ✅ **VALIDADO el 2026-09-21** |
 | **6a** | **Modbus: el motor** (transaccion, codecs, comando) | ✅ **VALIDADO el 2026-09-21** |
 | **6b** | Modbus: el enganche al poleo de `tkSys` | ✅ **VALIDADO el 2026-09-21** |
-| **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | 🔨 **escrito, sin probar** |
+| **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | ✅ **VALIDADO el 2026-09-22**; faltan las órdenes del servidor |
 | 7b | ⏳ **`tkFlow`/flowcontrol** — volvió al alcance el 2026-09-12; necesita el 2b | |
 | 8 | Watchdog cooperativo + `tkCtl` definitivo | |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo | |

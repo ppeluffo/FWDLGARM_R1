@@ -165,9 +165,13 @@ bool drv_cpres_comando( cpres_cmd_t eCmd )
     if( eRes == mbOK )
     {
         /*
-         * ⭐ La respuesta al FC06 de ESTE dispositivo es su registro de status,
-         * no el eco del valor (ver `drv_modbus_escribir()`). O sea que ya dice
-         * si el trabajo arrancó, sin pagar una lectura extra.
+         * La respuesta al FC06 de ESTE dispositivo es su registro de status, no
+         * el eco del valor (ver `drv_modbus_escribir()`).
+         *
+         * ⚠ **`todavia IDLE` es lo NORMAL acá**, no una anomalía: el dispositivo
+         * notifica a su propia tarea y contesta enseguida, así que el bit RUN lo
+         * pone después. Lo que dice este valor es que **estaba libre cuando
+         * aceptó la orden**.
          */
         xprintf( "CPRES:: orden aceptada, status 0x%02X (%s)\r\n",
                  ( unsigned ) usRta,
@@ -189,7 +193,19 @@ bool drv_cpres_comando( cpres_cmd_t eCmd )
         goto salir;
     }
 
-    /* ---- 3. Esperar a que la ejecute ---- */
+    /*
+     * ---- 3. Esperar a que la ejecute ----
+     *
+     * ⚠ **La espera a ciegas de acá no es pereza: es lo que evita un IDLE
+     * prematuro.** Como el dispositivo contesta el FC06 *antes* de arrancar el
+     * trabajo, leer el status enseguida devolvería IDLE —el de antes— y el
+     * comando se daría por terminado **sin que nada se haya movido**.
+     *
+     * Por eso se espera primero y se pregunta después. Con los 10 s contra un
+     * movimiento que dura más, el caso no se puede dar; si alguna vez este
+     * número se acorta, hay que reemplazarlo por "esperar a ver el RUN puesto y
+     * recién entonces esperar a que baje".
+     */
     vTaskDelay( pdMS_TO_TICKS( DRV_CPRES_MS_EJECUCION ) );
 
     if( !prvEsperarIdle( "despues de la orden" ) )

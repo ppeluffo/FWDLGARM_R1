@@ -17,6 +17,12 @@ StackType_t  tkCtlPres_Stack[ tkCtlPres_STACK_SIZE ];
 
 static volatile bool bMatada = false;
 
+/* La última consigna aplicada: sólo para informar. Ver el header — NO se
+   persiste, y el motivo es que recordarla mal sería peor que no recordarla. */
+static cpres_cmd_t eUltimaConsigna = cpresCMD_NINGUNO;
+static bool        bUltimaOk       = false;
+static uint16_t    usUltimaHhmm    = 0U;
+
 //------------------------------------------------------------------------------
 void tkCtlPres_orden( cpres_cmd_t eCmd )
 {
@@ -25,6 +31,30 @@ void tkCtlPres_orden( cpres_cmd_t eCmd )
         ( void ) xTaskNotify( xHandle_tkCtlPres, ( uint32_t ) eCmd,
                               eSetValueWithOverwrite );
     }
+}
+//------------------------------------------------------------------------------
+cpres_cmd_t tkCtlPres_ultima_consigna( bool *pbOk, uint16_t *pusHhmm )
+{
+    if( pbOk != NULL )
+    {
+        *pbOk = bUltimaOk;
+    }
+
+    if( pusHhmm != NULL )
+    {
+        *pusHhmm = usUltimaHhmm;
+    }
+
+    return eUltimaConsigna;
+}
+//------------------------------------------------------------------------------
+/* Anota lo que se acaba de hacer. Sólo para las CONSIGNAS: una orden puntual de
+   válvula no cambia en qué consigna está el equipo. */
+static void prvAnotarConsigna( cpres_cmd_t eCmd, bool bOk, uint16_t usHhmm )
+{
+    eUltimaConsigna = eCmd;
+    bUltimaOk       = bOk;
+    usUltimaHhmm    = usHhmm;
 }
 //------------------------------------------------------------------------------
 void tkCtlPres_pedir_kill( void )
@@ -214,7 +244,7 @@ static void prvServicioConsigna( void )
     xprintf( "\r\ntkCtlPres:: son las %02d:%02d -> %s\r\n",
              xRtc.hour, xRtc.min, drv_cpres_cmd_str( eCmd ) );
 
-    ( void ) prvEjecutar( eCmd );
+    prvAnotarConsigna( eCmd, prvEjecutar( eCmd ), usAhora );
 
     /* Pase lo que pase con la orden, hay que salir del minuto: si falló, no
        tiene sentido reintentarla 45 s después contra el mismo dispositivo. */
@@ -253,7 +283,7 @@ static void prvConsignaDeArranque( void )
     xprintf( "tkCtlPres:: arranque a las %02d:%02d -> %s\r\n",
              xRtc.hour, xRtc.min, drv_cpres_cmd_str( eCmd ) );
 
-    ( void ) prvEjecutar( eCmd );
+    prvAnotarConsigna( eCmd, prvEjecutar( eCmd ), usAhora );
 }
 //------------------------------------------------------------------------------
 void tkCtlPres( void *pvParameters )

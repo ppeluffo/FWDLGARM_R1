@@ -101,6 +101,21 @@ extern StackType_t  tkCtlPres_Stack[ tkCtlPres_STACK_SIZE ];
  *----------------------------------------------------------------------------*/
 void tkCtlPres_orden( cpres_cmd_t eCmd );
 
+/*------------------------------------------------------------------------------
+ * La última CONSIGNA que se aplicó, para que `status` la informe.
+ *
+ * ⚠ **Es una creencia en RAM y se pierde con el reset, a propósito.** No se
+ * guarda en memoria persistente por lo explicado arriba: recordarla mal sería
+ * peor que no recordarla, porque el equipo dejaría de corregir. Así que esto
+ * sirve para *mirar qué hizo el equipo desde que arrancó*, **no** para saber en
+ * qué estado está el dispositivo.
+ *
+ * Devuelve `cpresCMD_NINGUNO` si todavía no aplicó ninguna. `pbOk` (puede ser
+ * NULL) dice si la última salió bien, y `pusHhmm` a qué hora fue — que importa:
+ * una consigna que falló hace diez horas no es lo mismo que una que falló recién.
+ *----------------------------------------------------------------------------*/
+cpres_cmd_t tkCtlPres_ultima_consigna( bool *pbOk, uint16_t *pusHhmm );
+
 /* `kill cpres`, con el mismo criterio que `kill wan`: se suspende para que un
    operador pueda trabajar el dispositivo a mano, y no hay cómo revivirla. */
 void tkCtlPres_pedir_kill( void );
