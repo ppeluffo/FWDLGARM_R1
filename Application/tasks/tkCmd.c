@@ -311,6 +311,7 @@ static void cmdLte( void );
 static void cmdConfig( void );
 static void cmdKill( void );
 static void cmdWdg( void );
+static void prvWdgUso( void );
 static void cmdPoll( void );
 static void cmdFrame( void );
 static void cmdCls( void );
@@ -604,7 +605,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "cls",    "limpia la pantalla de la terminal",                    NULL          },
     { "fs",     "memoria de registros: estado, lectura y formateo",     prvFsUso      },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
-    { "wdg",    "estado del watchdog: el perro y el plazo de cada tarea", NULL          },
+    { "wdg",    "estado del watchdog: el perro y el plazo de cada tarea", prvWdgUso     },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
 };
 
@@ -3312,8 +3313,71 @@ static void prvKillUso( void )
  * arrancó y no figura ahí no se está vigilando, y eso desde afuera no se nota de
  * ninguna otra forma.
  *============================================================================*/
+static void prvWdgUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  wdg              el perro y el plazo de cada tarea\r\n" );
+    xprintf( "  wdg colgar       ⛔ CUELGA tkCmd a proposito: el equipo se\r\n" );
+    xprintf( "                   resetea por watchdog en ~2 minutos\r\n" );
+}
+//------------------------------------------------------------------------------
+/*
+ * ⛔ EL CUELGUE PROVOCADO: la unica forma de probar el watchdog de punta a punta.
+ *
+ * Sin esto **no hay manera de provocar un cuelgue** para verificar que el perro
+ * muerde: `kill` justamente DESREGISTRA la tarea (si no, el watchdog resetearia
+ * el equipo mientras el operador trabaja a mano), y un breakpoint no sirve
+ * porque `drv_wdt_arrancar()` congela el IWDG con `__HAL_DBGMCU_FREEZE_IWDG()`
+ * a proposito.
+ *
+ * Un watchdog que nunca se vio morder no es un watchdog validado: es codigo que
+ * compila.
+ *
+ * Lo que se observa, y por que se ve TODO:
+ *
+ *   ~90 s  `tkCtl` avisa por consola que tkCmd se paso del plazo
+ *   ~32 s  mas tarde el IWDG resetea, y `status` informa `reset por: IWDG`
+ *
+ * ⭐ El aviso se ve porque `tkCtl` comparte prioridad con `tkCmd` y el kernel
+ * las alterna en cada tick (`configUSE_TIME_SLICING`, que vale 1 por omision).
+ * O sea que esta tarea girando no le quita la CPU al juez.
+ *
+ * ⚠ El contador es `volatile` para que el lazo sobreviva a `-Os`: un lazo
+ * infinito sin efectos observables es comportamiento indefinido en C11 y el
+ * compilador puede eliminarlo. Con Release eso convertiria la prueba en un
+ * cuelgue que no ocurre.
+ */
 static void cmdWdg( void )
 {
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs >= 1U ) && ( argv[ 1 ] != NULL ) )
+    {
+        /*
+         * ⚠ EXACTAMENTE un argumento, ni uno más. Colgar el equipo a propósito
+         * es lo bastante drástico como para no aceptar una línea que el operador
+         * no escribió del todo bien: `wdg colgar x` es más probable que sea un
+         * dedazo que una intención.
+         */
+        if( ( strcmp( argv[ 1 ], "colgar" ) == 0 ) && ( ucArgs == 1U ) )
+        {
+            static volatile uint32_t ulGirando = 0U;
+
+            xprintf( "\r\n⛔ COLGANDO tkCmd A PROPOSITO.\r\n" );
+            xprintf( "   La consola deja de responder YA. En ~90 s tkCtl va a\r\n" );
+            xprintf( "   avisar, y ~32 s despues el IWDG resetea el equipo.\r\n" );
+            xprintf( "   Al volver, 'status' tiene que decir: reset por IWDG\r\n\r\n" );
+
+            for( ;; )
+            {
+                ulGirando++;    /* ni reporta ni cede: es el cuelgue */
+            }
+        }
+
+        prvWdgUso();
+        return;
+    }
+
     wdg_print();
 }
 //------------------------------------------------------------------------------
