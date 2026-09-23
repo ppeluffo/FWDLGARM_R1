@@ -12,6 +12,8 @@
 #include "drv_adc.h"
 #include "drv_ina3221.h"
 #include "drv_pulsos.h"
+#include "caudal.h"
+#include "caudal_log.h"
 #include "drv_valvula.h"
 #include "drv_rs485.h"
 #include "modbus.h"
@@ -44,6 +46,8 @@ static TickType_t xTicksProximoPoll;
    comentario en el lazo de la tarea: es la única pérdida deliberada de datos
    del equipo, y por eso se cuenta. */
 static uint32_t ulDescartadosRtu = 0UL;
+
+static float    fCauMagppActual  = -1.0f;   /* -1 fuerza la 1.ª configuración */
 
 //------------------------------------------------------------------------------
 /*
@@ -307,17 +311,43 @@ bool tkSys_poll( dataRcd_t *pxDr )
     if( xCfgCounter.bEnabled )
     {
         /*
-         * ⏳ PASO 2b. El dato que va al servidor es el CAUDAL, no los pulsos: el
-         * `modo_medida` sólo cambia cómo se imprime en consola. Ese caudal sale
-         * de un EMA por pulso calculado en la ISR, con decay por silencio y
-         * clamp de slew-rate, y portarlo toca `drv_pulsos` —que hoy sólo cuenta
-         * y no lleva timestamps—.
+         * ✅ PASO 2b. **El dato que va al servidor es el CAUDAL, no los pulsos**:
+         * el `modo_medida` sólo cambia cómo se imprime en consola, y al frame
+         * viaja el mismo float en los dos casos. El caudal sale de un EMA que
+         * la ISR calcula pulso a pulso (`caudal.c`), y acá sólo se lee lo que
+         * esa ventana acumuló.
          *
-         * Hasta entonces se marca inválido en vez de mandar un cero: un caudal
-         * de 0.000 es un valor perfectamente creíble para el servidor.
+         * ⚠ **Un caudal de 0 es un valor legítimo**, no un "sin dato": significa
+         * que el flujo paró, y lo dice el decay por silencio. Por eso este canal
+         * NO se marca inválido salvo que el contador esté deshabilitado.
          */
-        pxDr->fContador    = 0.0f;
-        pxDr->usInvalidos |= dataINVALIDO_CONTADOR;
+        caudal_t xCau;
+
+        /*
+         * `magpp` puede cambiar en caliente —por consola o por el servidor— y
+         * el EMA acumulado con el valor viejo no significa nada con el nuevo.
+         * Por eso al cambiar se reconfigura, y eso resetea el estado a
+         * propósito: es preferible perder una ventana a reportar un caudal
+         * calculado con dos constantes distintas.
+         */
+        if( xCfgCounter.fMagPP != fCauMagppActual )
+        {
+            fCauMagppActual = xCfgCounter.fMagPP;
+            caudal_config( fCauMagppActual );
+        }
+
+        caudal_leer( &xCau );
+
+        pxDr->fContador = xCau.fCaudal;
+
+        /* Para la consola: cuántos pulsos entraron en esta ventana y cuántos se
+           descartaron. ⭐ Los descartes son el dato que dice si el filtro
+           pasa-bajos del hardware alcanza — sin ellos, simplificar el algoritmo
+           habría sido a ciegas. */
+        /* ⚠ Ya no se cachea nada para la consola: `cnt` usa `caudal_peek()` y
+           lee el estado ACTUAL. Cachear acá hacía que el comando mostrara lo
+           del último poleo, que con alguien puenteando el borne a mano es
+           exactamente lo que no sirve. */
     }
 
     /* ---- 1b. El riel del módulo Modbus, TEMPRANO --------------------- */
@@ -600,6 +630,20 @@ void tkSys( void *pvParameters )
          */
         fs_datos_stats_t xStFs;
 
+        /*
+         * La traza de pulsos, si está activa. Se chequea acá y no en la ISR
+         * porque volcar enciende la microSD: tiene que pasar en el hilo de una
+         * tarea, y este poleo es el momento natural.
+         *
+         * ⚠ Con 1000 registros y 500 pulsos/hora el umbral del 90 % llega cada
+         * ~2 horas, o sea una vez cada 24 poleos: chequear en cada vuelta es de
+         * sobra y no cuesta nada.
+         */
+        if( caudal_log_activo() && caudal_log_lleno() )
+        {
+            ( void ) fs_sd_volcar_pulsos();
+        }
+
         fs_datos_stats( &xStFs );
 
         if( xStFs.usCount >= ( ( xStFs.usLength * TKSYS_UMBRAL_VOLCADO_PCT ) / 100U ) )
@@ -679,4 +723,6 @@ void tkSys( void *pvParameters )
         }
     }
 }
+//------------------------------------------------------------------------------
+
 //------------------------------------------------------------------------------

@@ -4199,6 +4199,104 @@ Modbus.
 servidor aceptó igual— **pero el servidor está registrando señal 0 para este equipo**, y en campo ése
 es justo el dato que se quiere mirar cuando algo no transmite.
 
+## 🔨 Paso 2b: el caudal del contador
+
+`Application/tasks/caudal.{h,c}` (el algoritmo) y `caudal_log.{h,c}` (la traza), más `cnt`.
+**Escrito el 2026-09-23 y funcionando en banco**: el frame ya lleva `C0=139.680`.
+
+⭐ **ES UNA VERSIÓN SIMPLIFICADA DEL AVR, Y ÉSA ES LA DECISIÓN DEL PASO.**
+
+`XLIBS/contadores.c` trae ~200 líneas: EMA con **cuatro alphas por tramo**, fronteras
+precalculadas, **clamp de slew-rate al ±10 % por pulso** y ventana de arranque de 5 pulsos. Todo eso
+existe por una razón concreta: **había ruido que se colaba y se medía como caudal**.
+
+Se sacó, con tres datos de Pablo (2026-09-23):
+
+1. *"El criterio simple es mejor que complejo, siempre."*
+2. **En régimen no hay variaciones bruscas**: es agua potable en redes.
+3. **Los escalones —arranque, roturas— importan pero no son frecuentes.**
+
+⛔ Y el argumento de fondo: **un filtro que aplasta el ruido aplasta igual los escalones reales**.
+Con el ruido ya resuelto por el hardware —el circuito de entrada tiene pasa-bajos RC y Schmitt— ese
+aparato pagaba todo el costo y ya no cobraba el beneficio: tardaba ~24 pulsos en seguir una rotura,
+que es justo el evento a detectar.
+
+| | AVR | Acá |
+|---|---|---|
+| Seguir un escalón 50→150 | ~24 pulsos | ⭐ **5 pulsos** (medido) |
+| Líneas de lógica | ~200 | ~40 |
+
+⚠ **Si en campo reaparece el ruido, volver es un `git revert`**: está en su propio commit.
+
+### ⭐ Por qué el AVR NO era el patrón a replicar
+
+Mi propuesta inicial era portarlo tal cual como línea base y después simplificar. **Pablo lo
+corrigió y tenía razón**: con el frame y el hash había que replicar byte a byte porque **hay otra
+punta esperando**; el caudal no tiene otra punta — es un número que tiene que ser **correcto**, no
+idéntico. Y el AVR es justamente el que tuvo el problema: compararse con él sería tomar como patrón
+lo que se quiere mejorar.
+
+### Lo que sí se conservó, y qué resuelve cada cosa
+
+- **`alpha = 1` en el primer intervalo**: arrancar desde cero subreporta durante varios pulsos.
+- **Anti-rebote de 500 ms**, sobre los 5-12 ms del hardware.
+- ⭐ **Descarte de lo físicamente imposible** (`Q > 200 m³/h`): es la **única red en el primer
+  intervalo**, donde `alpha = 1` toma el valor directo sin nada previo que amortigüe.
+- **Decay a cero por silencio**: sin él el caudal queda congelado para siempre cuando el flujo para.
+- **El promedio de la ventana de poleo.** ⭐ Con `timerpoll` de 5 min son **16 a 166 muestras** a
+  caudal medio o alto: es el filtro principal, más que el propio EMA, y nadie lo contaba.
+
+### ⚠ El tiempo se mide en TICKS, no en milisegundos
+
+`ulTicks * 1000 / configTICK_RATE_HZ` —lo que hace el AVR— **desborda un `uint32_t` a las 2,3 h** con
+el tick a 512 Hz, y el equipo corre 7×24. La resta va en ticks (tolera el rollover por aritmética
+modular) y la conversión a ms se hace sobre el `dT`, que siempre es chico.
+
+⚠ La resolución de 1,95 ms no importa: **el `dT` más corto posible es 1,8 s** (`magpp` 0,1 al caudal
+máximo), así que el error es del 0,1 %.
+
+### Los números de campo que fijaron todo (Pablo, 2026-09-23)
+
+Caudalímetros de hasta **200 m³/h**, `magpp` de **1 o 0,1** m³/pulso:
+
+| `magpp` | Q = 200 | Q = 3 (mínimo) |
+|---|---|---|
+| **1** | dT = 18 s | dT = **20 min** |
+| **0,1** | dT = 1,8 s | dT = 2 min |
+
+⚠ Con `magpp` = 1 y caudal bajo, **4 de cada 5 ventanas no tienen ni un pulso**: se reporta el último
+EMA vivo y **se ve el mismo valor repetido en varias muestras seguidas**. Es correcto, no es un
+equipo trabado.
+
+### ⭐ `cnt` mira SIN consumir, y los descartes van separados
+
+Las dos cosas salieron de la primera prueba en banco:
+
+- ⛔ La primera versión mostraba lo cacheado del **último poleo**: con 22 pulsos físicos se veía
+  `validos: 0` hasta que pasara un minuto. Ahora usa **`caudal_peek()`**, que mira sin consumir —
+  mismo criterio que `fs_datos_peek()` frente a `pop()`. Usar `caudal_leer()` sería peor: le robaría
+  al poleo las muestras que todavía no reportó.
+- ⚠ **`CORTO` e `IMPOSIBLE` se cuentan aparte porque acusan a cosas opuestas**: el primero al
+  circuito de entrada (rebotes que el pasa-bajos no filtró), el segundo a la cadencia (pulsos más
+  rápidos que el caudal máximo). Con un contador único los dos se ven iguales y mandan a mirar
+  lugares distintos.
+
+### La traza de pulsos: `cnt log on | off | dump`
+
+Buffer circular de **1000 registros en RAM** (17 KB), volcado al 90 % a un `PULSOSnn.CSV`.
+
+⭐ **Guarda los `dT` CRUDOS, no sólo el caudal.** Con eso se reprocesan cien variantes de α **en la
+oficina**, con los datos reales de la instalación que falló; si sólo guardara el caudal, cada ajuste
+exigiría otra visita a campo. `Q_ema` va además para verificar que el reprocesado coincide con lo que
+hizo el equipo: si divergen, el bug está en el firmware y no en el análisis.
+
+⚠ **En RAM y no en la EEPROM**, y la distinción importa: las muestras son el dato del cliente y un
+corte no puede llevárselas; esto es instrumento, y si un reset se lleva la traza se repite la prueba.
+Escribirlo en EEPROM serían ~5 ms y desgaste **por pulso** para guardar algo descartable.
+
+⚠ **Activable por comando, nunca permanente.** Y el volcado vive en `fs_sd.c`, no en `caudal_log.c`:
+**la tarjeta tiene un solo dueño**.
+
 ## 🔨 Paso 8: el watchdog
 
 `Application/drivers/drv_wdt.{h,c}` (el perro de hardware) y
@@ -4399,6 +4497,36 @@ porque el aviso salía en medio del chorro del arranque—.
   donde el plazo se estira a propósito.
 - Que la causa llegue al servidor como `WDG=3` (`wanRESET_IWDG`) tras un reset del perro.
 
+### ⏳ Para el PULIDO FINAL: el período de `tkCtl` es la palanca de consumo que queda
+
+Anotado el **2026-09-23** a pedido de Pablo, para encararlo cuando todo lo demás ande. La cuenta, en
+un caso típico de campo (`timerpoll` 5 min, modo DISCRETO, caudal de 50 m³/h con `magpp` 0,1):
+
+| Fuente | Despertadas/hora | |
+|---|---|---|
+| ⛔ **`tkCtl`** | **7200** | cada 1 s, y son **dos**: una para encender el LED y otra para apagarlo 50 ms después — el micro duerme durante el destello |
+| El caudalímetro | 500 | un pulso cada 7,2 s |
+| El poleo | 12 | |
+
+⭐ **El destello del LED genera quince veces más despertadas que el caudalímetro.** Y el grueso del
+costo de cada una no es el trabajo que hace: es **salir de Stop 2 y rehacer `SystemClock_Config()`**
+—arrancar el PLL— y volver a dormir. Una despertada que no hace nada útil cuesta casi lo mismo que
+una que mide.
+
+Estimación del tiempo activo: **~6 s por hora, o sea 0,17 %**. ⚠ Es una estimación, no una medición:
+el ~0,5 ms por despertada sale de sumar el arranque del PLL, la lógica del port y el `WFI`.
+
+⭐ **Antes de decidir nada, instrumentar**: con dos acumuladores en `vPortSuppressTicksAndSleep()`
+—despertadas y ticks dormidos— y una línea en `status`, el equipo informa su **ciclo de trabajo
+real**. Y de paso, corriendo con y sin el caudalímetro conectado, la resta dice exactamente cuánto
+cuesta el contador. Son ~20 líneas y tocan el port, así que van en su propio commit.
+
+⚠ **No es una decisión de una variable sino de tres**, y por eso va al final: el período de `tkCtl`
+lo comparten el **destello del LED**, el **poleo de `TERM_SENSE`** y el **kick del watchdog**. Subirlo
+a 5 s bajaría las despertadas de 7700 a ~2000 por hora, pero obliga a repasar el plazo del watchdog
+—hoy 90 s, con `tkCtl` pateando cada segundo, o sea con 30× de margen sobre la ventana del IWDG— y a
+aceptar que la terminal se detecte hasta 5 s más tarde.
+
 ### ⚠ La versión sube en CADA entrega a banco
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
@@ -4431,7 +4559,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 |---|---|---|
 | **1** | **Configuración persistente** en la M24M01 (5 bloques, hashes, comandos) | ✅ **validado en banco el 2026-09-08** |
 | **2** | `dataRcd` y el poleo (`tkSys`) | ✅ **validado el 2026-09-09** (falta el caudal → 2b) |
-| **2b** | ⏳ **El caudal del contador** — EMA por pulso, decay y slew-rate | pendiente, ver abajo |
+| **2b** | **El caudal del contador** | 🔨 **escrito y andando en banco** (`0.0.78`); falta afinar α en campo |
 | **3** | ⭐ **El frame, sin modem** | ✅ **anda en banco**; ⏳ falta compararlo contra un AVR real |
 | **4** | Almacenamiento: FS circular sobre la EEPROM | ✅ **validado el 2026-09-09** |
 | **4b** | La microSD como extensión: la EEPROM es una VENTANA | ✅ **validado el 2026-09-09** |
@@ -4445,7 +4573,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | ✅ **VALIDADO el 2026-09-22** |
 | ~~7b~~ | ~~`tkFlow`/flowcontrol~~ | ⛔ **ELIMINADO el 2026-09-22**: no se usa. Quedan sólo las órdenes `VOPEN`/`VCLOSE` |
 | **8** | **Watchdog cooperativo + IWDG** | 🔨 **escrito, sin probar en banco** (`0.0.74`) |
-| 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo | |
+| 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo, **el período de `tkCtl`** | |
 
 ✅ Los modos `PWR_RTU` y `PWR_SILENT` **entraron el 2026-09-12** — ver la sección de los cinco modos.
 

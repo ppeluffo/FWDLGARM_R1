@@ -34,6 +34,8 @@
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "wdg.h"
+#include "caudal.h"
+#include "caudal_log.h"
 #include "drv_wdt.h"
 #include "drv_term_sense.h"
 #include "pwr_lock.h"
@@ -2297,9 +2299,55 @@ static void cmdCnt( void )
             return;
         }
 
+        if( strcmp( argv[ 1 ], "log" ) == 0 )
+        {
+            if( ( ucArgs >= 2U ) && ( argv[ 2 ] != NULL ) )
+            {
+                if( strcmp( argv[ 2 ], "on" ) == 0 )
+                {
+                    caudal_log_habilitar( true );
+                    xprintf( "traza de pulsos ACTIVADA (buffer de %u, vuelca al %u%%)\r\n",
+                             ( unsigned ) CAUDAL_LOG_REGISTROS,
+                             ( unsigned ) CAUDAL_LOG_UMBRAL_PCT );
+                    xprintf( "⚠ es para una sesion de diagnostico, no para dejarla puesta\r\n" );
+                    return;
+                }
+
+                if( strcmp( argv[ 2 ], "off" ) == 0 )
+                {
+                    caudal_log_habilitar( false );
+                    xprintf( "traza DESACTIVADA (quedan %u registros sin volcar)\r\n",
+                             ( unsigned ) caudal_log_pendientes() );
+                    return;
+                }
+
+                if( strcmp( argv[ 2 ], "dump" ) == 0 )
+                {
+                    ( void ) fs_sd_volcar_pulsos();
+                    return;
+                }
+            }
+
+            xprintf( "traza de pulsos: %s\r\n", caudal_log_activo() ? "ACTIVA" : "apagada" );
+            xprintf( "  en RAM     : %u de %u registros\r\n",
+                     ( unsigned ) caudal_log_pendientes(), ( unsigned ) CAUDAL_LOG_REGISTROS );
+
+            /* ⚠ Si esto crece, se perdio traza: el buffer dio la vuelta porque
+               la microSD no estaba o porque el caudal es mas alto de lo previsto. */
+            if( caudal_log_pisados() > 0UL )
+            {
+                xprintf( "  ⚠ PISADOS  : %lu (se perdio lo mas viejo)\r\n",
+                         ( unsigned long ) caudal_log_pisados() );
+            }
+
+            xprintf( "  uso: cnt log on | off | dump\r\n" );
+            return;
+        }
+
         prvCntUso();
         return;
     }
+
 
     /* ---- 'cnt' pelado ---- */
     drv_pulsos_cfg_t xCfg = { 0 };
@@ -2319,6 +2367,65 @@ static void cmdCnt( void )
     xprintf( "  config     : modo %lu (0=entrada), pull %lu (%s)\r\n",
              ( unsigned long ) xCfg.ulModer, ( unsigned long ) xCfg.ulPupdr,
              ( xCfg.ulPupdr == 0UL ) ? "flotante, CORRECTO" : "OJO: NO deberia tener pull" );
+
+    /* ---- el caudal (paso 2b) ---- */
+    if( !xCfgCounter.bEnabled )
+    {
+        xprintf( "\r\n  caudal     : el contador esta DESHABILITADO ('config counter ...')\r\n" );
+        return;
+    }
+
+    /*
+     * ⭐ `caudal_peek()` y no `caudal_leer()`: mirar no puede consumir.
+     *
+     * La primera versión mostraba lo que había quedado cacheado del ÚLTIMO
+     * POLEO, así que puenteando el borne a mano se veían 22 pulsos físicos con
+     * "validos: 0" hasta que pasara un minuto. Eso hace inútil al comando justo
+     * cuando más se lo necesita (banco, 2026-09-23). Y usar `caudal_leer()`
+     * sería peor: le robaría al poleo las muestras que todavía no reportó.
+     */
+    caudal_t xCau;
+
+    caudal_peek( &xCau );
+
+    xprintf( "\r\n  --- caudal ---\r\n" );
+    xprintf( "  magpp      : %0.3f m3/pulso  ->  dT a %0.0f m3/h = %0.1f s\r\n",
+             xCfgCounter.fMagPP, CAUDAL_MAX_M3H,
+             ( double ) ( xCfgCounter.fMagPP * 3600.0f / CAUDAL_MAX_M3H ) );
+    xprintf( "  EMA vivo   : %0.3f m3/h   (alpha %0.2f)\r\n",
+             xCau.fEmaVivo, CAUDAL_ALPHA );
+    xprintf( "  en curso   : %u muestras acumuladas -> reportaria %0.3f\r\n",
+             ( unsigned ) xCau.usMuestras, xCau.fCaudal );
+    xprintf( "  validos    : %lu pulsos\r\n", ( unsigned long ) xCau.ulPulsos );
+
+    /*
+     * ⚠ LOS DOS DESCARTES VAN SEPARADOS porque acusan a cosas distintas:
+     * `CORTO` al circuito de entrada (rebotes que el pasa-bajos no filtró) y
+     * `QMAX` a la cadencia (pulsos más rápidos que el caudal máximo físico).
+     * Con un contador único los dos se ven iguales y mandan a mirar lugares
+     * distintos.
+     */
+    xprintf( "  descartes  : %lu cortos (<%u ms)  +  %lu imposibles (>%0.0f m3/h)\r\n",
+             ( unsigned long ) xCau.ulCortos, ( unsigned ) CAUDAL_MS_ANTIRREBOTE,
+             ( unsigned long ) xCau.ulImposibles, CAUDAL_MAX_M3H );
+
+    if( xCau.ulCortos > 0UL )
+    {
+        xprintf( "               los CORTOS acusan al circuito de entrada\r\n" );
+    }
+
+    if( xCau.ulImposibles > 0UL )
+    {
+        xprintf( "               los IMPOSIBLES: pulsos mas rapidos que %0.1f s\r\n",
+                 ( double ) ( xCfgCounter.fMagPP * 3600.0f / CAUDAL_MAX_M3H ) );
+    }
+
+    if( xCau.usMuestras == 0U )
+    {
+        /* ⚠ No es un error y conviene decirlo, porque con magpp=1 y caudal bajo
+           es lo NORMAL: 4 de cada 5 ventanas no tienen un solo pulso. */
+        xprintf( "  (sin pulsos en esta ventana: se reportaria el ultimo EMA)\r\n" );
+    }
 }
 //------------------------------------------------------------------------------
 /*------------------------------------------------------------------------------

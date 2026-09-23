@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "fs_sd.h"
+#include "caudal_log.h"
 #include "fs_datos.h"
 #include "wan_frame.h"
 #include "drv_sd.h"
@@ -734,5 +735,111 @@ void fs_sd_lote_cerrar( bool bBorrar )
     }
 
     prvDesmontar();
+}
+//------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------
+/*
+ * Vuelca la traza de pulsos a un CSV.
+ *
+ * ⭐ VIVE ACÁ Y NO EN `caudal_log.c` a propósito: **la tarjeta tiene un solo
+ * dueño**. `prvMontar()`/`prvDesmontar()` son estáticas de este archivo porque
+ * son las que saben cuándo encender el riel y cuándo apagarlo, y ese control es
+ * justo lo que el diseño de ventana quiere conservar. `caudal_log` sólo maneja
+ * un buffer en RAM y no sabe que existe una microSD.
+ *
+ * ⚠ **Se escribe CSV aunque en RAM esté binario**, y las dos cosas son
+ * deliberadas: binario ocupa 17 bytes por pulso y entra el triple de traza en
+ * la misma RAM; texto se abre en una PC sin herramientas. Es la misma decisión
+ * que en los lotes de datos.
+ *
+ * El nombre no lleva fecha: si el RTC arrancó frío, dos archivos colisionarían.
+ * Se numera y listo — la hora de cada pulso va adentro.
+ */
+bool fs_sd_volcar_pulsos( void )
+{
+    caudal_log_reg_t xReg;
+    char             pcNombre[ FS_SD_NOMBRE_LARGO ];
+    char             pcLinea[ 96 ];
+    FIL              xFile;
+    uint32_t         ulN = 0UL;
+    uint16_t         usPend;
+
+    usPend = caudal_log_pendientes();
+
+    if( usPend == 0U )
+    {
+        xprintf( "PULSOS:: no hay nada que volcar\r\n" );
+        return true;
+    }
+
+    if( !prvMontar() )
+    {
+        /* ⚠ No se vacía el buffer: si la tarjeta no está, la traza sigue en RAM
+           y se reintenta en el poleo siguiente. Lo único que se pierde es lo
+           más viejo, si llega a dar la vuelta. */
+        xprintf( "PULSOS:: no se pudo montar la microSD; la traza queda en RAM\r\n" );
+        return false;
+    }
+
+    /* Busca el primer nombre libre. Con 100 archivos ya es una sesión de
+       depuración larguísima; si se agotan, se avisa en vez de pisar. */
+    uint16_t usIdx;
+
+    for( usIdx = 0U; usIdx < 100U; usIdx++ )
+    {
+        FILINFO xFno;
+
+        snprintf( pcNombre, sizeof( pcNombre ), "PULSOS%02u.CSV", ( unsigned ) usIdx );
+
+        if( f_stat( pcNombre, &xFno ) != FR_OK )
+        {
+            break;
+        }
+    }
+
+    if( usIdx >= 100U )
+    {
+        xprintf( "PULSOS:: ya hay 100 archivos PULSOSnn.CSV: borrar alguno\r\n" );
+        prvDesmontar();
+        return false;
+    }
+
+    if( f_open( &xFile, pcNombre, FA_CREATE_NEW | FA_WRITE ) != FR_OK )
+    {
+        xprintf( "PULSOS:: no se pudo crear %s\r\n", pcNombre );
+        prvDesmontar();
+        return false;
+    }
+
+    /* Encabezado, para que el archivo se entienda solo dentro de seis meses. */
+    ( void ) f_puts( "ticks,dT_ms,Q_inst,Q_ema,evento\r\n", &xFile );
+
+    while( caudal_log_sacar( &xReg ) )
+    {
+        UINT uiEsc;
+
+        snprintf( pcLinea, sizeof( pcLinea ), "%lu,%lu,%0.3f,%0.3f,%s\r\n",
+                  ( unsigned long ) xReg.ulTicks,
+                  ( unsigned long ) xReg.ulDtMs,
+                  xReg.fQInst, xReg.fQEma,
+                  caudal_log_evento_str( xReg.ucEvento ) );
+
+        if( f_write( &xFile, pcLinea, strlen( pcLinea ), &uiEsc ) != FR_OK )
+        {
+            break;
+        }
+
+        ulN++;
+    }
+
+    bool bOk = ( f_close( &xFile ) == FR_OK );
+
+    prvDesmontar();
+
+    xprintf( "PULSOS:: %lu pulsos volcados a %s%s\r\n",
+             ( unsigned long ) ulN, pcNombre, bOk ? "" : " (ERROR al cerrar)" );
+
+    return bOk;
 }
 //------------------------------------------------------------------------------

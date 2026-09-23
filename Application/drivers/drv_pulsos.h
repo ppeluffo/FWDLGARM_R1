@@ -158,4 +158,18 @@ typedef struct {
 
 void drv_pulsos_config( drv_pulsos_cfg_t *pxCfg );
 
+/*------------------------------------------------------------------------------
+ * ⚠ SE LLAMA DESDE LA ISR, en cada flanco. Débil: si nadie la implementa, el
+ * contador sigue contando y no pasa nada.
+ *
+ * `ulTicks` es `xTaskGetTickCountFromISR()` crudo — **en ticks, no en
+ * milisegundos**. La conversión la hace el consumidor sobre la diferencia entre
+ * dos pulsos, que siempre es chica; convertir el valor absoluto desbordaría un
+ * `uint32_t` a las 2,3 horas.
+ *
+ * Lo que se haga acá adentro corre en contexto de interrupción: nada que
+ * bloquee, y nada que llame a la API de FreeRTOS que no termine en `FromISR`.
+ *----------------------------------------------------------------------------*/
+void drv_pulsos_pulso_cb( uint32_t ulTicks );
+
 #endif /* APPLICATION_DRIVERS_DRV_PULSOS_H_ */

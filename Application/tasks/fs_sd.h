@@ -159,4 +159,12 @@ void fs_sd_listar( void );
    tarjeta. */
 void fs_sd_ver( const char *pcNombre, uint16_t usLineas );
 
+/*------------------------------------------------------------------------------
+ * Vuelca la traza de pulsos (`caudal_log`) a un `PULSOSnn.CSV`.
+ *
+ * ⚠ Si la tarjeta no está, **la traza NO se pierde**: queda en RAM y se
+ * reintenta. Lo mismo que hace la ventana de datos.
+ *----------------------------------------------------------------------------*/
+bool fs_sd_volcar_pulsos( void );
+
 #endif /* APPLICATION_TASKS_FS_SD_H_ */

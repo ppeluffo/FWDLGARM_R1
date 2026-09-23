@@ -39,7 +39,36 @@ void HAL_GPIO_EXTI_Callback( uint16_t usGpioPin )
     {
         ulTotal++;
         ulParcial++;
+
+        /*
+         * ⭐ El timestamp se toma ACÁ y no en la capa de arriba: es el único
+         * lugar donde el instante del pulso es el instante del pulso. Cualquier
+         * cosa que lo difiera —una cola, una notificación— le suma la latencia
+         * del scheduler a un número del que se deduce el caudal.
+         *
+         * ⚠ Va en TICKS, no en ms. El llamador hace la conversión sobre el
+         * `dT`, que siempre es chico: convertir el tick absoluto desbordaría un
+         * `uint32_t` a las 2,3 h con el tick en 512 Hz, y el equipo corre 7×24.
+         */
+        drv_pulsos_pulso_cb( xTaskGetTickCountFromISR() );
     }
+}
+//------------------------------------------------------------------------------
+/*
+ * Callback débil: el driver avisa que hubo un pulso y **no sabe para qué**.
+ *
+ * Es el patrón de la propia HAL (`HAL_GPIO_EXTI_Callback` es weak por lo mismo)
+ * y acá resuelve una tensión concreta: el cálculo del caudal necesita el
+ * instante exacto del pulso —o sea, la ISR— pero también necesita `magpp`, que
+ * es configuración de la aplicación. Ponerlo adentro del driver haría que un
+ * driver conociera la configuración; sacarlo afuera sin este callback obligaría
+ * a diferir el timestamp.
+ *
+ * Si nadie la implementa, no pasa nada: el contador sigue contando.
+ */
+__weak void drv_pulsos_pulso_cb( uint32_t ulTicks )
+{
+    ( void ) ulTicks;
 }
 
 /*==============================================================================
