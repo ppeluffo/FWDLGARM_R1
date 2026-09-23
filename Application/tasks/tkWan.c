@@ -1317,8 +1317,10 @@ uint32_t wan_segundos_apagado( void )
 /*
  * Espera troceada. **No es un `vTaskDelay()` largo y hay dos razones:**
  *
- *  1. ⏳ El watchdog (paso 8) va a necesitar un kick periódico, y una espera de
- *     una hora entera no le daría lugar a ninguno.
+ *  1. ✅ El watchdog necesita un kick periódico, y una espera de una hora entera
+ *     no le daría lugar a ninguno: el `wdg_kick()` de abajo es el que hace que
+ *     un cuelgue de esta tarea se detecte en 90 s y no en las seis horas que
+ *     puede durar un sueño en modo DISCRETO.
  *  2. Con el tickless, `pdMS_TO_TICKS( segundos * 1000 )` desborda un `uint32_t`
  *     a partir de ~2,3 h a 512 Hz. Troceando, cada espera es chica y el
  *     problema no existe. **El AVR tiene exactamente el mismo comentario**, con

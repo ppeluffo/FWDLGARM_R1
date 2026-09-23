@@ -3295,8 +3295,9 @@ static void prvKillUso( void )
  * lo que hace bien es **desregistrar del watchdog ANTES de suspender**:
  * suspender una tarea que el watchdog sigue vigilando la daría por colgada y
  * **resetearía el equipo justo mientras el operador trabaja**, que es el síntoma
- * más desconcertante posible. ⏳ Acá el watchdog todavía no existe (paso 8), y
- * el lugar donde va ese desregistro está marcado en `tkWan.c`.
+ * más desconcertante posible. ✅ Cada `prvMatarse()` llama a `wdg_stop_task()`
+ * ANTES del `vTaskSuspend()`, y está verificado en banco: tras un `kill wan` el
+ * equipo sigue vivo pasados los 90 s del plazo (2026-09-23).
  *
  * ⚠ **No hay "revivir"** (criterio de Pablo, 2026-09-21): la idea es que después
  * de entrar en modo comando para pruebas o diagnóstico, el operador **resetee el

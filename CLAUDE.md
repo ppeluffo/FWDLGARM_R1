@@ -465,7 +465,16 @@ corte. Por eso el esquema es:
 **El respaldo por pila es intermitente**, medido el 2026-08-12: de cuatro cortes de alimentación
 seguidos, el MCP79410 aguantó tres y falló uno, volviendo a su fecha en blanco (`2001-01-01`). No es
 firmware —se comportó igual las cuatro veces— ni una pila agotada, que fallaría siempre; el perfil es
-de **contacto intermitente en el porta pila**. Queda como pendiente de hardware.
+de **contacto intermitente en el porta pila**.
+
+✅ **Y NO es un defecto de campo (Pablo, 2026-09-23).** El mecanismo es del banco: para bajar un
+firmware nuevo hay que desconectar y reconectar la fuente, y **eso mueve la pila**. En producción no
+pasa — *"tenemos 1000 equipos y no vimos el problema"*. O sea que lo que se midió acá es un artefacto
+del procedimiento de flasheo, no del diseño.
+
+⚠ **Pero la firma en la SRAM sigue siendo necesaria igual**, y por otras dos razones que no dependen
+del porta pila: un equipo **nuevo arranca frío la primera vez**, y **cambiar la pila** en
+mantenimiento también. El mecanismo no se justificaba sólo por un contacto flojo.
 
 Pero el episodio destapó algo más importante que la pila: **el firmware tiene que poder decir "esta
 hora no es confiable"**. En campo esto va a pasar, y un datalogger que estampa `2001-01-01` en las
@@ -1360,9 +1369,10 @@ validado desde `v0.0.5`, y acá se cambia una variable por vez.
 abre y cierra con la secuencia de abajo, y **el reposo quedó en los mismos 6 µA** de antes, que era lo
 único que podía delatar un load switch a medio apagar o un pin en el estado equivocado.
 
-⏳ **Lo que falta medir es la corriente del movimiento**: la de arranque, la de régimen y —la que
-importa— la de **atascamiento**. Es la que decide de qué riel puede comer el servo (ver el jumper más
-abajo) y va a ser el consumo más grande del equipo. No es bring-up: es un dato para el dimensionado.
+✅ **La válvula tiene FIN DE CARRERA** (dato de Pablo, 2026-09-23): al llegar al tope, un switch
+desconecta el motor. **No hay atascamiento**, así que el peor caso son el pico de arranque y el
+recorrido — y el riel es siempre 12 V, aguas arriba del regulador. Lo que estaba anotado acá como
+"medir la corriente de atascamiento" **ya no aplica**.
 
 **No es una biestable: es un servo**, un motor eléctrico con dos señales y **ninguna realimentación de
 posición** (datos de Pablo, 2026-08-18):
@@ -1406,20 +1416,14 @@ watchdog cuando exista—. La válvula se mueve sólo cuando alguien lo pide. **
 
 **Energía.** En reposo no consume nada: el load switch cortado deja al servo sin alimentar y los dos
 pines quedan en 0 contra sus pull-down. Lo que se paga son los 5 s de motor, que van a ser **la
-corriente más grande del equipo** y hay que medirlos. Durante esa ventana **el micro duerme en
+corriente más grande del equipo, aunque el fin de carrera acota cuánto duran**. Durante esa ventana **el micro duerme en
 Stop 2** —los GPIO conservan su estado—, así que el driver **no toma ningún candado de energía**, por
 el mismo razonamiento que el INA3221 con su ventana de 1,4 s.
 
-**⚠ Un jumper elige de qué riel come el servo: 12 V o 3,3 V.** El firmware anda igual en las dos
-posiciones —lo único que ve es el `EN` del TPS22810— pero **cambia el modo de falla**:
-
-| Jumper | Qué implica |
-|---|---|
-| **3,3 V** | El motor comparte el riel con el micro. El pico de arranque, y sobre todo un **atascamiento** del servo, se le descuentan a la misma fuente que alimenta al STM32; si la caída alcanza, lo resetea **a mitad de movimiento**, que es justo el estado indefinido que el driver no puede detectar |
-| **12 V** | El motor queda aguas arriba del regulador, que absorbe el pico |
-
-Es la misma clase de decisión que `JP13` en el contador de pulsos: no la resuelve el firmware. Lo que
-hay que medir en banco es **la corriente de arranque y la de atascamiento**, no sólo la de régimen.
+✅ **El riel es siempre 12 V.** El jumper que elegía entre 12 V y 3,3 V **quedó del pasado** (Pablo,
+2026-09-23): se usa 12 V para no afectar al micro. Con eso desaparece el modo de falla que preocupaba
+—que el pico del motor hundiera el riel del STM32 y lo reseteara **a mitad de movimiento**, dejando la
+válvula en una posición que nadie conoce— porque el motor está aguas arriba del regulador.
 
 **Qué se portó de FWDLGX** (`ULIBS/toyi_valves.{c,h}`): la secuencia, que era correcta, y poco más. Lo
 que cambió:
@@ -2104,9 +2108,10 @@ registro**: en la EEPROM serían más de un millón de escrituras sobre las mism
 RTC no tiene límite de ciclos y ya está respaldada por la pila. Es lo que hace el AVR
 (`RTC_write( FAT_ADDRESS, … )`) y encaja con el área que `drv_rtc79410` reserva después de la firma.
 
-⚠ **El riesgo que eso trae no es teórico en este equipo**: si se pierde la pila se pierde la FAT, y
-con ella la referencia a todos los datos. **El porta pila falla de forma intermitente** —de cuatro
-cortes aguantó tres—. Pablo decidió mantener el diseño del AVR; la defensa que sí se puso es barata:
+⚠ **El riesgo que eso trae**: si se pierde la pila se pierde la FAT, y con ella la referencia a
+todos los datos. ✅ En el banco el porta pila falló de forma intermitente —de cuatro cortes aguantó
+tres— pero **eso es un artefacto del flasheo, que obliga a mover la alimentación**; en producción,
+con 1000 equipos, no se vio (Pablo, 2026-09-23). Pablo decidió mantener el diseño del AVR; la defensa que sí se puso es barata:
 la FAT **se valida al leerla** —checksum *y* coherencia de punteros— y si no cierra se formatea
 avisando, en vez de operar con punteros basura y pisar la configuración, que vive justo antes en la
 misma EEPROM. Los registros llevan tag `0xC5`, así que el día que haga falta se puede reconstruir.
@@ -2828,9 +2833,15 @@ debajo de la nominal — y **cargar de menos adelanta, tanto más cuanto menos c
 encajaría con los +332 ppm medidos, que son demasiados para explicarse sólo por una carga
 *levemente* baja.
 
-⏳ **Lo que hay que verificar en la placa**: qué `CL` pide el cristal `Y1` montado, y si lleva o no
-condensadores. El firmware ya no manda a mirar PC14/PC15 — el mensaje de la deriva nombra `Y1`
-explícitamente.
+✅ **CONFIRMADO (Pablo, 2026-09-23): en la placa actual `Y1` NO tiene los condensadores de carga.**
+Eso cierra el diagnóstico —deja de ser una sospecha— y explica la magnitud: cargar de menos hace
+oscilar rápido, y +332 ppm eran demasiados para una carga sólo *levemente* baja. **La placa nueva los
+va a llevar.**
+
+⭐ La medición de deriva de `wan_rtc_sincronizar()` **se queda igual**, y no porque se espere que el
+problema siga: es el instrumento que lo detectó. Sin ella, el servidor corrige la hora en cada sesión
+y el desvío del cristal queda tapado para siempre — nadie se enteraría de que hay que cambiar un
+componente.
 
 #### ℹ️ El `bt12v` bajo en banco NO es del firmware (Pablo, 2026-09-21)
 
@@ -2904,8 +2915,8 @@ enteros al volver.
 
 `CLOCK=YYMMDDhhmm` pone en hora el equipo, y **no es un adorno**: es cómo se pone en hora solo en
 campo. Como `drv_rtc_escribir()` escribe además la firma de la SRAM, **saca al MCP79410 de un arranque
-en frío sin que nadie vaya al sitio** — con el porta pila fallando de forma intermitente, ése es el
-caso que más va a aparecer.
+en frío sin que nadie vaya al sitio** — el caso de un equipo nuevo que sale a campo, o de uno al que
+se le cambió la pila.
 
 **El umbral de 90 segundos se conserva** (el AVR lo fecha en 2021-12-14): sin él, con `timerpoll`
 corto el reloj se reajusta en cada poleo y la hora se mueve todo el tiempo.

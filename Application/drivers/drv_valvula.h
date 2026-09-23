@@ -63,20 +63,23 @@
  * son los 5 segundos del movimiento, con el motor girando — es la corriente más
  * grande que consume el equipo y hay que medirla en banco.
  *
- * ⚠ **De qué riel come el servo lo elige un jumper: 12 V o 3,3 V.** El firmware
- * anda igual en las dos posiciones —lo único que ve es el `EN` del TPS22810— pero
- * NO son equivalentes:
+ * ✅ **LA VÁLVULA TIENE FIN DE CARRERA** (dato de Pablo, 2026-09-23), y eso
+ * cambia el análisis de energía por completo: al llegar al tope —abierto o
+ * cerrado— **un switch desconecta el motor**, así que deja de consumir solo.
  *
- *   - En **3,3 V** el motor comparte el riel con el micro. El pico de arranque y
- *     un eventual atascamiento del servo se le descuentan a la misma fuente que
- *     alimenta al STM32, y una caída suficiente lo resetea. Peor: el reset ocurre
- *     **a mitad de movimiento**, que es exactamente el estado indefinido que este
- *     driver no puede detectar.
- *   - En **12 V** el motor está aguas arriba del regulador, que absorbe el pico.
+ * ⛔ O sea que **NO hay atascamiento**, que es lo que haría un servo sin fin de
+ * carrera empujando contra el tope hasta que alguien le corte la energía. Acá el
+ * peor caso son el pico de arranque y el recorrido, y nada más.
  *
- * O sea que la posición del jumper no cambia una línea de código pero sí cambia el
- * modo de falla. La elección es de Pablo y es de campo; lo que hay que medir en
- * banco es la corriente de arranque y la de atascamiento, no sólo la de régimen.
+ * Consecuencia para este driver: **los 5 s NO son "5 segundos de motor"**. Son
+ * el recorrido real más un margen, y **el margen no cuesta energía** porque para
+ * entonces el switch ya cortó. Alargar ese tiempo es gratis; acortarlo es lo
+ * riesgoso. El número salió de medidas en campo y funciona — no tocarlo buscando
+ * ahorrar consumo, porque no hay consumo que ahorrar ahí.
+ *
+ * ✅ Y **el riel es siempre 12 V**: el jumper que elegía entre 12 V y 3,3 V
+ * quedó del pasado. Con 12 V el motor está aguas arriba del regulador, que
+ * absorbe el pico, y no puede hundirle el riel al micro.
  *
  * **Durante esos 5 segundos el micro puede dormir en Stop 2 sin problema**, así
  * que este driver **no toma ningún candado de energía**: los dos pines son GPIO y
