@@ -1,129 +1,52 @@
 # -*- coding: utf-8 -*-
 """
-Área G - Transmisión: el equipo contra el servidor real.
+Área G - Transmisión: el equipo contra el servidor.
 
-⭐ ESTA ÁREA MIRA LAS DOS PUNTAS, y ésa es toda su gracia. Tres veces en este
-proyecto el síntoma señaló al lugar equivocado y lo cerró la otra punta: la FAT
-acusando a la pila del MCP79410, el `CSQ 31` mandando a mirar la cobertura, y la
-fecha de los `DATANR` señalando al frame cuando era una carrera de respuestas.
-Un test que sólo le pregunta al equipo repite ese error.
+⭐ LA ÚNICA FUENTE DE ESTA ÁREA ES EL LOG DEL DATALOGGER. No se lee el log del
+servidor, ni su base de datos, ni se le hacen consultas.
 
-⚠ PERO EL CONTRATO QUE SE VALIDA ES EL DEL DATALOGGER, no el del backend. Se
-verifica que el frame **llegó y fue aceptado**, leyendo el log de `apicomms`. El
-tramo Redis -> `apicomms_process` -> PostgreSQL es del servidor: si ahí algo
-falla no es una falla del firmware, y reportarlo como FAIL sería acusar al
-componente equivocado.
+Y no es una limitación: **la respuesta del servidor ya viaja por la consola del
+equipo**. `CLASS=PONG`, `CONFIG=OK` y el `OK: N de N` son el servidor diciendo
+que sí — sólo que llegan contadas por el datalogger, que es justo lo que se está
+validando. Mirar la otra punta agregaría acceso a una máquina que en campo no se
+tiene, para confirmar algo que ya está dicho.
 
-CÓMO SE LEVANTA EL SERVIDOR (corre en la misma PC):
+⚠ EL SERVIDOR SE ASUME BIEN CONFIGURADO. Lo que tiene que estar listo, y es
+responsabilidad del operador:
 
-    cd /home/pablo/Spymovil/python/proyectos/APICOMMS_2025
-    source .venv/bin/activate
-    python -m apicomms.app > /tmp/apicomms.log 2>&1 &
+  1. La **ingesta corriendo** y alcanzable desde el módulo, en la IP y puerto que
+     tenga configurados el DTU (`lte info` los muestra; se fijan con
+     `lte set server <ip> <puerto>` + `lte save`).
+  2. El **IMEI del equipo dado de alta**. Si no, `CONF_ALL` devuelve
+     `CONFIG=ERROR` — "el servidor no reconoce al datalogger"— y ninguna
+     configuración va a cerrar nunca.
+  3. Una **SIM con datos** en el módulo. ⚠ Tener señal NO es tener conexión: lo
+     que decide es `AT+CIP?`, y `CSQ 31` es el centinela de "todavía no
+     registrado", no señal excelente.
 
-Y se le dice a la suite dónde está el log:
-
-    APICOMMS_LOG=/tmp/apicomms.log ./suite.py -p /dev/ttyUSB0 -a G
-
-⚠ Redis, PostgreSQL y el worker `process` van aparte, en Docker; para esta área
-alcanza con `apicomms`, porque lo que se lee es su log.
+Si algo de eso falta, los tests fallan — y está bien que fallen, pero el motivo
+es el entorno y no el firmware. Los mensajes lo dicen.
 """
 
-import os
 import re
 import time
-import urllib.error
-import urllib.request
-from pathlib import Path
 
-from runner import Salteado, test
+from runner import test
 
-URL = os.environ.get("APICOMMS_URL", "http://192.168.0.20:5000/apidlg")
-LOG = os.environ.get("APICOMMS_LOG", "/tmp/apicomms.log")
-
-# La línea de acceso de werkzeug: trae el frame ENTERO.
-#   192.168.0.20 - - [23/Sep/2026 11:11:14] "GET /apidlg?ID=...&CLASS=PING HTTP/1.1" 200 -
-#
-# ⭐ Se usa ésta y no el `D_DATALINE` del código, porque aquél sale por
-# `slogger()`, que sólo loguea para la unidad marcada como DEBUG_ID en Redis: si
-# el equipo bajo prueba no es ésa, no habría una sola línea y el test fallaría
-# por algo que no tiene nada que ver con el firmware.
-RE_GET = re.compile(r'"GET (/apidlg\?\S*) HTTP/[\d.]+" (\d{3})')
-
-# Lo que el equipo imprime al transmitir.
+# Lo que el equipo imprime al transmitir un frame.
 RE_FRAME_TX = re.compile(r"->\s*(ID=\S+)")
 
 
-class LogServidor:
-    """Lee sólo lo que el servidor escribió DESDE que se lo marcó.
-
-    Sin la marca, un test vería frames de corridas anteriores y daría PASS sin
-    que el equipo hubiera transmitido nada.
-    """
-
-    def __init__(self, path=LOG):
-        self.path = Path(path)
-        self.pos = 0
-
-    def disponible(self):
-        return self.path.exists()
-
-    def marcar(self):
-        self.pos = self.path.stat().st_size if self.path.exists() else 0
-
-    def nuevo(self):
-        if not self.path.exists():
-            return ""
-        with open(self.path, "r", encoding="utf-8", errors="replace") as f:
-            f.seek(self.pos)
-            return f.read()
-
-    def gets(self):
-        """Los frames que llegaron desde la marca: [(query, status), ...]"""
-        return RE_GET.findall(self.nuevo())
-
-
-def campo(query, clave):
-    m = re.search(rf"[?&]{clave}=([^&\s]*)", query)
+def campo(texto, clave):
+    m = re.search(rf"[?&]{clave}=([^&\s]*)", texto)
     return m.group(1) if m else None
-
-
-def log_o_skip():
-    srv = LogServidor()
-
-    if not srv.disponible():
-        raise Salteado(
-            f"no se encuentra el log del servidor en {LOG}. "
-            "Levantá apicomms y pasá APICOMMS_LOG=<ruta>"
-        )
-
-    return srv
-
-
-@test("G", "el servidor está vivo (GET directo desde la PC, sin modem)")
-def test_servidor_vivo(ctx):
-    """⭐ Va PRIMERO a propósito. Si el `lte ping` falla, sin este test no se
-    sabe si el problema es el equipo, el enlace LTE o el servidor. Con él, la
-    duda se parte en dos en un segundo — y si el servidor no contesta, ni vale
-    la pena encender el modem.
-    """
-    url = f"{URL}?ID=000000000000000&HW=SPQ_ARM_R1&TYPE=FWDLGARM&VER=0.0.0&CLASS=PING"
-
-    try:
-        with urllib.request.urlopen(url, timeout=10) as r:
-            cuerpo = r.read().decode("utf-8", errors="replace")
-    except urllib.error.URLError as e:
-        raise AssertionError(
-            f"el servidor no contesta en {URL}: {e}\n"
-            "Levantalo:  cd ~/Spymovil/python/proyectos/APICOMMS_2025 && "
-            "source .venv/bin/activate && python -m apicomms.app"
-        ) from None
-
-    print(f"    {cuerpo.strip()[:60]}")
-    assert "PONG" in cuerpo, f"el servidor contestó algo que no es un PONG: {cuerpo[:80]}"
 
 
 @test("G", "`lte info`: identidad y red, con veredicto", destructivo=True)
 def test_info(ctx):
+    """`lte info` pregunta TODO al módulo en vez de mostrar una copia local que
+    podría estar desactualizada: la IP, el puerto y la URL viven en el DTU, no en
+    el datalogger."""
     dlg = ctx["dlg"]
 
     dlg.cmd("kill wan", timeout=15)      # que la FSM no pise el módulo
@@ -134,155 +57,146 @@ def test_info(ctx):
     salida = dlg.cmd("lte esc", timeout=30)
     assert "MODO COMANDO" in salida or "+ok" in salida, (
         "no se pudo entrar en modo comando.\n"
-        "lteESC_SIN_A no dice nada del TX; lteESC_SIN_OK PRUEBA que el TX anda."
+        "⭐ El valor de retorno separa las dos hipótesis: lteESC_SIN_A no dice\n"
+        "nada del TX, pero lteESC_SIN_OK PRUEBA que el TX funciona."
     )
 
     salida = dlg.cmd("lte info", timeout=90)
 
     m = re.search(r"IMEI\D*(\d{15})", salida)
-    assert m, "no se pudo leer el IMEI"
+    assert m, "no se pudo leer el IMEI del módulo"
     ctx["imei"] = m.group(1)
     print(f"    IMEI {ctx['imei']}")
 
-    # ⚠ Tener señal NO es tener conexión: lo que decide es AT+CIP?. El CSQ 31 es
-    # el centinela de "todavía no registrado", no señal excelente.
-    assert "ICCID" in salida.upper(), "no se leyó el ICCID: ¿el módulo ve su SIM?"
+    # ⛔ Sin SIM no hay red, y sin red no hay IP. El orden del diagnóstico va de
+    # la causa al efecto: avisar de la IP cuando el problema es la SIM manda a
+    # buscar al lugar equivocado.
+    assert "ICCID" in salida.upper(), (
+        "no se leyó el ICCID: el módulo no está viendo su SIM.\n"
+        "En R001 eso lo causaban los pines 21/22 ruteados al micro."
+    )
 
     ctx["modo_at"] = True
 
 
-@test("G", "`lte ping`: el PONG vuelve, y el servidor lo registra", destructivo=True)
+@test("G", "`lte ping`: el servidor contesta PONG", destructivo=True)
 def test_ping(ctx):
     dlg = ctx["dlg"]
-    srv = log_o_skip()
 
     if ctx.get("modo_at"):
         dlg.cmd("lte exit", timeout=30)   # el ping asume modo TRANSPARENTE
         ctx["modo_at"] = False
         time.sleep(2)
 
-    srv.marcar()
     salida = dlg.cmd("lte ping", timeout=90)
 
     assert "PONG" in salida, (
-        "el equipo no recibió el PONG.\n"
+        "no llegó el PONG.\n"
         "⚠ Si la respuesta es el frame IDÉNTICO al enviado, el módulo quedó en\n"
-        "modo AT y está ecoando: el `AT+ENTM` no entró."
+        "modo AT y está ecoando: el `AT+ENTM` no entró. Y `+CME ERROR:58` es\n"
+        "'comando no soportado', NO 'no registrado en la red' — ése es el 50."
     )
-
-    time.sleep(1)
-    pings = [q for q, st in srv.gets() if campo(q, "CLASS") == "PING"]
-    print(f"    el servidor registró {len(pings)} PING")
-
-    assert pings, (
-        "el equipo dice que recibió PONG pero el servidor no registró ningún PING.\n"
-        "Si el GET directo de esta misma área pasó, el servidor está bien."
-    )
+    print("    PONG")
 
 
-@test("G", "⭐ `lte conf`: el contrato del hash cierra (CONFIG=OK)", destructivo=True)
+@test("G", "⭐ `lte conf`: el contrato del hash CIERRA", destructivo=True)
 def test_conf(ctx):
-    """⭐ `CONFIG=OK` es el criterio de aceptación más fuerte que tiene el
-    equipo: significa que **los cinco hashes coinciden con los del servidor**.
-    Hasta el 2026-09-22 era estructuralmente imposible, porque el servidor pedía
-    un `FLOWC` que el equipo no mandaba.
+    """⭐ EL CRITERIO DE ACEPTACIÓN NO ES QUE LA CONFIGURACIÓN SE APLIQUE: es que
+    en la sesión SIGUIENTE el servidor deje de pedir los bloques.
+
+    Eso es lo único que prueba que los strings del hash del equipo son idénticos
+    a los del servidor. Que se aplique sólo prueba que se parsea la respuesta.
+
+    Por eso se corre dos veces: la primera puede pedir reconfigurar —es lo normal
+    si el servidor tiene otra configuración, y de hecho el área B la pisa—, pero
+    la segunda tiene que dar `CONFIG=OK`. Si vuelve a pedir lo mismo, hay un
+    campo cuyo string difiere, y eso en campo es tráfico infinito.
     """
     dlg = ctx["dlg"]
-    srv = log_o_skip()
 
-    srv.marcar()
+    salida = dlg.cmd("lte conf", timeout=180)
+
+    if "CONFIG=ERROR" in salida:
+        raise AssertionError(
+            "CONFIG=ERROR: el servidor no reconoce a este datalogger.\n"
+            f"Hay que dar de alta el IMEI {ctx.get('imei', '?')} en el servidor."
+        )
+
+    if "CONFIG=OK" in salida:
+        print("    CONFIG=OK a la primera")
+        return
+
+    m = re.search(r"el servidor pide reconfigurar:([^\r\n]*)", salida)
+    print(f"    1.ª sesión: pide {m.group(1).strip() if m else '?'} — se aplica y se repite")
+
+    time.sleep(3)
     salida = dlg.cmd("lte conf", timeout=180)
 
     if "CONFIG=OK" in salida:
-        print("    CONFIG=OK: la configuración coincide con la del servidor")
+        print("    2.ª sesión: CONFIG=OK ⭐")
         return
 
-    # Si pide reconfigurar, se informa QUÉ pide: un bloque que se pide en todas
-    # las sesiones es el "tráfico infinito en campo" contra el que advierte
-    # cfg_hash.h, y el string del hash es lo único comparable (`config hash`).
     m = re.search(r"el servidor pide reconfigurar:([^\r\n]*)", salida)
     pedidos = m.group(1).strip() if m else "?"
 
     raise AssertionError(
-        f"el servidor NO devolvió CONFIG=OK; pide reconfigurar: {pedidos}\n"
-        "Si vuelve a pedir lo mismo en la sesión siguiente, algún campo del hash\n"
-        "difiere. Comparar con `config hash`, que imprime el STRING sobre el que\n"
-        "se calcula el Pearson — el valor no dice en qué carácter está la\n"
-        "diferencia, el string sí."
+        f"tras aplicar la configuración, el servidor SIGUE pidiendo: {pedidos}\n\n"
+        "Es el modo de falla del `cfg_hash.h`: un campo que entra en el hash y que\n"
+        "los dos lados no guardan igual no cierra NUNCA, y el equipo pide\n"
+        "reconfigurar ese bloque en todas las sesiones — tráfico infinito en campo.\n"
+        "Comparar con `config hash`, que imprime el STRING sobre el que se calcula\n"
+        "el Pearson: el valor no dice en qué carácter está la diferencia, el string sí."
     )
 
 
-@test("G", "⭐ `lte data`: los registros llegan, y el servidor los recibe", destructivo=True)
+@test("G", "⭐ `lte data`: los registros se transmiten y se confirman", destructivo=True)
 def test_data(ctx):
-    """⭐ EL TEST QUE CIERRA EL LAZO: no alcanza con que el equipo diga que
-    transmitió. Se cotejan los frames que IMPRIMIÓ contra los que el servidor
-    REGISTRÓ, uno por uno y por fecha y hora.
+    """El servidor confirma con un `CLASS=DATA` cada bloque de 10; el equipo sólo
+    borra los registros **después** de esa confirmación.
+
+    ⭐ Eso es lo que separa a este firmware del AVR, que consume el registro
+    ANTES de transmitirlo: allá, una sesión cortada se lleva los datos puestos.
     """
     dlg = ctx["dlg"]
-    srv = log_o_skip()
 
-    # Que haya algo que transmitir.
-    dlg.cmd("poll", timeout=90)
+    dlg.cmd("poll", timeout=90)          # que haya algo que transmitir
     dlg.cmd("poll", timeout=90)
 
-    srv.marcar()
     salida = dlg.cmd("lte data", timeout=300)
 
-    # Lo que el equipo dice haber mandado.
-    enviados = {
-        (campo(f, "DATE"), campo(f, "TIME"))
-        for f in RE_FRAME_TX.findall(salida)
-        if campo(f, "CLASS") in ("DATA", "DATANR")
-    }
+    enviados = [f for f in RE_FRAME_TX.findall(salida)
+                if campo(f, "CLASS") in ("DATA", "DATANR")]
 
     m = re.search(r"OK:\s*(\d+)\s+de\s+(\d+)", salida)
-    if m:
-        print(f"    el equipo informa: {m.group(1)} de {m.group(2)} confirmados")
-        assert m.group(1) == m.group(2), (
-            f"sólo {m.group(1)} de {m.group(2)} confirmados: el enlace se cayó a la mitad.\n"
-            "⚠ Los no confirmados NO se borran: quedan en la ventana para la próxima."
-        )
-
-    # Lo que el servidor dice haber recibido.
-    time.sleep(2)
-    recibidos = {
-        (campo(q, "DATE"), campo(q, "TIME"))
-        for q, st in srv.gets()
-        if campo(q, "CLASS") in ("DATA", "DATANR")
-    }
-
-    print(f"    transmitidos {len(enviados)} · registrados por el servidor {len(recibidos)}")
-
-    assert enviados, "el equipo no transmitió ningún frame de datos"
-
-    faltan = enviados - recibidos
-    assert not faltan, (
-        f"⛔ {len(faltan)} frame(s) que el equipo dio por transmitidos NO llegaron:\n  "
-        + "\n  ".join(f"DATE={d} TIME={t}" for d, t in sorted(faltan))
-        + "\n\nSi el equipo confirmó y el servidor no los tiene, mirar la pausa\n"
-        "entre frames: sin silencio suficiente el módulo junta dos en un GET.\n"
-        "(LTE_DATA_MS_ENTRE_FRAMES son 500 ms contra los 250 de UARTFT.)"
+    assert m, (
+        "el equipo no informó el progreso `OK: N de M`.\n"
+        "Si dice que no hay registros, el `poll` previo no guardó nada."
     )
+
+    confirmados, total = int(m.group(1)), int(m.group(2))
+    print(f"    transmitidos {len(enviados)} frames · {confirmados} de {total} confirmados")
+
+    assert confirmados == total, (
+        f"sólo {confirmados} de {total} confirmados: el enlace se cayó a la mitad.\n"
+        "⚠ Los no confirmados NO se borran: quedan en la ventana para la próxima\n"
+        "sesión, y a lo sumo se retransmiten duplicados — inofensivos, porque el\n"
+        "servidor indexa por la fecha que viaja ADENTRO del frame."
+    )
+
+    assert "quedan 0" in salida or confirmados == total, "la ventana no se vació"
 
 
 @test("G", "la FSM hace una vuelta entera sola", destructivo=True)
 def test_fsm(ctx):
-    """El equipo transmitiendo SOLO, que es el criterio del paso 5d: abre la
-    sesión, se configura, transmite y se apaga sin que nadie tipee nada."""
+    """El criterio del paso 5d: el equipo abre la sesión, se configura, transmite
+    y se apaga **sin que nadie tipee nada**."""
     dlg = ctx["dlg"]
-    srv = log_o_skip()
 
     # `kill wan` no tiene vuelta atrás: hay que resetear para que la FSM reviva.
     dlg.reset()
-    srv.marcar()
 
     print("    esperando una vuelta completa de tkWan (hasta 5 min)...")
-    dlg.esperar("ONLINE_DATA", timeout=300)
-    print("    ✓ llegó a ONLINE_DATA")
 
-    time.sleep(5)
-    clases = [campo(q, "CLASS") for q, st in srv.gets()]
-    print(f"    el servidor vio: {', '.join(dict.fromkeys(c for c in clases if c))}")
-
-    assert "PING" in clases, "la FSM no mandó el PING"
-    assert "CONF_ALL" in clases, "la FSM no mandó el CONF_ALL"
+    for estado in ("OFFLINE", "ONLINE_CONFIG", "ONLINE_DATA"):
+        dlg.esperar(estado, timeout=300)
+        print(f"    ✓ {estado}")

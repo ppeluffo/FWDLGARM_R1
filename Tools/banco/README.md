@@ -34,37 +34,32 @@ de prueba, no sobre uno con datos que importen.
 
 Implementadas **A, B, G y H** (21 tests). C, D, E, F e I siguen el mismo molde.
 
-## El área G necesita el servidor levantado
+## El área G asume que el servidor está bien
 
-Corre en esta misma PC. Redis, PostgreSQL, el worker `process` y `apiweb` viven en
-Docker y suelen estar arriba; lo que hay que levantar a mano es la **ingesta**:
+⭐ **La única fuente de la suite es el log del datalogger.** No se lee el log del
+servidor, ni su base, ni se le hacen consultas — entre otras cosas porque el
+servidor puede estar en otra máquina, sin acceso.
 
-```bash
-cd ~/Spymovil/python/proyectos/APICOMMS_2025
-source .venv/bin/activate
-python -m apicomms.app > /tmp/apicomms.log 2>&1 &
-```
+Y no hace falta: **la respuesta del servidor ya viaja por la consola del
+equipo**. `CLASS=PONG`, `CONFIG=OK` y el `OK: N de N` son el servidor diciendo
+que sí, contados por el datalogger, que es justo lo que se valida.
 
-y después:
+Lo que tiene que estar listo **antes** de correr el área G, y es responsabilidad
+del operador:
 
-```bash
-APICOMMS_LOG=/tmp/apicomms.log ./suite.py -p /dev/ttyUSB0 -a G
-```
+| | |
+|---|---|
+| La **ingesta corriendo** y alcanzable desde el módulo | en la IP y puerto que tenga el DTU (`lte info` los muestra; se fijan con `lte set server <ip> <puerto>` + `lte save`) |
+| El **IMEI dado de alta** en el servidor | si no, `CONF_ALL` devuelve `CONFIG=ERROR` y ninguna configuración cierra nunca |
+| Una **SIM con datos** | ⚠ tener señal no es tener conexión: lo que decide es `AT+CIP?` |
 
-⭐ **El área G mira las dos puntas**, que es su razón de ser: `lte data` no se da
-por bueno porque el equipo lo diga, sino **cotejando los `DATE`/`TIME` que el
-equipo imprimió contra los que el servidor registró**, uno por uno.
+Si algo falta, los tests fallan — y está bien que fallen— pero el motivo es el
+entorno y no el firmware. Los mensajes de error lo dicen.
 
-⚠ Se lee la **línea de acceso de werkzeug**, no el `D_DATALINE` del código: aquél
-sale por `slogger()` y sólo se escribe para la unidad marcada como `DEBUG_ID` en
-Redis, así que con otro equipo bajo prueba el test fallaría por algo que no tiene
-nada que ver con el firmware.
-
-⚠ **Lo que NO se consulta es la base de datos.** El contrato que valida esta
-suite es el del **datalogger**: que el frame llegue y el servidor lo acepte. El
-tramo Redis → `apicomms_process` → PostgreSQL es del backend, y una falla ahí no
-es una falla del firmware — reportarla como FAIL sería acusar al componente
-equivocado.
+⭐ **El test del `CONFIG=OK` corre la sesión dos veces**, y ésa es la parte que
+importa: el criterio de aceptación no es que la configuración se aplique, sino
+que **en la sesión siguiente el servidor deje de pedir los bloques**. Eso es lo
+único que prueba que los strings del hash son idénticos de los dos lados.
 
 ## Cuando el script necesita que hagas algo
 

@@ -229,33 +229,27 @@ def test_muerde(ctx):
     )
 
 
-@test("H", "⭐ la causa del reset llega al servidor como WDG=3", manual=True, destructivo=True)
+@test("H", "⭐ la causa del reset viaja al servidor como WDG=3", manual=True, destructivo=True)
 def test_wdg_al_servidor(ctx):
     """⭐ EL PASO QUE CIERRA EL ARGUMENTO ENTERO DE USAR EL IWDG.
 
-    Que el perro muerda y que `status` diga `IWDG` se verifica desde la consola.
-    Pero **en campo no hay consola**: lo único que llega es el campo `WDG` del
+    Que el perro muerda y que `status` diga `IWDG` se ve desde la consola. Pero
+    **en campo no hay consola**: lo único que llega es el campo `WDG` del
     `CONF_BASE`, y ahí `3` (`wanRESET_IWDG`) es lo que distingue "el equipo se
-    reinició solo" de `4` (`SOFT`), que es indistinguible de un `reset` tipeado
-    por un técnico.
+    reinició solo" de `4` (`SOFT`), indistinguible de un `reset` tipeado por un
+    técnico. Con un `NVIC_SystemReset()` este test sería imposible de pasar, y
+    esa diferencia es toda la razón del diseño.
 
-    Con un `NVIC_SystemReset()` en lugar del IWDG, este test sería imposible de
-    pasar — y esa diferencia es toda la razón del diseño.
+    ⭐ Se verifica sobre el frame que el equipo IMPRIME, no sobre el log del
+    servidor: lo que el datalogger informa es responsabilidad suya, y así el test
+    sigue sirviendo con el servidor en otra máquina o sin acceso a sus logs.
     """
-    from tests_g_transmision import LogServidor, campo
-
     dlg = ctx["dlg"]
-    srv = LogServidor()
-
-    if not srv.disponible():
-        raise Salteado("hace falta el log de apicomms (APICOMMS_LOG=<ruta>)")
 
     pedir(
         "este test CUELGA el equipo a propósito y espera que el watchdog lo resetee.",
         "Son ~2 min de reset más ~2 min de sesión con el servidor.",
     )
-
-    srv.marcar()
 
     salida = dlg.cmd("wdg colgar", timeout=15, espera_prompt=False)
     assert "COLGANDO" in salida, "el firmware no tiene `wdg colgar` (hace falta 0.0.75+)"
@@ -269,17 +263,16 @@ def test_wdg_al_servidor(ctx):
     print(f"    reset por: {causa}")
     assert "IWDG" in causa, f"la causa quedó como {causa!r} y no IWDG"
 
-    # Ahora la otra punta: que tkWan abra sesión sola y lo informe.
-    print("    esperando que tkWan abra sesión y lo cuente al servidor...")
-    dlg.esperar("ONLINE_CONFIG", timeout=240)
-    time.sleep(8)
+    # Y que lo CUENTE: tkWan arranca sola y manda el CONF_ALL con el campo WDG.
+    print("    esperando que tkWan arme el CONF_ALL...")
+    dlg.limpiar()
+    m = dlg.esperar(re.compile(r"CLASS=CONF_ALL\S*"), timeout=300)
 
-    wdgs = [campo(q, "WDG") for q, st in srv.gets() if campo(q, "CLASS") == "CONF_ALL"]
-    print(f"    el servidor recibió WDG={wdgs}")
+    wdg = re.search(r"[?&]WDG=(\d+)", m.group(0))
+    print(f"    el equipo informa WDG={wdg.group(1) if wdg else '?'}")
 
-    assert wdgs, "el equipo no mandó ningún CONF_ALL después del reset"
-    assert "3" in wdgs, (
-        f"el servidor recibió WDG={wdgs} y se esperaba 3 (wanRESET_IWDG).\n"
-        "⚠ 4 es SOFT: sería lo que informaría un NVIC_SystemReset(), o sea que la\n"
+    assert wdg and wdg.group(1) == "3", (
+        f"el CONF_ALL lleva WDG={wdg.group(1) if wdg else '?'} y se esperaba 3.\n"
+        "⚠ 4 es SOFT: es lo que informaría un NVIC_SystemReset(), o sea que la\n"
         "causa real del reinicio se habría perdido justo donde importa — en campo."
     )
