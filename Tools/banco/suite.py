@@ -22,6 +22,8 @@ import runner
 # necesita el modem, el servidor y el esclavo Modbus.
 import tests_a_identidad  # noqa: F401
 import tests_b_config     # noqa: F401
+import tests_g_transmision  # noqa: F401
+import tests_h_watchdog  # noqa: F401
 
 if __name__ == "__main__":
     sys.exit(runner.main())

@@ -100,7 +100,7 @@ def _fmt_contexto(exc, dlg):
     return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
 
-def correr(dlg, areas=None, destructivos=True, version_esperada=None):
+def correr(dlg, areas=None, destructivos=True, manuales=True, version_esperada=None):
     ctx = {"dlg": dlg, "version_esperada": version_esperada}
     resultados = []
 
@@ -108,6 +108,11 @@ def correr(dlg, areas=None, destructivos=True, version_esperada=None):
 
     if not destructivos:
         tests = [t for t in tests if not t["destructivo"]]
+
+    # Sin esto la suite no se puede dejar corriendo sola: un test manual bloquea
+    # en `input()` hasta que alguien vuelva.
+    if not manuales:
+        tests = [t for t in tests if not t["manual"]]
 
     print(f"\n{NEGRITA}{len(tests)} tests · log en {dlg.log_path}{FIN}\n")
 
@@ -213,6 +218,11 @@ def main(descripcion="suite de banco del datalogger"):
         action="store_true",
         help="saltea lo que pisa configuración o formatea la microSD",
     )
+    ap.add_argument(
+        "--sin-manuales",
+        action="store_true",
+        help="saltea los tests que necesitan que alguien haga algo (para correr desatendido)",
+    )
     ap.add_argument("--sin-eco", action="store_true", help="no vuelca el serial a pantalla")
     args = ap.parse_args()
 
@@ -225,6 +235,7 @@ def main(descripcion="suite de banco del datalogger"):
             dlg,
             areas=areas,
             destructivos=not args.sin_destructivos,
+            manuales=not args.sin_manuales,
             version_esperada=args.version_esperada,
         )
         return reporte(resultados, dlg)

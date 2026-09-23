@@ -11,6 +11,10 @@ forma sistemática y formal** en vez de a mano con el minicom.
 ```
 
 ⚠ **Cerrá el minicom antes**: el puerto es exclusivo.
+
+⛔ **No flashees mientras corre la suite.** Un download reinicia el equipo, y los
+tests que verifican "no se reseteó" lo reportan como falso positivo del watchdog
+— y ahí uno se pone a buscar un bug que no existe. Ya pasó el 2026-09-23.
 ⚠ **La suite pisa la configuración y formatea la microSD.** Corre sobre equipos
 de prueba, no sobre uno con datos que importen.
 
@@ -24,11 +28,43 @@ de prueba, no sobre uno con datos que importen.
 | D | almacenamiento: ventana, volcado, lotes | ✋ sacar la microSD |
 | E | Modbus | ✋ conectar el esclavo |
 | F | control de presión | ✋ conectarlo |
-| G | transmisión: PING, CONF_ALL, DATA, la FSM | ✋ el servidor |
-| H | watchdog | ✋ el `lte bridge` largo |
+| **G** | ⭐ transmisión: el servidor vivo, PING, CONF_ALL, DATA, la FSM | |
+| **H** | ⭐ watchdog: kill, bridge, prórrogas, el cuelgue y el `WDG=3` | ✋ la microSD y el cuelgue |
 | I | régimen dormido, de una sola vía | ✋ desconectar `TERM_SENSE` |
 
-Hoy están implementadas **A y B**. El resto sigue el mismo molde.
+Implementadas **A, B, G y H** (21 tests). C, D, E, F e I siguen el mismo molde.
+
+## El área G necesita el servidor levantado
+
+Corre en esta misma PC. Redis, PostgreSQL, el worker `process` y `apiweb` viven en
+Docker y suelen estar arriba; lo que hay que levantar a mano es la **ingesta**:
+
+```bash
+cd ~/Spymovil/python/proyectos/APICOMMS_2025
+source .venv/bin/activate
+python -m apicomms.app > /tmp/apicomms.log 2>&1 &
+```
+
+y después:
+
+```bash
+APICOMMS_LOG=/tmp/apicomms.log ./suite.py -p /dev/ttyUSB0 -a G
+```
+
+⭐ **El área G mira las dos puntas**, que es su razón de ser: `lte data` no se da
+por bueno porque el equipo lo diga, sino **cotejando los `DATE`/`TIME` que el
+equipo imprimió contra los que el servidor registró**, uno por uno.
+
+⚠ Se lee la **línea de acceso de werkzeug**, no el `D_DATALINE` del código: aquél
+sale por `slogger()` y sólo se escribe para la unidad marcada como `DEBUG_ID` en
+Redis, así que con otro equipo bajo prueba el test fallaría por algo que no tiene
+nada que ver con el firmware.
+
+⚠ **Lo que NO se consulta es la base de datos.** El contrato que valida esta
+suite es el del **datalogger**: que el frame llegue y el servidor lo acepte. El
+tramo Redis → `apicomms_process` → PostgreSQL es del backend, y una falla ahí no
+es una falla del firmware — reportarla como FAIL sería acusar al componente
+equivocado.
 
 ## Cuando el script necesita que hagas algo
 
