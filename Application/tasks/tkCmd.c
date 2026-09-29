@@ -18,6 +18,47 @@
 StaticTask_t tkCmd_TCB;
 StackType_t  tkCmd_Stack[ tkCmd_STACK_SIZE ];
 
+extern UART_HandleTypeDef huart1;
+
+/*------------------------------------------------------------------------------
+ * ⭐ DIAGNÓSTICO DEL TX: emitir por POLEO, sin driver
+ *
+ * Esto NO pasa por drv_uart ni por FRTOS-IO: llama a HAL_UART_Transmit() directo
+ * y espera con el periférico. O sea que no usa la interrupción, ni el semáforo
+ * xTxDone, ni el mutex, ni el candado de energía — nada de lo que el camino
+ * normal necesita para funcionar.
+ *
+ * Por eso parte el problema en dos con una sola bajada:
+ *
+ *   sale texto por poleo, pero NO el banner  -> el TX físico ANDA. El problema
+ *                                               está en el driver por
+ *                                               interrupción o en su ISR.
+ *   no sale NADA                             -> el problema es anterior al
+ *                                               firmware: PB6, el conector, el
+ *                                               cable o el adaptador.
+ *
+ * El firmware de referencia traía esta misma herramienta, y no por casualidad:
+ * en esta placa ya hubo una vez un componente malo en el camino serial, con este
+ * mismo síntoma.
+ *----------------------------------------------------------------------------*/
+static void prvTxPoleo( const char *pcTexto )
+{
+    ( void ) HAL_UART_Transmit( &huart1,
+                                ( const uint8_t * ) pcTexto,
+                                ( uint16_t ) strlen( pcTexto ),
+                                HAL_MAX_DELAY );
+}
+
+/*
+ * En 1, tkCmd no hace NADA más que emitir 'U' para siempre, por poleo.
+ *
+ * ⭐ La 'U' es 0x55, o sea 01010101: a 9600 baudios da una onda cuadrada
+ * perfecta de 4800 Hz en PB6, que se ve con cualquier osciloscopio y permite
+ * MEDIR el baudrate real en vez de suponerlo. Si el micro emite y en la terminal
+ * no llega nada, lo que falla está entre el pin y la PC.
+ */
+#define TKCMD_ONDA_U        0
+
 /*------------------------------------------------------------------------------
  * Los comandos
  *----------------------------------------------------------------------------*/
@@ -163,14 +204,30 @@ void tkCmd( void *pvParameters )
 
     char cChar;
 
+    /*
+     * Lo PRIMERO, y por poleo: si esto no aparece en la terminal, el problema no
+     * está en el driver ni en FreeRTOS. Ver el comentario de prvTxPoleo().
+     */
+    prvTxPoleo( "\r\n\r\n[A] tkCmd arranco (esto sale por POLEO)\r\n" );
+
+#if ( TKCMD_ONDA_U == 1 )
+    for( ;; )
+    {
+        prvTxPoleo( "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU" );
+    }
+#endif
+
     /* Abre los drivers de FRTOS-IO desde ADENTRO de la tarea: crear semáforos y
        stream buffers necesita el scheduler ya corriendo. Si esto fallara,
        drv_uart_write() haría xSemaphoreTake(NULL) y el configASSERT congelaría
        todo, incluido el LED. */
     if( frtos_open_all() == false )
     {
+        prvTxPoleo( "[!] frtos_open_all() FALLO\r\n" );
         Error_Handler();
     }
+
+    prvTxPoleo( "[B] drivers abiertos; lo que sigue va por INTERRUPCION\r\n" );
 
     drv_term_sense_init();
 

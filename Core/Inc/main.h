@@ -81,6 +81,12 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define TERM_SENSE_Pin GPIO_PIN_5
+#define TERM_SENSE_GPIO_Port GPIOB
+#define TERM_TX_Pin GPIO_PIN_6
+#define TERM_TX_GPIO_Port GPIOB
+#define TERM_RX_Pin GPIO_PIN_7
+#define TERM_RX_GPIO_Port GPIOB
 #define LED_Pin GPIO_PIN_9
 #define LED_GPIO_Port GPIOB
 
@@ -118,7 +124,7 @@ void Error_Handler(void);
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
 #define FW_NOMBRE              "FWDLGARM_R1"   /* el del banner, NO el del frame */
-#define FW_VERSION             "0.0.2"
+#define FW_VERSION             "0.0.3"
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*
