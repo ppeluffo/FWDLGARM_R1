@@ -605,6 +605,41 @@ los que corresponden.
 - Lo que queda por delante no es optimizar esto: es que cada periférico nuevo (modem, microSD, ADC)
   entre con su candado y su corte de alimentación, sin arruinar estos 5 µA.
 
+#### ⛔ El consumo de la placa nueva: qué está descartado (2026-09-29)
+
+Los ~390 µA de la placa nueva **despoblada** (micro + LED, sin la fuente en la medición). Lo que se
+midió, cada cosa con el experimento que la descartó:
+
+| Sospechoso | Cómo se descartó |
+|---|---|
+| El firmware de aplicación | **`v0.0.14`** (2 tareas, sin `tkWan`) mide **lo mismo** que `0.0.78` |
+| Una fuga resistiva | **6,8 MΩ** entre 3V3 y GND = 0,5 µA |
+| El micro girando sin dormir | arranca en 11 mA y **baja** a 0,39: el tickless funciona |
+| ⭐ **El micro / la placa / la soldadura** | **`PATRON_CONSUMO` da 3 µA** — ver abajo |
+| `DBGMCU_CR` | con `PC_LIMPIAR_DBGMCU 0` sigue dando 3 µA |
+
+⭐ **`PATRON_CONSUMO`** (en `main.c`, mismo mecanismo que `PRUEBA_MINIMA`) es el instrumento que
+cerró la mitad del problema: bare-metal, sin FreeRTOS, **todos los pines en analógico**, LSE + RTC
+vivos, Stop 2 permanente. Dio **3 µA** — mejor que los 5 de referencia, porque no corre el LPTIM1.
+Con eso el micro queda limpio y lo que sobra está en lo que el firmware agrega.
+`PC_PERIFERICOS` es un bitmask para sumarle periféricos de a uno y bisectar.
+
+⛔ **Lo que NO sirve, y costó dos bajadas de firmware: aislar pines "desde arriba".** Poner en
+analógico los pines de un periférico que sigue **habilitado** no es inocuo — el I2C2 con SCL/SDA en
+analógico ve el bus clavado en bajo y dispara interrupciones de error sin fin. El micro gira en ISRs
+y el scheduler nunca llega a `tkCtl`. ⚠ **El síntoma es 11 mA con el LED apagado, o sea idéntico a
+"la placa consume muchísimo"**: un HardFault y una fuga se leen igual en el amperímetro. De ahí la
+regla — **todo firmware de ensayo lleva una marca de LED que diga hasta dónde llegó**, o las dos
+fallas son indistinguibles.
+
+⭐ **La conclusión de método**: se construye **desde el patrón hacia arriba**, agregando de a una
+cosa, no quitándole piezas al firmware completo. Es el bring-up incremental de siempre aplicado al
+consumo.
+
+⚠ **Y medir consumo sobre una placa DESPOBLADA no dice nada del equipo**: el firmware configura los
+pines de R001 entera, y sin los circuitos que los manejan las entradas flotan. Los **390 µA** de la
+despoblada y los **354 µA** de la poblada **no son el mismo número**.
+
 #### ⚠ Con el tickless andando, el SWD se pone difícil
 
 El micro pasa **más del 98 % del tiempo en Stop 2, donde el SWD está muerto.** Un intento de conectar

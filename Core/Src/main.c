@@ -74,6 +74,97 @@
 #define PM_PAUSA_MS          1000U   /* apagón que separa las etapas         */
 #define PM_LENTO_MS           400U   /* etapa 4: latido lento, ~1,2 Hz       */
 
+/*
+ * ---------------------------------------------------------------------------
+ * PATRON DE CONSUMO  (2026-09-29)
+ * ---------------------------------------------------------------------------
+ * En 1, main() se desvía a prvPatronConsumo() ANTES de que se inicialice nada
+ * —ni siquiera la consola— y no vuelve.
+ *
+ * Contesta UNA sola pregunta: **¿cuánto consume este micro dormido, con todo
+ * lo demás apagado?** Todo lo que hace está elegido para que la respuesta no
+ * dependa de nada más:
+ *
+ *   - NO configura el PLL: se queda con el MSI a 4 MHz tal como quedó el micro
+ *     tras el reset. Cuanto menos se toque, menos hay que sospechar.
+ *   - NO inicializa un solo periférico: ni USART, ni I2C, ni SPI, ni ADC.
+ *   - Pone TODOS los pines de todos los puertos en ANALÓGICO, que es el estado
+ *     de menor fuga. Es justamente lo que el firmware de R001 no hace: él
+ *     configura los pines de la placa entera, y en una placa despoblada las
+ *     entradas quedan flotando.
+ *   - LIMPIA DBGMCU->CR. Ver el comentario de prvPatronConsumo().
+ *
+ * Referencia contra la cual comparar: el equipo dormido en Stop 2, con el LSE,
+ * el RTC y el LPTIM1 vivos, mide **~5 µA** (medido dos veces, con dos pisos de
+ * fuente distintos). Acá no está el LPTIM1, así que si algo debería dar MENOS.
+ *
+ * ⚠ Se mide con el ST-LINK DESENCHUFADO DEL USB: aporta ~145 µA.
+ *
+ * ⚠ El micro queda en Stop 2 PARA SIEMPRE, donde el SWD está muerto. Para
+ *   volver a programarlo hay que conectarse con Mode = "Under reset"
+ *   (mode=UR por CLI). NRST sigue funcionando siempre.
+ */
+#define PATRON_CONSUMO          0     /* 0 = operación normal */
+
+
+
+/*
+ * En 1 deja el LSE y el RTC corriendo, que es el estado real del equipo: se
+ * compara directo contra los ~5 µA de referencia.
+ * En 0 no enciende ningún oscilador de baja velocidad y mide el PISO ABSOLUTO
+ * del Stop 2, que es más discriminante para decidir si el micro está sano.
+ * Los destellos de arranque dicen cuál de las dos se bajó.
+ */
+#define PC_CON_LSE              1
+
+/*
+ * En 1 el patrón limpia DBGMCU_CR antes de dormir; en 0 lo deja como esté.
+ *
+ * ⭐ Poner esto en 0 es LA PRUEBA que separa las dos causas posibles, porque
+ * deja una sola variable: si el consumo vuelve a subir a ~390 µA, el culpable
+ * eran los bits de debug; si se queda en ~3 µA, eran los pines flotando.
+ */
+#define PC_LIMPIAR_DBGMCU       0
+
+/*
+ * ⭐ LA BISECCIÓN DEL CONSUMO, en bitmask.
+ *
+ * El patrón solo da 3 µA. Acá se le agregan periféricos —los mismos
+ * MX_*_Init() que corre la operación normal, con los mismos pines— y se vuelve
+ * a dormir en Stop 2. Cada bit que se prende acerca el ensayo al firmware
+ * real, así que el salto de consumo señala al culpable.
+ *
+ * Se inicializan DESPUÉS de poner todo en analógico, así que lo que se mide es
+ * el aporte del periférico MÁS el de los pines que él configura — que es
+ * exactamente el par que interesa.
+ *
+ * Plan: primero 0xFF para reproducir los ~390 µA en un entorno sin FreeRTOS.
+ * Con eso reproducido, búsqueda binaria: 0x0F, después la mitad que salte, y
+ * en tres bajadas queda el periférico.
+ *
+ *   0x01 RTC        0x10 UART4 (LTE)
+ *   0x02 LPTIM1     0x20 I2C2
+ *   0x04 USART1     0x40 SPI3
+ *   0x08 USART3     0x80 ADC1
+ */
+#define PC_PERIF_RTC        0x01U
+#define PC_PERIF_LPTIM1     0x02U
+#define PC_PERIF_USART1     0x04U
+#define PC_PERIF_USART3     0x08U
+#define PC_PERIF_UART4      0x10U
+#define PC_PERIF_I2C2       0x20U
+#define PC_PERIF_SPI3       0x40U
+#define PC_PERIF_ADC1       0x80U
+
+#define PC_PERIFERICOS      0x00U
+
+#define PC_DESTELLOS_CON_LSE   10U   /* "llegué, y con el LSE encendido"  */
+#define PC_DESTELLOS_SIN_LSE    5U   /* "llegué, sin osciladores"         */
+#define PC_DESTELLOS_SIN_XTAL   2U   /* el LSE se pidió y NO arrancó      */
+#define PC_ON_MS              100U
+#define PC_OFF_MS             100U
+#define PC_DESPERTAR_MS        60U   /* destello de "algo me despertó"    */
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -124,6 +215,9 @@ void StartDefaultTask(void *argument);
 /* USER CODE BEGIN PFP */
 #if ( PRUEBA_MINIMA == 1 )
 static void prvPruebaMinima( void );
+#endif
+#if ( PATRON_CONSUMO == 1 )
+static void prvPatronConsumo( void );
 #endif
 /* USER CODE END PFP */
 
@@ -329,6 +423,223 @@ static void prvPruebaMinima( void )
 
 #endif /* PRUEBA_MINIMA */
 
+#if ( PATRON_CONSUMO == 1 )
+/*
+ * Deja el LED destellando N veces y después duerme para siempre en Stop 2.
+ * No retorna. Ver el comentario del #define, más arriba.
+ */
+static void prvPatronConsumo( void )
+{
+    GPIO_InitTypeDef gpio      = { 0 };
+    uint32_t         destellos = 0U;
+    uint32_t         i;
+
+    /* error_delay_ms() calibra su lazo con SystemCoreClock, y acá el SysTick no
+       corre. Tras el reset el MSI está en 4 MHz; sin esta línea los destellos
+       saldrían quince veces más rápidos, que es el mismo pozo que costó medio
+       día el 2026-08-11 con Error_Handler(). */
+    SystemCoreClockUpdate();
+
+    /*
+     * ⛔ EL SOSPECHOSO NÚMERO UNO, y por eso es lo primero que se hace.
+     *
+     * Al conectarse, CubeProgrammer y el GDB server del IDE informan
+     * "Debug in Low Power mode enabled" y ponen DBG_SLEEP / DBG_STOP /
+     * DBG_STANDBY en DBGMCU_CR. Con DBG_STOP puesto **el micro NO apaga los
+     * relojes al entrar en Stop 2**: los mantiene para que el debugger no
+     * pierda el enganche. Un micro que cree estar dormido y tiene el reloj
+     * corriendo consume cientos de µA en vez de unidades.
+     *
+     * Y lo que lo vuelve traicionero: DBGMCU_CR **NO se resetea con el reset
+     * del sistema**, sólo con el power-on reset. O sea que los bits sobreviven
+     * a NRST, a un reset por software y a cuantos firmwares se bajen encima —
+     * pero desaparecen si se corta la alimentación. Eso explica que una misma
+     * placa mida distinto según si hubo o no un ciclo de energía antes.
+     *
+     * Nadie del firmware los pone; los pone la herramienta al conectarse.
+     */
+#if ( PC_LIMPIAR_DBGMCU == 1 )
+    DBGMCU->CR = 0U;
+#endif
+
+    /* ---- los destellos dicen QUÉ binario se bajó ---------------------- */
+#if ( PC_CON_LSE == 1 )
+    destellos = PC_DESTELLOS_CON_LSE;
+#else
+    destellos = PC_DESTELLOS_SIN_LSE;
+#endif
+
+    led_config();
+
+    for( i = 0U; i < destellos; i++ )
+    {
+        HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_SET );
+        error_delay_ms( PC_ON_MS );
+        HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_RESET );
+        error_delay_ms( PC_OFF_MS );
+    }
+
+#if ( PC_CON_LSE == 1 )
+    /*
+     * El LSE va ANTES de poner los pines en analógico, por dos razones: para
+     * poder avisar por el LED si el cristal no arranca, y porque una vez
+     * encendido el oscilador toma control de PC14/PC15 y el GPIO deja de
+     * mandar sobre ellos.
+     */
+    {
+        RCC_OscInitTypeDef       osc    = { 0 };
+        RCC_PeriphCLKInitTypeDef periph = { 0 };
+
+        HAL_PWR_EnableBkUpAccess();
+
+        osc.OscillatorType = RCC_OSCILLATORTYPE_LSE;
+        osc.LSEState       = RCC_LSE_ON;
+        osc.PLL.PLLState   = RCC_PLL_NONE;      /* que no toque el PLL */
+
+        if( HAL_RCC_OscConfig( &osc ) == HAL_OK )
+        {
+            __HAL_RCC_LSEDRIVE_CONFIG( RCC_LSEDRIVE_LOW );
+
+            /* El RTC es el consumidor que hace que el LSE quede realmente en
+               uso; sin un consumidor el oscilador no aporta nada al ensayo. */
+            periph.PeriphClockSelection = RCC_PERIPHCLK_RTC;
+            periph.RTCClockSelection    = RCC_RTCCLKSOURCE_LSE;
+            ( void ) HAL_RCCEx_PeriphCLKConfig( &periph );
+            __HAL_RCC_RTC_ENABLE();
+        }
+        else
+        {
+            /* No se llama a Error_Handler(): el ensayo sigue valiendo sin el
+               cristal, sólo hay que saber que se está midiendo sin él. */
+            error_delay_ms( 800U );
+
+            for( i = 0U; i < PC_DESTELLOS_SIN_XTAL; i++ )
+            {
+                HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_SET );
+                error_delay_ms( 400U );
+                HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_RESET );
+                error_delay_ms( 400U );
+            }
+        }
+    }
+#endif /* PC_CON_LSE */
+
+    /*
+     * ---- TODOS los pines en analógico -------------------------------------
+     *
+     * Analógico + sin pull es el estado de menor fuga que tiene el silicio:
+     * desconecta el buffer de entrada digital, que es lo que consume cuando un
+     * pin queda flotando cerca del umbral y hace conducir a la vez los dos
+     * transistores de su etapa.
+     *
+     * Es también el estado en que quedan los pines tras el reset, así que esto
+     * es explícito a propósito: el ensayo no debe depender de suposiciones
+     * sobre lo que quedó de antes.
+     *
+     * Dos exclusiones, las dos deliberadas:
+     *   - PA13/PA14 (SWD): sus pulls internos no conducen con el dongle
+     *     desconectado, así que dejarlos vivos es gratis y conserva la
+     *     posibilidad de engancharse.
+     *   - PC14/PC15 (OSC32): con el LSE encendido los maneja el oscilador.
+     *
+     * Sólo se barren los puertos que tienen pines en el LQFP64. Un pin de un
+     * puerto que no sale al encapsulado está atado internamente y no flota.
+     */
+    gpio.Mode  = GPIO_MODE_ANALOG;
+    gpio.Pull  = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    gpio.Pin = GPIO_PIN_All & ~( GPIO_PIN_13 | GPIO_PIN_14 );
+    HAL_GPIO_Init( GPIOA, &gpio );
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    gpio.Pin = GPIO_PIN_All;                    /* incluye el LED: se apaga */
+    HAL_GPIO_Init( GPIOB, &gpio );
+
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    gpio.Pin = GPIO_PIN_All & ~( GPIO_PIN_14 | GPIO_PIN_15 );
+    HAL_GPIO_Init( GPIOC, &gpio );
+
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    gpio.Pin = GPIO_PIN_All;
+    HAL_GPIO_Init( GPIOD, &gpio );
+
+    __HAL_RCC_GPIOH_CLK_ENABLE();
+    gpio.Pin = GPIO_PIN_All;
+    HAL_GPIO_Init( GPIOH, &gpio );
+
+    /*
+     * ---- los periféricos que se quieran sumar al ensayo -------------------
+     *
+     * Van DESPUÉS del aislado a propósito: cada MX_*_Init() reconfigura los
+     * pines que usa, así que lo que queda medido es el periférico con sus
+     * pines tal como los deja la operación normal.
+     */
+#if ( ( PC_PERIFERICOS & PC_PERIF_RTC ) != 0U )
+    MX_RTC_Init();
+#endif
+#if ( ( PC_PERIFERICOS & PC_PERIF_LPTIM1 ) != 0U )
+    MX_LPTIM1_Init();
+#endif
+#if ( ( PC_PERIFERICOS & PC_PERIF_USART1 ) != 0U )
+    MX_USART1_UART_Init();
+#endif
+#if ( ( PC_PERIFERICOS & PC_PERIF_USART3 ) != 0U )
+    MX_USART3_UART_Init();
+#endif
+#if ( ( PC_PERIFERICOS & PC_PERIF_UART4 ) != 0U )
+    MX_UART4_Init();
+#endif
+#if ( ( PC_PERIFERICOS & PC_PERIF_I2C2 ) != 0U )
+    MX_I2C2_Init();
+#endif
+#if ( ( PC_PERIFERICOS & PC_PERIF_SPI3 ) != 0U )
+    MX_SPI3_Init();
+#endif
+#if ( ( PC_PERIFERICOS & PC_PERIF_ADC1 ) != 0U )
+    MX_ADC1_Init();
+#endif
+
+    /*
+     * ---- a dormir, y no volver --------------------------------------------
+     *
+     * El SysTick se suspende: con él corriendo habría una interrupción
+     * pendiente cada milisegundo, que es justo lo que no deja entrar al WFI.
+     *
+     * El lazo está porque despertar NO debería pasar: con todos los pines en
+     * analógico no hay EXTI posible y no hay periférico configurado. Si el LED
+     * destella tres veces, ALGO está despertando al micro y la medición no vale
+     * — y eso es un diagnóstico, no un adorno: distingue "consume dormido" de
+     * "no se queda dormido", que desde el amperímetro se ven igual.
+     */
+    HAL_SuspendTick();
+
+    for( ;; )
+    {
+        HAL_PWREx_EnterSTOP2Mode( PWR_STOPENTRY_WFI );
+
+        /* Al salir de Stop el reloj vuelve al MSI: recalibrar el lazo. */
+        SystemCoreClockUpdate();
+
+        led_config();
+
+        for( i = 0U; i < 3U; i++ )
+        {
+            HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_SET );
+            error_delay_ms( PC_DESPERTAR_MS );
+            HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_RESET );
+            error_delay_ms( PC_DESPERTAR_MS );
+        }
+
+        gpio.Mode = GPIO_MODE_ANALOG;
+        gpio.Pull = GPIO_NOPULL;
+        gpio.Pin  = LED_PIN;
+        HAL_GPIO_Init( LED_PORT, &gpio );
+    }
+}
+#endif /* PATRON_CONSUMO */
+
 /* USER CODE END 0 */
 
 /**
@@ -348,6 +659,15 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+#if ( PATRON_CONSUMO == 1 )
+  /*
+   * Se va acá y no vuelve, y va ANTES que la USART a propósito: levantarla
+   * dejaría PB6/PB7 en modo alterno y el periférico encendido, que es
+   * exactamente lo que este ensayo no quiere tener prendido.
+   */
+  prvPatronConsumo();
+#endif
+
   /*
    * La USART se levanta ANTES de SystemClock_Config(), o sea corriendo con el MSI
    * a 4 MHz y todavía sin PLL. Es a propósito: si el que falla es el RELOJ, esta
