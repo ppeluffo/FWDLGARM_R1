@@ -81,57 +81,6 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define EN_LTE_DCIN_Pin GPIO_PIN_13
-#define EN_LTE_DCIN_GPIO_Port GPIOC
-#define LTE_TXD_Pin GPIO_PIN_0
-#define LTE_TXD_GPIO_Port GPIOA
-#define LTE_RXD_Pin GPIO_PIN_1
-#define LTE_RXD_GPIO_Port GPIOA
-#define LTE_PWR_Pin GPIO_PIN_5
-#define LTE_PWR_GPIO_Port GPIOA
-#define EN_EV_TOYI_Pin GPIO_PIN_6
-#define EN_EV_TOYI_GPIO_Port GPIOA
-#define CTL_EV_TOYI_Pin GPIO_PIN_7
-#define CTL_EV_TOYI_GPIO_Port GPIOA
-#define EN_SENS12V_Pin GPIO_PIN_4
-#define EN_SENS12V_GPIO_Port GPIOC
-#define RS485_RTS_Pin GPIO_PIN_1
-#define RS485_RTS_GPIO_Port GPIOB
-#define EN_SENS3V3_Pin GPIO_PIN_2
-#define EN_SENS3V3_GPIO_Port GPIOB
-#define RS485_TX_Pin GPIO_PIN_10
-#define RS485_TX_GPIO_Port GPIOB
-#define RS485_RX_Pin GPIO_PIN_11
-#define RS485_RX_GPIO_Port GPIOB
-#define EN_PWR_SENS420_Pin GPIO_PIN_12
-#define EN_PWR_SENS420_GPIO_Port GPIOB
-#define EN_PWR_CPRES_Pin GPIO_PIN_15
-#define EN_PWR_CPRES_GPIO_Port GPIOB
-#define EN_PWR_RS485_Pin GPIO_PIN_6
-#define EN_PWR_RS485_GPIO_Port GPIOC
-#define EN_PWR_QMBUS_Pin GPIO_PIN_7
-#define EN_PWR_QMBUS_GPIO_Port GPIOC
-#define CNT0_Pin GPIO_PIN_12
-#define CNT0_GPIO_Port GPIOA
-#define CNT0_EXTI_IRQn EXTI15_10_IRQn
-#define SD_SS_Pin GPIO_PIN_15
-#define SD_SS_GPIO_Port GPIOA
-#define SD_SCK_Pin GPIO_PIN_10
-#define SD_SCK_GPIO_Port GPIOC
-#define SD_MISO_Pin GPIO_PIN_11
-#define SD_MISO_GPIO_Port GPIOC
-#define SD_MOSI_Pin GPIO_PIN_12
-#define SD_MOSI_GPIO_Port GPIOC
-#define SD_DET_Pin GPIO_PIN_2
-#define SD_DET_GPIO_Port GPIOD
-#define EN_PWR_SD_Pin GPIO_PIN_3
-#define EN_PWR_SD_GPIO_Port GPIOB
-#define TERM_SENSE_Pin GPIO_PIN_5
-#define TERM_SENSE_GPIO_Port GPIOB
-#define TERM_TX_Pin GPIO_PIN_6
-#define TERM_TX_GPIO_Port GPIOB
-#define TERM_RX_Pin GPIO_PIN_7
-#define TERM_RX_GPIO_Port GPIOB
 #define LED_Pin GPIO_PIN_9
 #define LED_GPIO_Port GPIOB
 
@@ -169,7 +118,7 @@ void Error_Handler(void);
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
 #define FW_NOMBRE              "FWDLGARM_R1"   /* el del banner, NO el del frame */
-#define FW_VERSION             "0.0.1"
+#define FW_VERSION             "0.0.2"
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*

@@ -23,6 +23,8 @@
 #define tkCtl_STACK_SIZE    256                       /* palabras, no bytes */
 #define tkCtl_PRIORITY      ( tskIDLE_PRIORITY + 1 )
 
+extern TaskHandle_t xHandle_tkCtl;   /* lo usa 'status' para el high water mark */
+
 extern StaticTask_t tkCtl_TCB;
 extern StackType_t  tkCtl_Stack[ tkCtl_STACK_SIZE ];
 
