@@ -23,13 +23,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#if ( ETAPA >= 4 )
-#include "tkCmd.h"
-#include "tkSys.h"
-#include "tkWan.h"
-#include "tkCtlPres.h"
-#include "tkFlow.h"
-#endif
+/* ⚠ SIN #if: este bloque se preprocesa ANTES del #define ETAPA (que vive en
+   Private define, más abajo), así que cualquier condición sobre ETAPA daría
+   falso acá. Los headers de las tareas ya venían incluidos por main.c; el que
+   faltaba era drv_term_sense.h, y por eso la etapa 4 no compilaba. */
+#include "drv_term_sense.h"
 #include <string.h>
 
 #include "tkCtl.h"
@@ -760,7 +758,20 @@ static void prvPatronConsumo( void )
 static StaticTask_t xEtapaTCB;
 static StackType_t  xEtapaStack[ ETAPA_LED_STACK ];
 
-/* El destello: 50 ms encendido cada segundo, o sea 5 % de duty. */
+/*
+ * El destello: 50 ms encendido cada segundo, o sea 5 % de duty. Es la única
+ * tarea que se mantiene igual entre todas las etapas, para que los consumos se
+ * puedan comparar entre una y otra.
+ *
+ * ⛔ Y desde la etapa 4 polea TERM_SENSE, que NO es un agregado cosmético: sin
+ * ese poleo nunca se toma pwrLOCK_TERM, el equipo se queda en Stop 2 y la
+ * USART NO PUEDE RECIBIR. En el firmware real lo hace tkCtl en esta misma
+ * vuelta; acá la tarea es propia, así que había que reponerlo.
+ *
+ * El síntoma de que falte es desconcertante: la consola muda, y un consumo con
+ * la terminal enchufada de ~0,5 mA en vez de los ~3,5 mA que cuesta bajar a
+ * Sleep. Ese número es justamente lo que delata que el candado no se tomó.
+ */
 static void prvTareaLed( void *pvParameters )
 {
     ( void ) pvParameters;
@@ -770,6 +781,13 @@ static void prvTareaLed( void *pvParameters )
         HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_SET );
         vTaskDelay( pdMS_TO_TICKS( ETAPA_LED_ON_MS ) );
         HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_RESET );
+
+#if ( ETAPA >= 4 )
+        /* Sólo desde la etapa 4: antes no existe tkCmd, que es quien llama a
+           drv_term_sense_init(), y polear sin inicializar no tiene sentido. */
+        drv_term_sense_poll();
+#endif
+
         vTaskDelay( pdMS_TO_TICKS( ETAPA_LED_PERIODO_MS - ETAPA_LED_ON_MS ) );
     }
 }
