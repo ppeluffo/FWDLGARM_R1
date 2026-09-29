@@ -17,6 +17,7 @@ Bajo `Firmware/` hay **tres** árboles de firmware. Sólo uno está vivo:
 | Directorio | Qué es | Se toca |
 |---|---|---|
 | **`Firmware/FWDLGARM_R1/`** | **El firmware en desarrollo.** STM32CubeIDE + STM32L496RGT6, alineado con la placa `Hardware/R001/`. Iniciado 2026-08-05. | **Sí — sólo acá** |
+| **`Firmware/FWDLGARM_R1_REF_0.0.78/`** | **Copia CONGELADA del firmware completo `0.0.78`**, con todos los drivers y tareas. Existe para consultar código al repoblar el firmware nuevo. También está como tag `v0.0.78-referencia`. | No — sólo consulta |
 | `Firmware/FWDLGZ/` | Prototipo de bring-up STM32 (FreeRTOS V11.1.0 + tick por LPTIM1). Repo git propio → `github.com/ppeluffo/FWDLGZ.git`. | No, salvo pedido expreso |
 | `Firmware/FWDLGZ_V1/` | Port previo al **ATSAM4LS8BA** (Makefile + isla ASF). Histórico. | No, salvo pedido expreso |
 

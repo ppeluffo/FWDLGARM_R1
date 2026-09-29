@@ -1,28 +1,31 @@
 /*
- * tkCtl.h
+ * tkCtl.h  -  la única tarea del firmware: el destello del LED.
  *
- * Tarea de control. Es la primera que arranca y, por ahora, lo único que hace es
- * dar señales de vida por el LED.
+ * ⭐ Este firmware arranca de cero a propósito (2026-09-29). Es FreeRTOS con el
+ * tick por LPTIM1, el tickless sobre Stop 2 y nada más: la referencia de
+ * consumo del equipo dormido. Se va a ir poblando a medida que se puebla la
+ * placa, un periférico por vez, midiendo el consumo en cada paso.
  *
- * La memoria es ESTÁTICA: el stack y el TCB los provee esta tarea, no el heap.
- * Se declaran extern acá y se definen una sola vez en tkCtl.c — definirlos en el
- * header haría que cada unidad de compilación cree los suyos y el linker corte
- * por "multiple definition" (GCC >= 10 usa -fno-common).
+ * El firmware completo anterior queda como referencia en el tag
+ * v0.0.78-referencia y en Firmware/FWDLGARM_R1_REF_0.0.78/.
+ *
+ * ⚠ En la versión anterior tkCtl hacía TRES cosas en la misma vuelta —el
+ * destello, el poleo de TERM_SENSE y el kick del watchdog—. Acá sólo destella.
+ * Cuando vuelvan las otras dos hay que decidir el período de la vuelta para las
+ * tres juntas, no una por una.
  */
-
-#ifndef APPLICATION_TASKS_TKCTL_H_
-#define APPLICATION_TASKS_TKCTL_H_
+#ifndef TKCTL_H
+#define TKCTL_H
 
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define tkCtl_STACK_SIZE    512                       /* palabras, no bytes */
+#define tkCtl_STACK_SIZE    256                       /* palabras, no bytes */
 #define tkCtl_PRIORITY      ( tskIDLE_PRIORITY + 1 )
 
-void tkCtl( void *pvParameters );
-
-extern TaskHandle_t xHandle_tkCtl;
 extern StaticTask_t tkCtl_TCB;
 extern StackType_t  tkCtl_Stack[ tkCtl_STACK_SIZE ];
 
-#endif /* APPLICATION_TASKS_TKCTL_H_ */
+void tkCtl( void *pvParameters );
+
+#endif /* TKCTL_H */
