@@ -121,7 +121,8 @@
  *
  *   0 = operación normal (el firmware completo)
  *   1 = FreeRTOS + UNA tarea que destella el LED a 1 Hz. Nada más.  -> 3 µA ✅
- *   2 = la 1 + MX_GPIO_Init(): los pines de R001 completa.
+ *   2 = la 1 + MX_GPIO_Init(): los pines de R001 completa.        -> 8 µA ✅
+ *   3 = la 2 + los periféricos de CubeMX (ver ETAPA3_PERIF).
  *
  * La numeración de FW_VERSION arranca de nuevo en 0.0.1 y acompaña a la etapa.
  *
@@ -130,7 +131,23 @@
  *   que se midieron los 3 µA. Configurar los pines de R001 es una etapa propia,
  *   justamente porque es uno de los sospechosos.
  */
-#define ETAPA                   2
+#define ETAPA                   3
+
+/*
+ * Sólo con ETAPA >= 3: qué periféricos se inicializan, en bitmask. Reusa los
+ * PC_PERIF_* del patrón, que están más abajo.
+ *
+ * Plan: primero 0xFF. Si reproduce los ~390 µA, búsqueda binaria —0x0F, después
+ * la mitad que salte— y en tres bajadas queda el periférico.
+ *
+ *   0x01 RTC        0x10 UART4 (LTE)
+ *   0x04 USART1     0x20 I2C2
+ *   0x08 USART3     0x40 SPI3
+ *                   0x80 ADC1
+ *
+ * (0x02 es LPTIM1 y ya entró en la etapa 1: el tick del kernel lo necesita.)
+ */
+#define ETAPA3_PERIF            0xFFU
 
 /*
  * Sólo con ETAPA 2. En 1 deshabilita la EXTI de CNT0 (PA12) después de
@@ -740,6 +757,31 @@ static void prvEtapa( void )
     /* DeInit limpia la configuración EXTI del pin y lo deja en analógico, que
        es lo que hace falta acá: no alcanza con reconfigurar el modo. */
     HAL_GPIO_DeInit( CNT0_GPIO_Port, CNT0_Pin );
+#endif
+#endif
+
+#if ( ETAPA >= 3 )
+    /* Los periféricos de CubeMX, con los pines que cada MspInit configura. */
+#if ( ( ETAPA3_PERIF & PC_PERIF_RTC ) != 0U )
+    MX_RTC_Init();
+#endif
+#if ( ( ETAPA3_PERIF & PC_PERIF_USART1 ) != 0U )
+    MX_USART1_UART_Init();
+#endif
+#if ( ( ETAPA3_PERIF & PC_PERIF_USART3 ) != 0U )
+    MX_USART3_UART_Init();
+#endif
+#if ( ( ETAPA3_PERIF & PC_PERIF_UART4 ) != 0U )
+    MX_UART4_Init();
+#endif
+#if ( ( ETAPA3_PERIF & PC_PERIF_I2C2 ) != 0U )
+    MX_I2C2_Init();
+#endif
+#if ( ( ETAPA3_PERIF & PC_PERIF_SPI3 ) != 0U )
+    MX_SPI3_Init();
+#endif
+#if ( ( ETAPA3_PERIF & PC_PERIF_ADC1 ) != 0U )
+    MX_ADC1_Init();
 #endif
 #endif
 
