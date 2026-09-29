@@ -120,7 +120,8 @@
  * último que entró.
  *
  *   0 = operación normal (el firmware completo)
- *   1 = FreeRTOS + UNA tarea que destella el LED a 1 Hz. Nada más.
+ *   1 = FreeRTOS + UNA tarea que destella el LED a 1 Hz. Nada más.  -> 3 µA ✅
+ *   2 = la 1 + MX_GPIO_Init(): los pines de R001 completa.
  *
  * La numeración de FW_VERSION arranca de nuevo en 0.0.1 y acompaña a la etapa.
  *
@@ -129,7 +130,24 @@
  *   que se midieron los 3 µA. Configurar los pines de R001 es una etapa propia,
  *   justamente porque es uno de los sospechosos.
  */
-#define ETAPA                   1
+#define ETAPA                   2
+
+/*
+ * Sólo con ETAPA 2. En 1 deshabilita la EXTI de CNT0 (PA12) después de
+ * MX_GPIO_Init(), dejando ese pin en analógico.
+ *
+ * ⭐ Separa las dos formas en que un pin puede costar consumo, que son
+ * distintas y se arreglan distinto:
+ *   - FUGA: el buffer de entrada de un pin flotando conduce por sus dos
+ *     transistores a la vez. Cuesta corriente aunque nada pase.
+ *   - DESPERTADAS: PA12 está en GPIO_MODE_IT_FALLING y en esta placa el
+ *     74AUP1G17 que lo maneja no está. Un pin EXTI flotando genera flancos
+ *     espurios, y cada uno saca al micro de Stop 2 y le hace rehacer
+ *     SystemClock_Config(). Eso no es fuga: es trabajo.
+ *
+ * Con ETAPA 2 en alto y esto en 1, si baja eran las despertadas.
+ */
+#define ETAPA2_SIN_EXTI         0
 
 
 
@@ -709,6 +727,21 @@ static void prvEtapa( void )
     /* El tick del kernel usa el handle que inicializa CubeMX (ver
        port_lptim_tick.c), así que este init no es opcional. No toca pines. */
     MX_LPTIM1_Init();
+
+#if ( ETAPA >= 2 )
+    /*
+     * Los pines de R001 COMPLETA, tal como los configura la operación normal.
+     * En una placa despoblada eso deja siete entradas sin quién las fije:
+     * TERM_RX, RS485_RX, LTE_RXD, las dos del I2C2, SD_MISO y CNT0.
+     */
+    MX_GPIO_Init();
+
+#if ( ETAPA2_SIN_EXTI == 1 )
+    /* DeInit limpia la configuración EXTI del pin y lo deja en analógico, que
+       es lo que hace falta acá: no alcanza con reconfigurar el modo. */
+    HAL_GPIO_DeInit( CNT0_GPIO_Port, CNT0_Pin );
+#endif
+#endif
 
     /* El único pin que se configura en toda la etapa. */
     led_config();
