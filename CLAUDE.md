@@ -10,6 +10,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > arriba: `Hardware/R001/` es `../../Hardware/R001/` desde acá. Las que empiezan con `Core/`,
 > `Drivers/` o `Debug/` sí son de este repo.
 
+## ⛔ EL FIRMWARE SE REHIZO DESDE CERO (2026-09-29) — leer antes que nada
+
+Todo lo que este archivo describe más abajo corresponde al firmware **`0.0.78`**, que está completo,
+validado en banco y **conservado como referencia**. Pero el firmware **vivo** ya no es ése.
+
+Decisión de Pablo tras una sesión larga de diagnóstico de consumo: la placa despoblada medía ~390 µA
+donde debía medir decenas, y no se pudo aislar la causa quitándole piezas al firmware completo. Se
+arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada paso**.
+
+| Dónde | Qué es |
+|---|---|
+| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.3`. Sólo FreeRTOS, `tkCtl` y la consola |
+| rama `main` | el firmware completo `0.0.78` más `PATRON_CONSUMO` |
+| tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
+| `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
+
+**Lo que el rearranque ya midió:** `0.0.1` —FreeRTOS con el tick por LPTIM1, el tickless y una sola
+tarea destellando el LED— da ⭐ **3 µA**. O sea que el micro, el kernel y el reposo están limpios, y
+toda la deuda de consumo está en lo que se agregue encima.
+
+⚠ **Al repoblar, cada módulo que vuelve de la referencia hay que REDUCIRLO.** Ya pasó con la consola:
+`drv_uart` traía una tabla de tres instancias y `frtos-io` cinco file descriptors más las operaciones
+de I2C, que dependían de un driver que ya no existe. La tabla de instancias está justamente para que
+agregar una UART sea **una fila**, no una copia del driver.
+
 ## Sobre qué árbol se trabaja (leer primero)
 
 Bajo `Firmware/` hay **tres** árboles de firmware. Sólo uno está vivo:
