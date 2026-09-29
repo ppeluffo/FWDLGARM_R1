@@ -106,6 +106,31 @@
  */
 #define PATRON_CONSUMO          0     /* 0 = operación normal */
 
+/*
+ * ---------------------------------------------------------------------------
+ * ETAPA  (2026-09-29) — el bring-up del CONSUMO, de nuevo y desde abajo
+ * ---------------------------------------------------------------------------
+ * PATRON_CONSUMO dejó probado que el micro dormido da 3 µA. Lo que sobra hasta
+ * los ~390 µA está en lo que el firmware agrega encima, y en vez de quitárselo
+ * al firmware completo —que ya costó dos bajadas— se reconstruye desde ese
+ * punto conocido-bueno, agregando UNA cosa por etapa.
+ *
+ * Es el bring-up incremental del proyecto aplicado al consumo: cada etapa se
+ * mide en banco antes de pasar a la siguiente, así el sospechoso es siempre lo
+ * último que entró.
+ *
+ *   0 = operación normal (el firmware completo)
+ *   1 = FreeRTOS + UNA tarea que destella el LED a 1 Hz. Nada más.
+ *
+ * La numeración de FW_VERSION arranca de nuevo en 0.0.1 y acompaña a la etapa.
+ *
+ * ⚠ La etapa 1 NO llama a MX_GPIO_Init(): los pines quedan como los dejó el
+ *   reset, o sea en ANALÓGICO, que es el estado de menor fuga y el mismo con el
+ *   que se midieron los 3 µA. Configurar los pines de R001 es una etapa propia,
+ *   justamente porque es uno de los sospechosos.
+ */
+#define ETAPA                   1
+
 
 
 /*
@@ -218,6 +243,10 @@ static void prvPruebaMinima( void );
 #endif
 #if ( PATRON_CONSUMO == 1 )
 static void prvPatronConsumo( void );
+#endif
+#if ( ETAPA > 0 )
+static void prvEtapa( void );
+static void prvTareaLed( void *pvParameters );
 #endif
 /* USER CODE END PFP */
 
@@ -640,6 +669,81 @@ static void prvPatronConsumo( void )
 }
 #endif /* PATRON_CONSUMO */
 
+#if ( ETAPA > 0 )
+
+/* Memoria estática de la tarea: no toca el heap, igual que las del firmware. */
+#define ETAPA_LED_STACK      256U
+#define ETAPA_LED_ON_MS       50U
+#define ETAPA_LED_PERIODO_MS 1000U
+
+static StaticTask_t xEtapaTCB;
+static StackType_t  xEtapaStack[ ETAPA_LED_STACK ];
+
+/* El destello: 50 ms encendido cada segundo, o sea 5 % de duty. */
+static void prvTareaLed( void *pvParameters )
+{
+    ( void ) pvParameters;
+
+    for( ;; )
+    {
+        HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_SET );
+        vTaskDelay( pdMS_TO_TICKS( ETAPA_LED_ON_MS ) );
+        HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_RESET );
+        vTaskDelay( pdMS_TO_TICKS( ETAPA_LED_PERIODO_MS - ETAPA_LED_ON_MS ) );
+    }
+}
+
+/*
+ * Arranque mínimo. No retorna: entrega el control al scheduler.
+ * Ver el comentario del #define ETAPA, más arriba.
+ */
+static void prvEtapa( void )
+{
+    uint32_t i;
+
+    /* El reloj se configura acá porque esta función se desvía ANTES de que
+       main() llegue a SystemClock_Config(). Es la misma llamada: enciende el
+       LSE, que es de donde sale el tick del kernel por LPTIM1. */
+    SystemClock_Config();
+
+    /* El tick del kernel usa el handle que inicializa CubeMX (ver
+       port_lptim_tick.c), así que este init no es opcional. No toca pines. */
+    MX_LPTIM1_Init();
+
+    /* El único pin que se configura en toda la etapa. */
+    led_config();
+
+    /*
+     * Tres destellos antes de arrancar el scheduler. Es la marca que separa
+     * "no arrancó el reloj" de "no arrancó el scheduler": sin ella las dos se
+     * ven igual —LED apagado— y en el amperímetro se leen como consumo alto.
+     */
+    for( i = 0U; i < 3U; i++ )
+    {
+        HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_SET );
+        error_delay_ms( 80U );
+        HAL_GPIO_WritePin( LED_PORT, LED_PIN, GPIO_PIN_RESET );
+        error_delay_ms( 80U );
+    }
+
+    if( xTaskCreateStatic( prvTareaLed,
+                           "LED",
+                           ETAPA_LED_STACK,
+                           NULL,
+                           tskIDLE_PRIORITY + 1,
+                           xEtapaStack,
+                           &xEtapaTCB ) == NULL )
+    {
+        Error_Handler();
+    }
+
+    vTaskStartScheduler();
+
+    /* Sólo se llega acá si el scheduler no pudo arrancar. */
+    Error_Handler();
+}
+#endif /* ETAPA */
+
 /* USER CODE END 0 */
 
 /**
@@ -659,6 +763,11 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+#if ( ETAPA > 0 )
+  /* Se va acá y no vuelve. Ver el comentario del #define ETAPA. */
+  prvEtapa();
+#endif
+
 #if ( PATRON_CONSUMO == 1 )
   /*
    * Se va acá y no vuelve, y va ANTES que la USART a propósito: levantarla
