@@ -23,6 +23,13 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#if ( ETAPA >= 4 )
+#include "tkCmd.h"
+#include "tkSys.h"
+#include "tkWan.h"
+#include "tkCtlPres.h"
+#include "tkFlow.h"
+#endif
 #include <string.h>
 
 #include "tkCtl.h"
@@ -122,7 +129,8 @@
  *   0 = operación normal (el firmware completo)
  *   1 = FreeRTOS + UNA tarea que destella el LED a 1 Hz. Nada más.  -> 3 µA ✅
  *   2 = la 1 + MX_GPIO_Init(): los pines de R001 completa.        -> 8 µA ✅
- *   3 = la 2 + los periféricos de CubeMX (ver ETAPA3_PERIF).
+ *   3 = la 2 + los periféricos de CubeMX (ver ETAPA3_PERIF).   -> 1,15 mA ⚠
+ *   4 = la 3 + las tareas del firmware (ver ETAPA4_TAREAS).
  *
  * La numeración de FW_VERSION arranca de nuevo en 0.0.1 y acompaña a la etapa.
  *
@@ -131,7 +139,36 @@
  *   que se midieron los 3 µA. Configurar los pines de R001 es una etapa propia,
  *   justamente porque es uno de los sospechosos.
  */
-#define ETAPA                   3
+#define ETAPA                   4
+
+/*
+ * Sólo con ETAPA >= 4: qué tareas del firmware se crean, en bitmask.
+ *
+ * ⭐ Acá el consumo puede BAJAR, y por eso esta etapa importa más que la 3: la
+ * etapa 3 dio 1,15 mA, o sea MÁS que el firmware completo (~390 µA). La
+ * diferencia es que CubeMX deja los periféricos recién inicializados y son los
+ * DRIVERS los que los ponen en reposo — el ADC en deep power-down, el INA
+ * dormido, los rieles cortados.
+ *
+ * Y a los drivers los inicializa tkCmd. Así que la predicción para 0x01 es que
+ * el consumo baje de 1,15 mA a algo cercano a los 390 µA; si baja, el firmware
+ * queda reproducido y desde ahí se bisecta sobre lo real.
+ *
+ *   0x01 tkCmd  (la que inicializa TODOS los drivers)
+ *   0x02 tkSys        0x08 tkCtlPres
+ *   0x04 tkWan        0x10 tkFlow
+ *
+ * ⚠ tkCtl NO está: su lugar lo ocupa prvTareaLed, que es el destello de la
+ *   etapa 1 y lo único que hay que mantener igual entre todas las etapas para
+ *   que los números se puedan comparar.
+ */
+#define ETAPA4_TK_CMD           0x01U
+#define ETAPA4_TK_SYS           0x02U
+#define ETAPA4_TK_WAN           0x04U
+#define ETAPA4_TK_CTLPRES       0x08U
+#define ETAPA4_TK_FLOW          0x10U
+
+#define ETAPA4_TAREAS           0x01U
 
 /*
  * Sólo con ETAPA >= 3: qué periféricos se inicializan, en bitmask. Reusa los
@@ -811,6 +848,33 @@ static void prvEtapa( void )
     {
         Error_Handler();
     }
+
+#if ( ETAPA >= 4 )
+    /* Las tareas del firmware, con los mismos parámetros que en main(). */
+#if ( ( ETAPA4_TAREAS & ETAPA4_TK_CMD ) != 0U )
+    if( xTaskCreateStatic( tkCmd, "CMD", tkCmd_STACK_SIZE, NULL,
+                           tkCmd_PRIORITY, tkCmd_Stack, &tkCmd_TCB ) == NULL )
+    {
+        Error_Handler();
+    }
+#endif
+#if ( ( ETAPA4_TAREAS & ETAPA4_TK_SYS ) != 0U )
+    xHandle_tkSys = xTaskCreateStatic( tkSys, "SYS", tkSys_STACK_SIZE, NULL,
+                                       tkSys_PRIORITY, tkSys_Stack, &tkSys_TCB );
+#endif
+#if ( ( ETAPA4_TAREAS & ETAPA4_TK_WAN ) != 0U )
+    xHandle_tkWan = xTaskCreateStatic( tkWan, "WAN", tkWan_STACK_SIZE, NULL,
+                                       tkWan_PRIORITY, tkWan_Stack, &tkWan_TCB );
+#endif
+#if ( ( ETAPA4_TAREAS & ETAPA4_TK_CTLPRES ) != 0U )
+    xHandle_tkCtlPres = xTaskCreateStatic( tkCtlPres, "CPRES", tkCtlPres_STACK_SIZE, NULL,
+                                           tkCtlPres_PRIORITY, tkCtlPres_Stack, &tkCtlPres_TCB );
+#endif
+#if ( ( ETAPA4_TAREAS & ETAPA4_TK_FLOW ) != 0U )
+    xHandle_tkFlow = xTaskCreateStatic( tkFlow, "FLOW", tkFlow_STACK_SIZE, NULL,
+                                        tkFlow_PRIORITY, tkFlow_Stack, &tkFlow_TCB );
+#endif
+#endif /* ETAPA >= 4 */
 
     vTaskStartScheduler();
 
