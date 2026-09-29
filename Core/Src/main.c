@@ -132,6 +132,15 @@
  *   3 = la 2 + los periféricos de CubeMX (ver ETAPA3_PERIF).   -> 1,15 mA ⚠
  *   4 = la 3 + las tareas del firmware (ver ETAPA4_TAREAS).
  *
+ * ⭐ La combinación que se probó el 2026-09-29, ya con la serial POBLADA en la
+ * placa: ETAPA 4, ETAPA3_PERIF 0x7D (todo menos el ADC1) y ETAPA4_TAREAS 0x01
+ * (sólo tkCmd). O sea el destello de la etapa 1 más la CONSOLA, que a partir de
+ * acá permite diagnosticar desde el equipo en vez de a ciegas con el LED.
+ *
+ * El ADC1 queda afuera a propósito: es el candidato del 1,15 mA de la etapa 3,
+ * porque MX_ADC1_Init() lo deja habilitado y es drv_adc quien lo manda a deep
+ * power-down.
+ *
  * La numeración de FW_VERSION arranca de nuevo en 0.0.1 y acompaña a la etapa.
  *
  * ⚠ La etapa 1 NO llama a MX_GPIO_Init(): los pines quedan como los dejó el
@@ -184,7 +193,7 @@
  *
  * (0x02 es LPTIM1 y ya entró en la etapa 1: el tick del kernel lo necesita.)
  */
-#define ETAPA3_PERIF            0xFFU
+#define ETAPA3_PERIF            0x7DU
 
 /*
  * Sólo con ETAPA 2. En 1 deshabilita la EXTI de CNT0 (PA12) después de
