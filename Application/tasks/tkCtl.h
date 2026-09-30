@@ -1,11 +1,10 @@
 /*
- * tkCtl.h  -  la tarea de control: el destello del LED, y por ahora también
- * quién decide cuándo el equipo empieza a dormir.
+ * tkCtl.h  -  el destello del LED y el poleo de TERM_SENSE, en la misma vuelta.
  *
- * ⏳ En el firmware de referencia hacía TRES cosas en la misma vuelta —el
- * destello, el poleo de TERM_SENSE y el kick del watchdog—. Las otras dos
- * vuelven con su etapa, y cuando lo hagan hay que decidir el período de la
- * vuelta para las tres juntas, no una por una.
+ * ⏳ Falta la tercera cosa que hacía en el firmware de referencia: el kick del
+ * watchdog. Cuando entre hay que decidir el período de la vuelta para las tres
+ * juntas — hoy son 5 s, y ese número es también el plazo con el que se va a
+ * comparar la ventana del IWDG.
  */
 #ifndef TKCTL_H
 #define TKCTL_H
@@ -24,8 +23,5 @@ extern StaticTask_t tkCtl_TCB;
 extern StackType_t  tkCtl_Stack[ tkCtl_STACK_SIZE ];
 
 void tkCtl( void *pvParameters );
-
-/* true una vez que el equipo empezó a dormir. Lo informa 'status'. */
-bool tkCtl_durmiendo( void );
 
 #endif /* TKCTL_H */

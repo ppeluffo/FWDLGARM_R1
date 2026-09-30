@@ -9,6 +9,7 @@
 #include "tkCtl.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
+#include "drv_term_sense.h"
 #include "drv_uart.h"
 #include "pwr_lock.h"
 #include "main.h"
@@ -67,6 +68,7 @@ static void cmdHelp( void )
     xprintf( "\r\nComandos disponibles:\r\n" );
     xprintf( "  help            esta ayuda\r\n" );
     xprintf( "  status          version, reset, candados, stacks\r\n" );
+    xprintf( "  sense           TERM_SENSE: nivel del pin y configuracion\r\n" );
     xprintf( "  reset           reinicia el equipo\r\n" );
     xprintf( "\r\n" );
     xprintf( "  el comando va COMPLETO: 'status', no 'st'\r\n" );
@@ -132,9 +134,9 @@ static void cmdStatus( void )
      * cambio va en la dirección segura, pero NO hay que ajustar los tamaños al
      * límite con estos valores.
      */
-    xprintf( "estado       : %s\r\n",
-             tkCtl_durmiendo() ? "TICKLESS (duerme en Stop 2)"
-                               : "despierto (ventana inicial)" );
+    xprintf( "terminal     : %s   (PB5 en %s)\r\n",
+             drv_term_sense_presente() ? "CONECTADA: NO duerme" : "no detectada: duerme",
+             drv_term_sense_nivel_pin() ? "ALTO" : "BAJO" );
 
     xprintf( "heap libre   : %u bytes\r\n",
              ( unsigned ) xPortGetFreeHeapSize() );
@@ -144,6 +146,38 @@ static void cmdStatus( void )
 
     xprintf( "errores UART : 0x%08lX\r\n",
              ( unsigned long ) drv_uart_errores( drvUART_TERM ) );
+}
+
+/*
+ * ⭐ Existe para ver el pin CRUDO, no la creencia del driver.
+ *
+ * Si la consola no recibe, la pregunta es siempre la misma: qué nivel tiene PB5
+ * de verdad y con qué pull quedó configurado. ⚠ En esta placa el pin ya se vio
+ * SUBIR SOLO con la terminal enchufada (medido el 2026-09-30 con un latido por
+ * consola: PB5=0 a los 5 s y PB5=1 a los 10), y cuando eso pasa el equipo se
+ * duerme y la consola muere sin ninguna otra señal. El nivel y el PUPDR juntos
+ * lo delatan.
+ */
+static void cmdSense( void )
+{
+    drv_term_sense_cfg_t xCfg;
+
+    drv_term_sense_config( &xCfg );
+
+    static const char *pcModer[] = { "entrada", "salida", "alterna", "analogico" };
+    static const char *pcPupdr[] = { "sin pull", "pull-up", "pull-down", "reservado" };
+
+    xprintf( "\r\nTERM_SENSE (PB5)\r\n" );
+    xprintf( "  nivel del pin : %s   (activo en BAJO: 0 = terminal conectada)\r\n",
+             drv_term_sense_nivel_pin() ? "ALTO" : "BAJO" );
+    xprintf( "  el driver dice: %s\r\n",
+             drv_term_sense_presente() ? "CONECTADA" : "no detectada" );
+    xprintf( "  MODER         : %lu (%s)\r\n",
+             ( unsigned long ) xCfg.ulModer, pcModer[ xCfg.ulModer & 0x3U ] );
+    xprintf( "  PUPDR         : %lu (%s)\r\n",
+             ( unsigned long ) xCfg.ulPupdr, pcPupdr[ xCfg.ulPupdr & 0x3U ] );
+    xprintf( "  cambios vistos: %lu\r\n",
+             ( unsigned long ) drv_term_sense_cambios() );
 }
 
 /*
@@ -198,6 +232,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
+    FRTOS_CMD_register( "sense",  cmdSense  );
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     /* La versión y la fecha en el banner, no sólo en 'status': es lo primero que
@@ -209,7 +244,7 @@ void tkCmd( void *pvParameters )
 
     /* ⚠ Que el equipo no duerma no es obvio desde afuera y cambia el consumo por
        tres órdenes de magnitud, así que lo dice el banner. */
-    xprintf( "[!] la consola acepta comandos por 10 s; despues entra en TICKLESS\r\n" );
+    xprintf( "[!] la consola vive mientras TERM_SENSE vea terminal (se polea cada 5 s)\r\n" );
 
     xprintf( "cmd>" );
 
