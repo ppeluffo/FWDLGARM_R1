@@ -35,6 +35,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | `0.0.3` | el tickless entrando a los 10 s, con el LED destellando | ⭐ **3 µA** |
 | **`0.0.4`** | ⭐ **`TERM_SENSE` decide**: con terminal no duerme, sin terminal Stop 2 | **9 mA / 3 µA** |
 | **`0.0.5`** | ⭐ **I2C2 + EEPROM M24M01 + RTC MCP79410**, los tres con datos reales | **9 mA / 5 µA** |
+| **`0.0.6`** | ⭐ **INA3221**, identificado y convirtiendo (⏳ sin `EN_PWR_SENS420`) | **9 mA / 5 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -76,6 +77,34 @@ cmd>i2c scan
 porque era la primera vez que ese chip se usaba con este firmware. Al fijar la hora pasó a
 `CONFIABLE` — y ese orden no es casual: la firma se escribe **después** de la hora, porque fijar la
 hora es el momento en que alguien afirma que es correcta.
+
+### ✅ El INA3221 entró sin mover el reposo (2026-09-30)
+
+```
+cmd>i2c scan            cmd>ina
+  41  <- INA3221          MFID   : 0x5449   <- "TI" en ASCII
+  50, 51  EEPROM          DIEID  : 0x3220
+  57  MCP79410 EE         CONFIG : 0x7920  (MODE=0: power-down, como debe reposar)
+  58, 59  ID page         CH1..CH3: 0.000 mA
+  6F  RTC
+7 dispositivo(s)
+```
+
+⭐ **Tres cosas que ese log confirma:**
+
+1. **El chip es el que dice ser**: `MFID = 0x5449` es **"TI" en ASCII** y `DIEID = 0x3220` es el del
+   INA3221. Un ACK sólo prueba que hay *algo* en la dirección `41`; esto prueba **qué**.
+2. **`CONFIG = 0x7920` es exactamente el valor documentado** para "configurado pero en power-down",
+   que es el estado de **reposo** del chip. Con `MODE` distinto de 0 consumiría **~350 µA contra
+   ~2 µA dormido** — setenta veces el micro en Stop 2, y sin nada que lo delate salvo la autonomía.
+   Por eso el comando lo imprime siempre.
+3. ⭐ **El reposo NO se movió: sigue en 5 µA.** La predicción era 6-7 µA por los ~2 µA de standby del
+   INA, y el aporte real quedó **por debajo de 1 µA medible**. El criterio de aceptación de la etapa
+   —que agregar un integrado no arruine el reposo— se cumple con margen.
+
+⚠ **Los 0,000 mA son CORRECTOS en esta etapa**: `EN_PWR_SENS420` queda afuera a propósito para medir
+el consumo de a un integrado por vez, así que los lazos no están alimentados. El comando lo dice en
+cada corrida para que nadie lo lea como un sensor roto.
 
 ### ⛔ Las tres lecciones de firmware que costó el rearranque
 
