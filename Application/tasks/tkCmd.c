@@ -205,11 +205,28 @@ static void cmdSense( void )
  * **permanente e irreversible**, y el bloqueo lo dispara una escritura. Leerla
  * es gratis; por eso el scan usa `drv_i2c_probe()`, que sólo direcciona.
  */
+/*
+ * ⛔ CÓMO SE LEEN LOS ARGUMENTOS, y la trampa que costó una bajada (2026-09-30)
+ *
+ * `FRTOS_CMD_makeArgv()` devuelve la cantidad de **ARGUMENTOS, no de tokens**:
+ * termina en `return i - 1`, donde `i` cuenta también `argv[0]`. O sea que es
+ * **uno menos que el `argc` de C**, con el que es natural confundirlo.
+ *
+ * La primera versión de estos comandos comparaba contra ese valor como si fuera
+ * `argc`, así que `i2c scan` daba 1 donde se esperaba 2 y **los tres comandos
+ * caían en su propia ayuda**. El síntoma engaña: parece que el subcomando "no
+ * existe" cuando en realidad la condición nunca se cumplió.
+ *
+ * ⭐ Por eso acá NO se usa el contador: se pregunta por **`argv[N] != NULL`**,
+ * que es inequívoco —`makeArgv()` hace `memset(argv, 0, ...)` antes de
+ * tokenizar, así que los no usados quedan en NULL— y de paso verifica
+ * exactamente lo que se va a leer, no una cuenta que lo aproxima.
+ */
 static void cmdI2c( void )
 {
-    uint8_t ucArgc = FRTOS_CMD_makeArgv();
+    ( void ) FRTOS_CMD_makeArgv();
 
-    if( ( ucArgc >= 2U ) && ( strcmp( argv[ 1 ], "scan" ) == 0 ) )
+    if( ( argv[ 1 ] != NULL ) && ( strcmp( argv[ 1 ], "scan" ) == 0 ) )
     {
         uint32_t ulEncontrados = 0U;
 
@@ -269,10 +286,11 @@ static void cmdI2c( void )
  */
 static void cmdEe( void )
 {
-    uint8_t ucArgc = FRTOS_CMD_makeArgv();
-    char    cBuf[ 40 ];
+    char cBuf[ 40 ];
 
-    if( ( ucArgc >= 2U ) && ( strcmp( argv[ 1 ], "test" ) == 0 ) )
+    ( void ) FRTOS_CMD_makeArgv();
+
+    if( ( argv[ 1 ] != NULL ) && ( strcmp( argv[ 1 ], "test" ) == 0 ) )
     {
         static const uint32_t pulDir[] = { 0x000F0UL, 0x0FFF0UL };
         static const char     cPatron[] = "SPQ-ARM-0123456789abcdef";
@@ -317,7 +335,7 @@ static void cmdEe( void )
         return;
     }
 
-    if( ( ucArgc >= 4U ) && ( strcmp( argv[ 1 ], "rd" ) == 0 ) )
+    if( ( argv[ 3 ] != NULL ) && ( strcmp( argv[ 1 ], "rd" ) == 0 ) )
     {
         uint32_t ulAddr  = strtoul( argv[ 2 ], NULL, 0 );
         uint32_t ulBytes = strtoul( argv[ 3 ], NULL, 0 );
@@ -356,7 +374,7 @@ static void cmdEe( void )
         return;
     }
 
-    if( ( ucArgc >= 4U ) && ( strcmp( argv[ 1 ], "wr" ) == 0 ) )
+    if( ( argv[ 3 ] != NULL ) && ( strcmp( argv[ 1 ], "wr" ) == 0 ) )
     {
         uint32_t ulAddr  = strtoul( argv[ 2 ], NULL, 0 );
         uint32_t ulLargo = ( uint32_t ) strlen( argv[ 3 ] );
@@ -401,11 +419,12 @@ static void cmdEe( void )
  */
 static void cmdRtc( void )
 {
-    uint8_t       ucArgc = FRTOS_CMD_makeArgv();
     RtcTimeType_t xHora;
     rtc_estado_t  xEstado;
 
-    if( ( ucArgc >= 2U ) && ( strcmp( argv[ 1 ], "invalid" ) == 0 ) )
+    ( void ) FRTOS_CMD_makeArgv();
+
+    if( ( argv[ 1 ] != NULL ) && ( strcmp( argv[ 1 ], "invalid" ) == 0 ) )
     {
         /* Borra la firma para poder ejercitar el camino de arranque en frío SIN
            sacar la pila, que es lo que lo hacía imposible de probar. */
@@ -414,14 +433,14 @@ static void cmdRtc( void )
         return;
     }
 
-    if( ucArgc >= 8U )
+    if( argv[ 6 ] != NULL )
     {
-        xHora.year  = ( uint8_t ) strtoul( argv[ 2 ], NULL, 10 );
-        xHora.month = ( uint8_t ) strtoul( argv[ 3 ], NULL, 10 );
-        xHora.day   = ( uint8_t ) strtoul( argv[ 4 ], NULL, 10 );
-        xHora.hour  = ( uint8_t ) strtoul( argv[ 5 ], NULL, 10 );
-        xHora.min   = ( uint8_t ) strtoul( argv[ 6 ], NULL, 10 );
-        xHora.sec   = ( uint8_t ) strtoul( argv[ 7 ], NULL, 10 );
+        xHora.year  = ( uint8_t ) strtoul( argv[ 1 ], NULL, 10 );
+        xHora.month = ( uint8_t ) strtoul( argv[ 2 ], NULL, 10 );
+        xHora.day   = ( uint8_t ) strtoul( argv[ 3 ], NULL, 10 );
+        xHora.hour  = ( uint8_t ) strtoul( argv[ 4 ], NULL, 10 );
+        xHora.min   = ( uint8_t ) strtoul( argv[ 5 ], NULL, 10 );
+        xHora.sec   = ( uint8_t ) strtoul( argv[ 6 ], NULL, 10 );
 
         /* El día de la semana NO se pide: es un dato DERIVADO de la fecha y el
            driver lo calcula con Sakamoto. Pedirlo sería dejar que alguien
