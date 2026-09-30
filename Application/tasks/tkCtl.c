@@ -2,9 +2,38 @@
  * tkCtl.c  -  ver tkCtl.h
  */
 
+#include <stdio.h>
+#include <string.h>
+
 #include "tkCtl.h"
 #include "drv_term_sense.h"
+#include "drv_uart.h"
+#include "pwr_lock.h"
 #include "main.h"
+
+extern UART_HandleTypeDef huart1;
+
+/*
+ * ---------------------------------------------------------------------------
+ * EL LATIDO  (2026-09-30)
+ * ---------------------------------------------------------------------------
+ * En 1, cada vuelta emite una línea de estado POR POLEO —HAL_UART_Transmit()
+ * directo, sin drv_uart, sin ISR, sin semáforo y sin candado—.
+ *
+ * ⭐ Existe porque la consola tiene un punto ciego que ya nos costó dos días:
+ * cuando el RX deja de funcionar **no hay forma de preguntarle nada al equipo**,
+ * y el banner sale una sola vez al arrancar. Por poleo el TX habla igual, aunque
+ * el driver esté trabado o el equipo esté girando sin dormir.
+ *
+ * Informa las tres cosas que decidieron cada diagnóstico de esta etapa:
+ *
+ *   PB5       el nivel CRUDO del pin, no la creencia del driver
+ *   candados  con alguno tomado el idle GIRA: ~9,5 mA, no 3 µA
+ *   errUART   un ORE pegado trabaría el RX; si está en 0, el RX no es eso
+ *
+ * ⚠ Es instrumento de banco y ensucia la consola. Se apaga con esto en 0.
+ */
+#define TKCTL_LATIDO      1
 
 /*
  * ---------------------------------------------------------------------------
@@ -72,6 +101,29 @@ void tkCtl( void *pvParameters )
          * Stop 2.
          */
         drv_term_sense_poll();
+
+#if ( TKCTL_LATIDO == 1 )
+        {
+            /* Va DESPUÉS del poleo: así el nivel y el candado que informa son
+               los de esta misma vuelta y no los de la anterior. */
+            static uint32_t ulVuelta = 0U;
+            char            cLinea[ 80 ];
+
+            int n = snprintf( cLinea, sizeof( cLinea ),
+                              "[%lu] PB5=%d term=%s cand=0x%02lX errUART=0x%08lX\r\n",
+                              ( unsigned long ) ++ulVuelta,
+                              drv_term_sense_nivel_pin() ? 1 : 0,
+                              drv_term_sense_presente() ? "SI" : "no",
+                              ( unsigned long ) pwr_lock_estado(),
+                              ( unsigned long ) drv_uart_errores( drvUART_TERM ) );
+
+            if( n > 0 )
+            {
+                ( void ) HAL_UART_Transmit( &huart1, ( const uint8_t * ) cLinea,
+                                            ( uint16_t ) n, HAL_MAX_DELAY );
+            }
+        }
+#endif
 
         vTaskDelay( pdMS_TO_TICKS( TKCTL_PERIOD_MS - TKCTL_LED_ON_MS ) );
     }
