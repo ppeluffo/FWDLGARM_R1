@@ -132,6 +132,10 @@ static void cmdStatus( void )
      * cambio va en la dirección segura, pero NO hay que ajustar los tamaños al
      * límite con estos valores.
      */
+    xprintf( "estado       : %s\r\n",
+             tkCtl_durmiendo() ? "TICKLESS (duerme en Stop 2)"
+                               : "despierto (ventana inicial)" );
+
     xprintf( "heap libre   : %u bytes\r\n",
              ( unsigned ) xPortGetFreeHeapSize() );
     xprintf( "stack libre  : tkCtl %u de %u, tkCmd %u de %u  (palabras)\r\n",
@@ -205,7 +209,7 @@ void tkCmd( void *pvParameters )
 
     /* ⚠ Que el equipo no duerma no es obvio desde afuera y cambia el consumo por
        tres órdenes de magnitud, así que lo dice el banner. */
-    xprintf( "[!] tickless APAGADO: el equipo no duerme (~3,5 mA)\r\n" );
+    xprintf( "[!] la consola acepta comandos por 10 s; despues entra en TICKLESS\r\n" );
 
     xprintf( "cmd>" );
 

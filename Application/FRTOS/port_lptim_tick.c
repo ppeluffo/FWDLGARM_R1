@@ -42,6 +42,10 @@
  * ---------------------------------------------------------------------------
  * En 1 el equipo NO duerme nunca: el idle gira y el reloj queda a 60 MHz.
  *
+ * ⭐ Hoy está en 0, o sea que el tickless ANDA: quién decide si se duerme son
+ * los candados de energía, que es el mecanismo de verdad. Este define queda
+ * como martillo para descartar al port de un diagnóstico sin tocar nada más.
+ *
  * ⭐ Se apaga acá y no en el .ioc a propósito. `configUSE_TICKLESS_IDLE` vive en
  * FreeRTOSConfig.h, que lo genera CubeMX: cambiarlo a mano dejaría el .ioc
  * diciendo una cosa y el binario haciendo otra — la desincronización que ya
@@ -53,7 +57,7 @@
  * tiempo. Se vuelve a 0 cuando eso se resuelva, y ahí hay que **medir el reposo
  * de nuevo** — es el criterio de aceptación de cada etapa.
  */
-#define PORT_SIN_TICKLESS   1
+#define PORT_SIN_TICKLESS   0
 
 /* ⚠ Este #define va ACÁ, antes de todo, y no al lado de la función que lo usa:
    el preprocesador evalúa cada #if en el orden del archivo, así que una
