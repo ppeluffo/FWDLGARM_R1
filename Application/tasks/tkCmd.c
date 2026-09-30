@@ -15,6 +15,7 @@
 #include "drv_eeprom.h"
 #include "drv_rtc79410.h"
 #include "drv_ina3221.h"
+#include "drv_rs485.h"
 #include "drv_uart.h"
 #include "pwr_lock.h"
 #include "main.h"
@@ -78,6 +79,7 @@ static void cmdHelp( void )
     xprintf( "  ee              EEPROM M24M01: rd, wr, test\r\n" );
     xprintf( "  rtc             RTC MCP79410: hora, validez, estado\r\n" );
     xprintf( "  ina             INA3221: identidad y los 3 canales de 4-20 mA\r\n" );
+    xprintf( "  rs485           el SP3485 y los 3 rieles conmutados\r\n" );
     xprintf( "  reset           reinicia el equipo\r\n" );
     xprintf( "\r\n" );
     xprintf( "  el comando va COMPLETO: 'status', no 'st'\r\n" );
@@ -605,6 +607,133 @@ static void cmdIna( void )
     xprintf( "\r\n  ina reg <n>   lee un registro\r\n" );
 }
 
+/*------------------------------------------------------------------------------
+ * RS485 — el SP3485 y los tres rieles conmutados
+ *----------------------------------------------------------------------------*/
+
+/*
+ * ⭐ EL DE LO MANEJA EL HARDWARE, y ésa es la decisión que importa.
+ *
+ * `HAL_RS485Ex_Init()` pone al USART3 en modo RS485: el silicio asierta el DE
+ * antes del primer bit y lo suelta después del último, sin que el firmware toque
+ * un pin. Hacerlo por software es la fuente del bug clásico del RS485 —cortar el
+ * DE un bit antes de tiempo, con lo que el último byte sale mutilado— y es
+ * **intermitente**, porque depende de la latencia de la tarea justo en ese
+ * instante. Pasa el banco y falla en campo.
+ *
+ * ⚠ Los TRES rieles son activo ALTO (TPS22810), al revés que el `EN_PWR_SD` de
+ * la microSD, que es un SI2301 de canal P donde 0 prende. Los dos criterios
+ * conviven en la misma placa, así que no alcanza con acordarse de "uno".
+ */
+static void cmdRs485( void )
+{
+    static const char *pcNombre[] = { "bus (SP3485)", "qmbus (modbus)", "cpres (presion)" };
+
+    ( void ) FRTOS_CMD_makeArgv();
+
+    /* --- los rieles ------------------------------------------------------- */
+    if( ( argv[ 2 ] != NULL ) &&
+        ( ( strcmp( argv[ 1 ], "on" ) == 0 ) || ( strcmp( argv[ 1 ], "off" ) == 0 ) ) )
+    {
+        bool bOn = ( strcmp( argv[ 1 ], "on" ) == 0 );
+        int  iCual = -1;
+
+        if     ( strcmp( argv[ 2 ], "bus"   ) == 0 ) { iCual = rs485RAIL_BUS;   }
+        else if( strcmp( argv[ 2 ], "qmbus" ) == 0 ) { iCual = rs485RAIL_QMBUS; }
+        else if( strcmp( argv[ 2 ], "cpres" ) == 0 ) { iCual = rs485RAIL_CPRES; }
+        else if( strcmp( argv[ 2 ], "all"   ) != 0 )
+        {
+            xprintf( "\r\nERROR: bus | qmbus | cpres | all\r\n" );
+            return;
+        }
+
+        if( iCual < 0 )
+        {
+            for( uint32_t i = 0U; i < ( uint32_t ) rs485RAIL_COUNT; i++ )
+            {
+                drv_rs485_power( ( rs485_rail_t ) i, bOn );
+            }
+            xprintf( "\r\nlos 3 rieles: %s\r\n", bOn ? "ENCENDIDOS" : "apagados" );
+        }
+        else
+        {
+            drv_rs485_power( ( rs485_rail_t ) iCual, bOn );
+            xprintf( "\r\n%s: %s\r\n", pcNombre[ iCual ], bOn ? "ENCENDIDO" : "apagado" );
+        }
+
+        if( bOn )
+        {
+            /* El transceiver está listo en microsegundos; los dispositivos del
+               otro lado tardan SEGUNDOS en arrancar. Lo dice el comando porque
+               el olvido más común del banco es hablarle a un caudalímetro que
+               todavía no terminó de encender. */
+            xprintf( "  (el SP3485 esta listo en us; un dispositivo del bus puede "
+                     "tardar segundos)\r\n" );
+        }
+        return;
+    }
+
+    /* --- transmitir y escuchar -------------------------------------------- */
+    if( ( argv[ 1 ] != NULL ) && ( strcmp( argv[ 1 ], "tx" ) == 0 ) && ( argv[ 2 ] != NULL ) )
+    {
+        char     cRta[ 64 ];
+        uint16_t usLargo = ( uint16_t ) strlen( argv[ 2 ] );
+
+        if( drv_rs485_power_estado( rs485RAIL_BUS ) == false )
+        {
+            xprintf( "\r\nERROR: el riel del SP3485 esta apagado ('rs485 on bus')\r\n" );
+            return;
+        }
+
+        drv_rs485_rx_flush();
+
+        if( drv_rs485_write( argv[ 2 ], usLargo ) != ( int16_t ) usLargo )
+        {
+            xprintf( "\r\nERROR al transmitir\r\n" );
+            return;
+        }
+
+        xprintf( "\r\n-> '%s' (%u bytes)\r\n", argv[ 2 ], ( unsigned ) usLargo );
+
+        /* Se lee por TRAMA, no por cantidad: corta al primer silencio en la
+           línea, que es literalmente la delimitación que define Modbus RTU. */
+        int16_t sLeidos = drv_rs485_read_frame( cRta, ( uint16_t ) ( sizeof( cRta ) - 1U ),
+                                                pdMS_TO_TICKS( 1000 ), pdMS_TO_TICKS( 6 ) );
+
+        if( sLeidos <= 0 )
+        {
+            xprintf( "<- nada en 1000 ms\r\n" );
+            return;
+        }
+
+        xprintf( "<- %d bytes:", ( int ) sLeidos );
+
+        for( int16_t i = 0; i < sLeidos; i++ )
+        {
+            xprintf( " %02X", ( unsigned ) ( uint8_t ) cRta[ i ] );
+        }
+
+        xprintf( "\r\n" );
+        return;
+    }
+
+    /* --- el estado -------------------------------------------------------- */
+    xprintf( "\r\nRS485 (USART3, 9600 8N1, SP3485)\r\n" );
+    xprintf( "  PB10 TX, PB11 RX, PB1 DE  <- el DE lo maneja el HARDWARE\r\n" );
+
+    for( uint32_t i = 0U; i < ( uint32_t ) rs485RAIL_COUNT; i++ )
+    {
+        xprintf( "  %-16s: %s\r\n", pcNombre[ i ],
+                 drv_rs485_power_estado( ( rs485_rail_t ) i ) ? "ENCENDIDO" : "apagado" );
+    }
+
+    xprintf( "  errores UART    : 0x%08lX\r\n",
+             ( unsigned long ) drv_uart_errores( drvUART_RS485 ) );
+
+    xprintf( "\r\n  rs485 on|off  bus | qmbus | cpres | all\r\n" );
+    xprintf( "  rs485 tx <texto>                  transmite y escucha la respuesta\r\n" );
+}
+
 /*
  * Reset por NVIC_SystemReset, que pulsa NRST.
  *
@@ -667,6 +796,14 @@ void tkCmd( void *pvParameters )
         xprintf( "\r\n[!] el RTC MCP79410 no contesta\r\n" );
     }
 
+    /* Deja los tres rieles apagados y la recepción del 485 armada. Va después
+       de drv_uart_init() —que lo hace frtos_open_all()— porque necesita que la
+       instancia del USART3 ya exista. */
+    if( drv_rs485_init() == false )
+    {
+        xprintf( "\r\n[!] el RS485 no se pudo inicializar\r\n" );
+    }
+
     if( drv_ina_init() == false )
     {
         xprintf( "\r\n[!] el INA3221 no contesta o no se identifico\r\n" );
@@ -685,6 +822,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "ee",     cmdEe     );
     FRTOS_CMD_register( "rtc",    cmdRtc    );
     FRTOS_CMD_register( "ina",    cmdIna    );
+    FRTOS_CMD_register( "rs485",  cmdRs485  );
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     /* La versión y la fecha en el banner, no sólo en 'status': es lo primero que

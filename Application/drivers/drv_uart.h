@@ -40,13 +40,17 @@
    línea de código nuevo de UART. */
 typedef enum {
     drvUART_TERM = 0,
-    /* ⏳ drvUART_RS485 y drvUART_LTE se reponen cuando entren sus periféricos.
-       La tabla de instancias existe justamente para que agregarlos sea una fila
-       y no una copia del driver. */
+    drvUART_RS485,
+    /* ⏳ drvUART_LTE se repone cuando entre el modem. Y que agregar una UART sea
+       UNA FILA y no una copia del driver es exactamente para lo que esta tabla
+       existe: en el AVR las cinco copias eran inevitables porque los registros
+       de cada USART eran constantes de compilación; acá cada UART es un
+       UART_HandleTypeDef. */
     drvUART_COUNT
 } drv_uart_id_t;
 
 #define DRV_UART_TERM_RXSIZE    128U    /* buffer de RX de la consola */
+#define DRV_UART_RS485_RXSIZE   256U    /* buffer de RX del Modbus    */
 
 /*
  * 256 bytes para el RS485: una trama Modbus RTU son 256 como máximo (PDU de 253
