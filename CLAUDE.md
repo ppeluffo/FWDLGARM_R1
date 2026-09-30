@@ -4588,7 +4588,23 @@ a 5 s bajaría las despertadas de 7700 a ~2000 por hora, pero obliga a repasar e
 —hoy 90 s, con `tkCtl` pateando cada segundo, o sea con 30× de margen sobre la ventana del IWDG— y a
 aceptar que la terminal se detecte hasta 5 s más tarde.
 
-### ⚠ La versión sube en CADA entrega a banco
+### ⛔ La versión sube cuando algo QUEDA FUNCIONANDO, no en cada entrega
+
+**Regla corregida por Pablo el 2026-09-30**: *"No avances de version hasta que lo que hagamos este
+funcionando."*
+
+Lo de abajo decía lo contrario —subirla en cada entrega a banco— y en el rearranque quedó demostrado
+por qué está mal: se bajaron `0.0.1`, `0.0.2`, `0.0.3` y `0.0.4` y **sólo la primera funcionaba**. Con
+cuatro números para un solo escalón validado, la versión dejó de decir nada.
+
+⭐ **El número marca hitos; los binarios intermedios los distingue `FW_FECHA`**, que sale de
+`__DATE__`/`__TIME__` y no se puede olvidar de actualizar. `status` y el banner imprimen las dos cosas
+justamente por eso.
+
+O sea: mientras se itera sobre un escalón, `FW_VERSION` **queda quieta en el último hito validado**, y
+recién sube cuando el escalón nuevo anda en banco.
+
+### ⚠ (histórico) La regla anterior, y por qué existía
 
 Regla de Pablo, 2026-09-08: *"hay que avanzar la version de compilacion en cada caso asi sabemos que
 firmware estoy usando"*. **Vamos por `0.0.X` durante toda la fase 2; al terminar la aplicación, pasa
