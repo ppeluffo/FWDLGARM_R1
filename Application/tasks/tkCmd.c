@@ -14,6 +14,7 @@
 #include "drv_i2c.h"
 #include "drv_eeprom.h"
 #include "drv_rtc79410.h"
+#include "drv_ina3221.h"
 #include "drv_uart.h"
 #include "pwr_lock.h"
 #include "main.h"
@@ -76,6 +77,7 @@ static void cmdHelp( void )
     xprintf( "  i2c [scan]      el bus I2C2\r\n" );
     xprintf( "  ee              EEPROM M24M01: rd, wr, test\r\n" );
     xprintf( "  rtc             RTC MCP79410: hora, validez, estado\r\n" );
+    xprintf( "  ina             INA3221: identidad y los 3 canales de 4-20 mA\r\n" );
     xprintf( "  reset           reinicia el equipo\r\n" );
     xprintf( "\r\n" );
     xprintf( "  el comando va COMPLETO: 'status', no 'st'\r\n" );
@@ -495,6 +497,114 @@ static void cmdRtc( void )
     xprintf( "  rtc invalid                         borra la firma (prueba en frio)\r\n" );
 }
 
+/*------------------------------------------------------------------------------
+ * INA3221 — las entradas de 4-20 mA
+ *----------------------------------------------------------------------------*/
+
+/*
+ * ⚠ LO QUE ESTA ETAPA PUEDE Y NO PUEDE VALIDAR.
+ *
+ * `EN_PWR_SENS420` queda afuera a propósito mientras se mide el consumo de a un
+ * integrado por vez, así que **los lazos de 4-20 mA no están alimentados** y las
+ * lecturas van a dar cerca de cero. Eso NO es una falla: lo que se valida acá es
+ * que el chip se **identifique**, **convierta** y **duerma**.
+ *
+ * ⭐ Y la identificación importa más que el ACK: en este bus hay siete
+ * direcciones ocupadas y ya hubo una sorpresa —la EEPROM resultó ser una M24M01
+ * y no la M24M02 que decía el código heredado—. Un ACK prueba que hay algo;
+ * `MFID` y `DIEID` prueban **qué**.
+ *
+ * ⛔ Los valores se imprimen formateados A MANO, sin `%f`, y es a propósito: el
+ * `printf` de newlib-nano necesita `-u _printf_float`, que es una opción del
+ * `.cproject`. Un comando de diagnóstico no puede depender de algo que una
+ * reconfiguración del proyecto puede perder — y el síntoma de que falte no es un
+ * número mal, es **un campo VACÍO** en medio de una línea que sale bien.
+ */
+static void cmdIna( void )
+{
+    uint16_t usVal = 0U;
+
+    ( void ) FRTOS_CMD_makeArgv();
+
+    if( ( argv[ 2 ] != NULL ) && ( strcmp( argv[ 1 ], "reg" ) == 0 ) )
+    {
+        uint8_t ucReg = ( uint8_t ) strtoul( argv[ 2 ], NULL, 0 );
+
+        if( drv_ina_reg_leer( ucReg, &usVal ) == false )
+        {
+            xprintf( "\r\nERROR al leer el registro 0x%02X\r\n", ( unsigned ) ucReg );
+            return;
+        }
+
+        xprintf( "\r\nreg 0x%02X = 0x%04X\r\n", ( unsigned ) ucReg, ( unsigned ) usVal );
+        return;
+    }
+
+    xprintf( "\r\nINA3221 (I2C2, direccion de 7 bits 41)\r\n" );
+
+    if( drv_ina_presente() == false )
+    {
+        xprintf( "  [!] no contesta o no se identifico\r\n" );
+        return;
+    }
+
+    if( drv_ina_reg_leer( DRV_INA_REG_MFID, &usVal ) )
+    {
+        xprintf( "  MFID       : 0x%04X\r\n", ( unsigned ) usVal );
+    }
+
+    if( drv_ina_reg_leer( DRV_INA_REG_DIEID, &usVal ) )
+    {
+        xprintf( "  DIEID      : 0x%04X\r\n", ( unsigned ) usVal );
+    }
+
+    if( drv_ina_reg_leer( DRV_INA_REG_CONF, &usVal ) )
+    {
+        /* MODE en los bits 2..0: 000 es power-down, que es el estado de REPOSO
+           del chip. Con él despierto consume ~350 µA contra los ~2 µA dormido,
+           o sea setenta veces el consumo del micro en Stop 2. */
+        xprintf( "  CONFIG     : 0x%04X  (MODE=%u: %s)\r\n",
+                 ( unsigned ) usVal, ( unsigned ) ( usVal & 0x7U ),
+                 ( ( usVal & 0x7U ) == 0U ) ? "power-down, como debe reposar"
+                                            : "[!] CONVIRTIENDO: ~350 uA" );
+    }
+
+    xprintf( "\r\nmidiendo los 3 canales (~1,4 s)...\r\n" );
+
+    float fMa[ inaCH_COUNT ];
+
+    if( drv_ina_medir( fMa ) == false )
+    {
+        xprintf( "  [!] la medida FALLO (el chip queda dormido igual)\r\n" );
+        return;
+    }
+
+    for( uint32_t i = 0U; i < ( uint32_t ) inaCH_COUNT; i++ )
+    {
+        int32_t lRaw = 0;
+        int32_t lUa  = ( int32_t ) ( fMa[ i ] * 1000.0f );   /* mA -> µA, entero */
+        int16_t sRaw = 0;
+
+        if( drv_ina_shunt_raw( ( ina_canal_t ) i, &sRaw ) )
+        {
+            lRaw = ( int32_t ) sRaw;
+        }
+
+        /* El signo se saca aparte para poder imprimir la parte entera y los
+           decimales con %ld sin que un negativo salga como "-0.-123". */
+        int32_t lAbs  = ( lUa < 0 ) ? -lUa : lUa;
+        const char *pcSigno = ( lUa < 0 ) ? "-" : "";
+
+        xprintf( "  CH%lu: %s%ld.%03ld mA   (shunt raw %ld)\r\n",
+                 ( unsigned long ) ( i + 1U ), pcSigno,
+                 ( long ) ( lAbs / 1000 ), ( long ) ( lAbs % 1000 ), ( long ) lRaw );
+    }
+
+    xprintf( "\r\n  [!] EN_PWR_SENS420 todavia NO se maneja: los lazos estan SIN\r\n" );
+    xprintf( "      alimentar, asi que ~0 mA es lo esperado en esta etapa.\r\n" );
+    xprintf( "\r\n  ina reg <n>   lee un registro\r\n" );
+}
+
 /*
  * Reset por NVIC_SystemReset, que pulsa NRST.
  *
@@ -557,6 +667,11 @@ void tkCmd( void *pvParameters )
         xprintf( "\r\n[!] el RTC MCP79410 no contesta\r\n" );
     }
 
+    if( drv_ina_init() == false )
+    {
+        xprintf( "\r\n[!] el INA3221 no contesta o no se identifico\r\n" );
+    }
+
     if( drv_eeprom_lista() == false )
     {
         xprintf( "\r\n[!] la EEPROM M24M01 no contesta\r\n" );
@@ -569,6 +684,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "i2c",    cmdI2c    );
     FRTOS_CMD_register( "ee",     cmdEe     );
     FRTOS_CMD_register( "rtc",    cmdRtc    );
+    FRTOS_CMD_register( "ina",    cmdIna    );
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     /* La versión y la fecha en el banner, no sólo en 'status': es lo primero que
