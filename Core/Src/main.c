@@ -65,7 +65,7 @@
  * RXNE deja de levantarse y **el eco muere en silencio**. Sin limpiarlos, un
  * solo overrun al principio parecería un RX roto para siempre.
  */
-#define PRUEBA_UART             1     /* 0 = operación normal */
+#define PRUEBA_UART             0     /* 0 = operación normal */
 
 #define PU_PATRON_MS         1000U    /* período de la línea de prueba */
 

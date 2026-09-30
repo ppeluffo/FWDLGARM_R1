@@ -10,7 +10,6 @@
 #include "frtos-io.h"
 #include "frtos_cmd.h"
 #include "drv_uart.h"
-#include "drv_term_sense.h"
 #include "pwr_lock.h"
 #include "main.h"
 
@@ -68,7 +67,6 @@ static void cmdHelp( void )
     xprintf( "\r\nComandos disponibles:\r\n" );
     xprintf( "  help            esta ayuda\r\n" );
     xprintf( "  status          version, reset, candados, stacks\r\n" );
-    xprintf( "  sense           TERM_SENSE: nivel del pin y configuracion\r\n" );
     xprintf( "  reset           reinicia el equipo\r\n" );
     xprintf( "\r\n" );
     xprintf( "  el comando va COMPLETO: 'status', no 'st'\r\n" );
@@ -128,9 +126,6 @@ static void cmdStatus( void )
     }
     xprintf( "\r\n" );
 
-    xprintf( "terminal     : %s\r\n",
-             drv_term_sense_presente() ? "CONECTADA" : "no detectada" );
-
     /*
      * Stack libre MÍNIMO histórico, en palabras. ⚠ Estos números son de una
      * compilación Debug con -O0, que usa bastante MÁS stack que Release: el
@@ -145,39 +140,6 @@ static void cmdStatus( void )
 
     xprintf( "errores UART : 0x%08lX\r\n",
              ( unsigned long ) drv_uart_errores( drvUART_TERM ) );
-}
-
-/*
- * ⭐ Existe para ver el pin CRUDO, no la creencia del driver.
- *
- * Si la consola recibe pero el equipo no baja a Stop 2 —o al revés, si no
- * recibe— la pregunta es siempre la misma: qué nivel tiene PB5 de verdad y con
- * qué pull quedó configurado. Sin este comando hay que ir al tester.
- *
- * ⚠ Y el caso que más cuesta: con el pin flotando, la lectura puede dar 0 y el
- * equipo creería que hay una terminal conectada para siempre, sin bajar nunca a
- * Stop 2. El nivel y el PUPDR juntos lo delatan.
- */
-static void cmdSense( void )
-{
-    drv_term_sense_cfg_t xCfg;
-
-    drv_term_sense_config( &xCfg );
-
-    static const char *pcModer[] = { "entrada", "salida", "alterna", "analogico" };
-    static const char *pcPupdr[] = { "sin pull", "pull-up", "pull-down", "reservado" };
-
-    xprintf( "\r\nTERM_SENSE (PB5)\r\n" );
-    xprintf( "  nivel del pin : %s   (activo en BAJO: 0 = terminal conectada)\r\n",
-             drv_term_sense_nivel_pin() ? "ALTO" : "BAJO" );
-    xprintf( "  el driver dice: %s\r\n",
-             drv_term_sense_presente() ? "CONECTADA" : "no detectada" );
-    xprintf( "  MODER         : %lu (%s)\r\n",
-             ( unsigned long ) xCfg.ulModer, pcModer[ xCfg.ulModer & 0x3U ] );
-    xprintf( "  PUPDR         : %lu (%s)\r\n",
-             ( unsigned long ) xCfg.ulPupdr, pcPupdr[ xCfg.ulPupdr & 0x3U ] );
-    xprintf( "  cambios vistos: %lu\r\n",
-             ( unsigned long ) drv_term_sense_cambios() );
 }
 
 /*
@@ -229,12 +191,9 @@ void tkCmd( void *pvParameters )
 
     prvTxPoleo( "[B] drivers abiertos; lo que sigue va por INTERRUPCION\r\n" );
 
-    drv_term_sense_init();
-
     FRTOS_CMD_init();
     FRTOS_CMD_register( "help",   cmdHelp   );
     FRTOS_CMD_register( "status", cmdStatus );
-    FRTOS_CMD_register( "sense",  cmdSense  );
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     /* La versión y la fecha en el banner, no sólo en 'status': es lo primero que
@@ -243,6 +202,11 @@ void tkCmd( void *pvParameters )
     xprintf( "\r\n\r\n%s %s - consola TERM\r\n", FW_NOMBRE, FW_VERSION );
     xprintf( "compilado %s\r\n", FW_FECHA );
     prvImprimirCausaReset();
+
+    /* ⚠ Que el equipo no duerma no es obvio desde afuera y cambia el consumo por
+       tres órdenes de magnitud, así que lo dice el banner. */
+    xprintf( "[!] tickless APAGADO: el equipo no duerme (~3,5 mA)\r\n" );
+
     xprintf( "cmd>" );
 
     for( ;; )

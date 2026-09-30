@@ -36,6 +36,33 @@
 #include "main.h"
 #include "pwr_lock.h"
 
+/*
+ * ---------------------------------------------------------------------------
+ * PORT_SIN_TICKLESS  (2026-09-30)
+ * ---------------------------------------------------------------------------
+ * En 1 el equipo NO duerme nunca: el idle gira y el reloj queda a 60 MHz.
+ *
+ * ⭐ Se apaga acá y no en el .ioc a propósito. `configUSE_TICKLESS_IDLE` vive en
+ * FreeRTOSConfig.h, que lo genera CubeMX: cambiarlo a mano dejaría el .ioc
+ * diciendo una cosa y el binario haciendo otra — la desincronización que ya
+ * costó un día con el LSE. Esta función, en cambio, es nuestra.
+ *
+ * ⚠ El costo es todo el consumo: **~3,5 mA en vez de µA**. Es para el banco,
+ * mientras se valida la consola: el RX no puede funcionar en Stop 2, y hasta que
+ * TERM_SENSE sea confiable el tickless deja la consola muerta la mayor parte del
+ * tiempo. Se vuelve a 0 cuando eso se resuelva, y ahí hay que **medir el reposo
+ * de nuevo** — es el criterio de aceptación de cada etapa.
+ */
+#define PORT_SIN_TICKLESS   1
+
+/* ⚠ Este #define va ACÁ, antes de todo, y no al lado de la función que lo usa:
+   el preprocesador evalúa cada #if en el orden del archivo, así que una
+   condición escrita más arriba que la definición se lee como 0 y el bloque
+   equivocado se compila. Ya pasó dos veces en este proyecto —con un #include
+   bajo un #if de un define declarado más abajo— y el síntoma es mudo: compila,
+   y lo que no debía entrar entra.
+*/
+
 /* El handle lo declara y lo inicializa CubeMX en main.c (MX_LPTIM1_Init), que corre
    antes de arrancar el scheduler. */
 extern LPTIM_HandleTypeDef hlptim1;
@@ -135,6 +162,7 @@ void HAL_LPTIM_AutoReloadMatchCallback( LPTIM_HandleTypeDef *hlptim )
    Por debajo de esto no compensa ni en energía ni en jitter. */
 #define TICKLESS_MIN_TICKS      3UL
 
+#if ( PORT_SIN_TICKLESS == 0 )
 /*------------------------------------------------------------------------------
  * CNT vive en el dominio del LSE, asíncrono respecto del bus: el RM exige leerlo dos
  * veces seguidas y aceptar el valor sólo cuando ambas lecturas coinciden.
@@ -151,12 +179,20 @@ static uint32_t prvLeerCNT( void )
 
     return ulSegunda;
 }
+#endif /* PORT_SIN_TICKLESS: sólo la usa el camino del tickless */
 
 /*------------------------------------------------------------------------------
  * Pisa la weak que genera CubeMX en freertos.c.
  */
+
 void vPortSuppressTicksAndSleep( TickType_t xExpectedIdleTime )
 {
+#if ( PORT_SIN_TICKLESS == 1 )
+    /* Volver sin dormir es exactamente lo que hace el port cuando hay un candado
+       de energía tomado, así que el kernel ya tolera este camino. */
+    ( void ) xExpectedIdleTime;
+    return;
+#else
     uint32_t   ulCuentasDormidas;
     TickType_t xTicksDormidos;
 
@@ -299,5 +335,5 @@ void vPortSuppressTicksAndSleep( TickType_t xExpectedIdleTime )
     HAL_ResumeTick();
 
     __enable_irq();
-}
-/*----------------------------------------------------------------------------*/
+#endif /* PORT_SIN_TICKLESS */
+}/*----------------------------------------------------------------------------*/
