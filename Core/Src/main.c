@@ -22,6 +22,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <string.h>
+
 #include "tkCtl.h"
 #include "tkCmd.h"
 /* USER CODE END Includes */
@@ -38,6 +41,33 @@
 /* Patrones de Error_Handler: cantidad de destellos cortos antes de la pausa larga. */
 #define ERR_BLINKS_RELOJ      2U   /* un oscilador de baja velocidad no arrancó */
 #define ERR_BLINKS_GENERIC    5U   /* cualquier otra falla                      */
+
+/*
+ * ---------------------------------------------------------------------------
+ * PRUEBA_UART  (2026-09-30) — el test más puro posible del serial
+ * ---------------------------------------------------------------------------
+ * En 1, main() se desvía acá antes de inicializar nada y NO vuelve. Contesta
+ * dos preguntas y nada más:
+ *
+ *   ¿sale el TX?  -> emite una línea con contador una vez por segundo
+ *   ¿entra el RX?  -> hace ECO de cada byte que llega
+ *
+ * Deliberadamente NO usa: FreeRTOS, el tickless, TERM_SENSE, los candados de
+ * energía, drv_uart, FRTOS-IO, ni una sola interrupción. Poleo directo sobre
+ * los registros del USART. Si acá el serial no anda, no hay firmware que
+ * culpar: es el pin, el conector, el cable o el adaptador.
+ *
+ * ⭐ El contador sirve para ver si se PIERDEN líneas, y el alfabeto y los
+ * dígitos para ver si los bytes se corrompen. Un baudrate mal calculado se
+ * manifiesta como basura, no como silencio — son dos síntomas distintos.
+ *
+ * ⛔ El clear de los flags de error no es decorativo: con un ORE pegado el
+ * RXNE deja de levantarse y **el eco muere en silencio**. Sin limpiarlos, un
+ * solo overrun al principio parecería un RX roto para siempre.
+ */
+#define PRUEBA_UART             1     /* 0 = operación normal */
+
+#define PU_PATRON_MS         1000U    /* período de la línea de prueba */
 
 #define ERR_BLINK_ON_MS       120U
 #define ERR_BLINK_OFF_MS      200U
@@ -82,10 +112,102 @@ void StartDefaultTask(void *argument);
 /* USER CODE BEGIN PFP */
 static void led_config( void );
 static void error_delay_ms( uint32_t ms );
+#if ( PRUEBA_UART == 1 )
+static void prvPruebaUart( void );
+#endif
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#if ( PRUEBA_UART == 1 )
+/* Ver el comentario del #define PRUEBA_UART, más arriba. No retorna. */
+static void prvPruebaUart( void )
+{
+    char           cLinea[ 80 ];
+    uint32_t       ulLinea   = 0U;
+    uint32_t       ulProxima = 0U;
+    USART_TypeDef *pxUsart;
+
+    /* El reloj va acá porque esta función se desvía ANTES de que main() llegue
+       a SystemClock_Config(). Es la misma llamada: 60 MHz, y de ahí sale el
+       divisor de 9600 del USART. */
+    SystemClock_Config();
+
+    /* La USART y sus pines. El MspInit configura PB6/PB7 en AF7 y habilita el
+       reloj del periférico; no hace falta MX_GPIO_Init() para esto. */
+    MX_USART1_UART_Init();
+
+    led_config();
+
+    pxUsart = huart1.Instance;
+
+    /* ⚠ El largo va con strlen() y no con un número: el primer intento puso 46
+       donde eran 49 y el banner habría salido cortado. Un largo escrito a mano
+       es un bug esperando a que alguien cambie el texto. */
+    static const char cBanner[] = "\r\n\r\n== PRUEBA_UART: TX cada 1 s + ECO del RX ==\r\n";
+
+    ( void ) HAL_UART_Transmit( &huart1, ( const uint8_t * ) cBanner,
+                                ( uint16_t ) strlen( cBanner ), HAL_MAX_DELAY );
+
+    for( ;; )
+    {
+        /*
+         * ---- 1. EL ECO, lo primero y en cada vuelta ----------------------
+         *
+         * Va antes que el patrón y sin ninguna espera en el medio: así el byte
+         * se devuelve en cuanto llega y no hay ventana para perderlo.
+         */
+        if( ( pxUsart->ISR & USART_ISR_RXNE ) != 0U )
+        {
+            uint32_t ulRx = pxUsart->RDR;          /* leer RDR limpia RXNE */
+
+            while( ( pxUsart->ISR & USART_ISR_TXE ) == 0U )
+            {
+            }
+            pxUsart->TDR = ulRx;
+        }
+
+        /*
+         * ---- 2. Limpiar los errores --------------------------------------
+         *
+         * ⛔ Con un ORE pegado el RXNE no vuelve a levantarse y el eco muere
+         * para siempre. Un solo overrun —dos bytes seguidos mientras el TX del
+         * patrón estaba ocupado— parecería un RX roto.
+         */
+        if( ( pxUsart->ISR & ( USART_ISR_ORE | USART_ISR_FE |
+                               USART_ISR_NE  | USART_ISR_PE ) ) != 0U )
+        {
+            pxUsart->ICR = USART_ICR_ORECF | USART_ICR_FECF |
+                           USART_ICR_NECF  | USART_ICR_PECF;
+        }
+
+        /*
+         * ---- 3. El patrón, una vez por segundo ---------------------------
+         *
+         * HAL_GetTick() sirve acá porque sin FreeRTOS el timebase de la HAL
+         * (TIM6) corre normalmente: no hay tickless que lo suspenda.
+         */
+        if( ( int32_t ) ( HAL_GetTick() - ulProxima ) >= 0 )
+        {
+            ulProxima = HAL_GetTick() + PU_PATRON_MS;
+
+            int n = snprintf( cLinea, sizeof( cLinea ),
+                              "TX %06lu ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789\r\n",
+                              ( unsigned long ) ulLinea++ );
+
+            if( n > 0 )
+            {
+                ( void ) HAL_UART_Transmit( &huart1, ( const uint8_t * ) cLinea,
+                                            ( uint16_t ) n, HAL_MAX_DELAY );
+            }
+
+            /* Cambia en cada línea: el LED late a 0,5 Hz mientras esto corre. */
+            HAL_GPIO_TogglePin( LED_PORT, LED_PIN );
+        }
+    }
+}
+#endif /* PRUEBA_UART */
+
 /*
  * Configura el pin del LED. Se llama desde Error_Handler() además del arranque,
  * porque una falla puede dispararse ANTES de MX_GPIO_Init().
@@ -151,6 +273,10 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+#if ( PRUEBA_UART == 1 )
+  /* Se va acá y no vuelve. Ver el comentario del #define PRUEBA_UART. */
+  prvPruebaUart();
+#endif
   /* USER CODE END Init */
 
   /* Configure the system clock */
