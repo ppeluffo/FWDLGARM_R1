@@ -34,6 +34,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | `0.0.2` | **la consola TERM**: banner, comandos y respuestas (con el tickless apagado) | — |
 | `0.0.3` | el tickless entrando a los 10 s, con el LED destellando | ⭐ **3 µA** |
 | **`0.0.4`** | ⭐ **`TERM_SENSE` decide**: con terminal no duerme, sin terminal Stop 2 | **9 mA / 3 µA** |
+| **`0.0.5`** | ⭐ **I2C2 + EEPROM M24M01 + RTC MCP79410**, los tres con datos reales | **9 mA / 5 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -44,6 +45,37 @@ Pablo). El desglose micro/adaptador **no está medido**, así que no hay que lee
 consumo del equipo. Y sigue en pie el pendiente del 2026-08-12: con un candado tomado el idle
 **gira**, y reemplazar eso por un **`__WFI()` pelado** bajaría el consumo activo a un tercio sin
 perder un solo byte.
+
+### ✅ Lo que el I2C validó en banco (2026-09-30), y no fue sólo "contestan"
+
+```
+cmd>i2c scan
+  50  <- EEPROM M24M01      cmd>ee test
+  51  <- EEPROM M24M01        0x000F0: OK (24 bytes)
+  57  <- MCP79410: su EEPROM  0x0FFF0: OK (24 bytes)
+  58  <- EEPROM: ID page      ee test: OK
+  59  <- EEPROM: ID page
+  6F  <- RTC MCP79410       cmd>rtc
+6 dispositivo(s)              fecha/hora : 2026-09-30 12:14:04 (mie)
+                              validez    : CONFIABLE
+```
+
+⭐ **Tres cosas que ese log confirma y que un "contesta / no contesta" no diría:**
+
+1. ⭐ **La EEPROM es una M24M01 de 128 KB**, reconfirmado en esta placa: contesta en `50` y `51` y
+   **NO en `52`/`53`**. Los bits A17/A16 los decodifica adentro y no son patas que se puedan atar, así
+   que dos bloques son 1 Mbit. El comentario heredado que decía M24M02 quedó corregido.
+2. ⭐ **El direccionamiento de 17 bits anda**: el `ee test` en **`0x0FFF0`** cruza el borde de bloque
+   de 64 KB, que es donde el driver tiene que cambiar el byte de dispositivo de `0xA0` a `0xA2`. Si
+   eso estuviera mal, ahí fallaría y en ningún otro lado.
+3. ⭐ **El día de la semana lo calcula bien**: informó **`mie`** para el 2026-09-30, que es
+   efectivamente miércoles. No se toma del usuario ni del chip — `drv_rtc_escribir()` lo deriva de la
+   fecha con Sakamoto, así que no puede guardarse una combinación imposible.
+
+⚠ **Y el `ARRANQUE EN FRIO` de la primera lectura era CORRECTO**, no una falla: la firma no estaba
+porque era la primera vez que ese chip se usaba con este firmware. Al fijar la hora pasó a
+`CONFIABLE` — y ese orden no es casual: la firma se escribe **después** de la hora, porque fijar la
+hora es el momento en que alguien afirma que es correcta.
 
 ### ⛔ Las tres lecciones de firmware que costó el rearranque
 
