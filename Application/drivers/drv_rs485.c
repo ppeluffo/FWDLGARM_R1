@@ -8,6 +8,23 @@
 #include "pwr_lock.h"
 #include "main.h"
 
+/*
+ * ⛔ Estos tres símbolos los genera CubeMX SÓLO si el pin tiene *User Label*, y
+ * sin ellos el error que sale es un `undeclared` que no dice qué hacer. Costó
+ * una vuelta el 2026-09-30, así que acá está dicho:
+ *
+ *   PB10 -> USART3_TX  con User Label  RS485_TX
+ *   PB11 -> USART3_RX  con User Label  RS485_RX
+ *   PB1  -> USART3_DE  con User Label  RS485_RTS
+ *
+ * ⚠ Y no son cosméticos: prvPinesBus() mueve los tres entre AF y ANALÓGICO
+ * según el riel esté encendido, para no alimentar al SP3485 por las patas
+ * cuando está sin VCC. Ver el comentario de esa función.
+ */
+#if !defined( RS485_TX_Pin ) || !defined( RS485_RX_Pin ) || !defined( RS485_RTS_Pin )
+#error "Faltan los User Label del USART3 en el .ioc: PB10=RS485_TX, PB11=RS485_RX, PB1=RS485_RTS"
+#endif
+
 /* Pines del bus: los tres se mueven juntos entre función alternada y analógico.
    PB1 es el DE, que lo maneja el periférico. */
 #define BUS_PINS    ( RS485_TX_Pin | RS485_RX_Pin | RS485_RTS_Pin )
