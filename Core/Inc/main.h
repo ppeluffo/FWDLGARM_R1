@@ -81,10 +81,12 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define USART3_TX_Pin GPIO_PIN_10
-#define USART3_TX_GPIO_Port GPIOB
-#define USART3_RX_Pin GPIO_PIN_11
-#define USART3_RX_GPIO_Port GPIOB
+#define RS485_RTS_Pin GPIO_PIN_1
+#define RS485_RTS_GPIO_Port GPIOB
+#define RS485_TX_Pin GPIO_PIN_10
+#define RS485_TX_GPIO_Port GPIOB
+#define RS485_RX_Pin GPIO_PIN_11
+#define RS485_RX_GPIO_Port GPIOB
 #define EN_PWR_CPRES_Pin GPIO_PIN_15
 #define EN_PWR_CPRES_GPIO_Port GPIOB
 #define EN_PWR_RS485_Pin GPIO_PIN_6

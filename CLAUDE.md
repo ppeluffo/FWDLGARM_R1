@@ -36,6 +36,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | **`0.0.4`** | ⭐ **`TERM_SENSE` decide**: con terminal no duerme, sin terminal Stop 2 | **9 mA / 3 µA** |
 | **`0.0.5`** | ⭐ **I2C2 + EEPROM M24M01 + RTC MCP79410**, los tres con datos reales | **9 mA / 5 µA** |
 | **`0.0.6`** | ⭐ **INA3221**, identificado y convirtiendo (⏳ sin `EN_PWR_SENS420`) | **9 mA / 5 µA** |
+| ⏳ | **RS485 (SP3485) y los 3 rieles conmutados** — escrito y compilando | **sin probar** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
