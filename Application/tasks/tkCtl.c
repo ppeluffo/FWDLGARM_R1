@@ -39,6 +39,30 @@ extern UART_HandleTypeDef huart1;
 #define TKCTL_LATIDO_S    5U
 
 /*
+ * ---------------------------------------------------------------------------
+ * FORZAR EL CANDADO DE LA TERMINAL  (2026-09-30)
+ * ---------------------------------------------------------------------------
+ * En 1, pwrLOCK_TERM se toma SIEMPRE, sin mirar TERM_SENSE.
+ *
+ * ⭐ Existe porque en esta placa PB5 **sube solo** a los pocos segundos de
+ * arrancar —medido con el latido: `[5] PB5=0` y `[10] PB5=1` con la terminal
+ * enchufada todo el tiempo—. Al soltarse el candado el equipo baja a Stop 2,
+ * donde la USART NO RECIBE, y la consola queda muda: el TX sigue saliendo, así
+ * que desde afuera se lee como un RX roto.
+ *
+ * ⛔ Y esto NO arregla nada: es un puente para poder seguir trabajando. Que
+ * PB5 suba solo es de cableado o de hardware y se resuelve aparte — con el
+ * tester en el pin, que es la medición que dice si el nivel es real.
+ *
+ * ⚠ El costo es que el equipo NUNCA duerme: ~3,5 mA en vez de µA. Para el banco
+ * es exactamente lo que se quiere; para medir consumo hay que ponerlo en 0.
+ *
+ * El latido sigue informando el nivel CRUDO de PB5 igual, así que cuando el pin
+ * se comporte bien se va a ver, y ahí esto se apaga.
+ */
+#define TKCTL_FORZAR_TERM 1
+
+/*
  * Destello del LED y poleo de TERM_SENSE, en la misma vuelta.
  *
  * 50 ms encendido cada segundo, o sea 5 % de duty.
@@ -94,6 +118,12 @@ void tkCtl( void *pvParameters )
          */
         drv_term_sense_poll();
 
+#if ( TKCTL_FORZAR_TERM == 1 )
+        /* Va DESPUÉS del poleo, que es quien suelta el candado cuando lee PB5
+           en alto: si fuera antes, el poleo lo pisaría en la misma vuelta. */
+        pwr_lock_acquire( pwrLOCK_TERM );
+#endif
+
 #if ( TKCTL_LATIDO == 1 )
         /* Va DESPUÉS del poleo, así el nivel y el candado que informa son los
            de esta misma vuelta y no los de la anterior. */
@@ -102,11 +132,12 @@ void tkCtl( void *pvParameters )
         if( ( ulVueltas % TKCTL_LATIDO_S ) == 0U )
         {
             int n = snprintf( cLinea, sizeof( cLinea ),
-                              "[%lu] PB5=%d terminal=%s candados=0x%02lX\r\n",
+                              "[%lu] PB5=%d terminal=%s candados=0x%02lX%s\r\n",
                               ( unsigned long ) ulVueltas,
                               drv_term_sense_nivel_pin() ? 1 : 0,
                               drv_term_sense_presente() ? "SI" : "no",
-                              ( unsigned long ) pwr_lock_estado() );
+                              ( unsigned long ) pwr_lock_estado(),
+                              ( TKCTL_FORZAR_TERM == 1 ) ? "  (TERM forzado)" : "" );
 
             if( n > 0 )
             {
