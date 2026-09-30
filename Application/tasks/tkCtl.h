@@ -20,7 +20,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define tkCtl_STACK_SIZE    256                       /* palabras, no bytes */
+#define tkCtl_STACK_SIZE    384                       /* palabras, no bytes */
 #define tkCtl_PRIORITY      ( tskIDLE_PRIORITY + 1 )
 
 extern TaskHandle_t xHandle_tkCtl;   /* lo usa 'status' para el high water mark */
