@@ -31,9 +31,13 @@ extern UART_HandleTypeDef huart1;
  *   candados  con alguno tomado el idle GIRA: ~9,5 mA, no 3 µA
  *   errUART   un ORE pegado trabaría el RX; si está en 0, el RX no es eso
  *
- * ⚠ Es instrumento de banco y ensucia la consola. Se apaga con esto en 0.
+ * ⚠ Es instrumento de banco y ensucia la consola, así que queda en 0. **No
+ * borrarlo**: se sacó una vez cuando la consola empezó a andar y hubo que
+ * reponerlo a las pocas horas, porque el punto ciego reaparece cada vez que el
+ * RX falla. Prenderlo es la primera cosa a hacer si la consola vuelve a quedar
+ * muda.
  */
-#define TKCTL_LATIDO      1
+#define TKCTL_LATIDO      0
 
 /*
  * ---------------------------------------------------------------------------

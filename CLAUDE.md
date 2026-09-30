@@ -26,9 +26,38 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
 | `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
 
-**Lo que el rearranque ya midió:** `0.0.1` —FreeRTOS con el tick por LPTIM1, el tickless y una sola
-tarea destellando el LED— da ⭐ **3 µA**. O sea que el micro, el kernel y el reposo están limpios, y
-toda la deuda de consumo está en lo que se agregue encima.
+**Lo que el rearranque lleva validado en banco:**
+
+| Versión | Qué quedó funcionando | Consumo |
+|---|---|---|
+| `0.0.1` | FreeRTOS, tick por LPTIM1, tickless, una tarea destellando el LED | ⭐ **3 µA** |
+| `0.0.2` | **la consola TERM**: banner, comandos y respuestas (con el tickless apagado) | — |
+| `0.0.3` | el tickless entrando a los 10 s, con el LED destellando | ⭐ **3 µA** |
+| **`0.0.4`** | ⭐ **`TERM_SENSE` decide**: con terminal no duerme, sin terminal Stop 2 | **9 mA / 3 µA** |
+
+⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
+podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
+mide lo mismo que el patrón bare-metal con el LED apagado—.
+
+⚠ **Los 9 mA con la terminal conectada incluyen el adaptador serial, que consume bastante** (dato de
+Pablo). El desglose micro/adaptador **no está medido**, así que no hay que leer ese número como el
+consumo del equipo. Y sigue en pie el pendiente del 2026-08-12: con un candado tomado el idle
+**gira**, y reemplazar eso por un **`__WFI()` pelado** bajaría el consumo activo a un tercio sin
+perder un solo byte.
+
+### ⛔ Las tres lecciones de firmware que costó el rearranque
+
+1. ⭐ **Sin RX no hay diagnóstico, y el banner sale una sola vez.** Cuando el RX falla no hay forma de
+   preguntarle nada al equipo, así que el TX tiene que hablar solo: el **latido por poleo** de
+   `tkCtl` (`TKCTL_LATIDO`) emite el nivel crudo de PB5, los candados y los errores del UART sin
+   pasar por el driver. Se sacó una vez al andar la consola y hubo que reponerlo a las pocas horas.
+2. ⛔ **Un `#if` sobre un `#define` declarado MÁS ABAJO en el archivo se lee como 0** y compila el
+   bloque equivocado, sin decir nada. Pasó dos veces: con un `#include` y con `prvLeerCNT`. Los
+   defines de configuración van arriba de todo.
+3. ⭐ **`PRUEBA_UART`** (en `main.c`) es el test que separa firmware de hardware en una bajada: TX por
+   poleo cada segundo y **eco** de cada byte, sin FreeRTOS, sin tickless, sin candados, sin drivers y
+   sin una sola interrupción. ⛔ Limpia los flags de error en cada vuelta, y eso no es decorativo:
+   con un `ORE` pegado el `RXNE` no vuelve a levantarse y **el eco muere en silencio**.
 
 ⚠ **Al repoblar, cada módulo que vuelve de la referencia hay que REDUCIRLO.** Ya pasó con la consola:
 `drv_uart` traía una tabla de tres instancias y `frtos-io` cinco file descriptors más las operaciones
