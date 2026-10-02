@@ -25,6 +25,15 @@ static bool     b12vOn      = false;
    dormida. Lo imprime el comando `vin`. */
 volatile uint32_t ulCrTrasDormir = 0UL;
 
+/*
+ * Los bits de ADC_CR con propiedad de hardware "rs" (read-set): se ponen por
+ * software y los limpia el hardware. ⛔ NUNCA hay que reescribirlos desde una
+ * lectura ni dejarlos en 0 por accidente: hay que FORZARLOS a 0 en la máscara,
+ * que es exactamente lo que hace `ADC_CR_BITS_PROPERTY_RS` en la LL de ST.
+ */
+#define ADC_CR_RS   ( ADC_CR_ADCAL | ADC_CR_JADSTP | ADC_CR_ADSTP \
+                    | ADC_CR_JADSTART | ADC_CR_ADSTART | ADC_CR_ADDIS | ADC_CR_ADEN )
+
 static uint32_t ulCalFactor = 0UL;
 
 /*==============================================================================
@@ -82,7 +91,8 @@ static void prvAdcDormir( void )
      * poner el registro entero en DEEPPWD es seguro y deja ADVREGEN en 0 por
      * construcción. Es lo mismo que hace la LL, pero sin leer antes.
      */
-    hadc1.Instance->CR = ADC_CR_DEEPPWD;
+    MODIFY_REG( hadc1.Instance->CR, ADC_CR_RS | ADC_CR_ADVREGEN, 0UL );
+    MODIFY_REG( hadc1.Instance->CR, ADC_CR_RS | ADC_CR_DEEPPWD, ADC_CR_DEEPPWD );
     __DSB();
 
     /* ⭐ Y se captura EN EL ACTO. Si esto dice DEEPPWD=1 y el registro leído
@@ -94,19 +104,22 @@ static void prvAdcDormir( void )
 static void prvAdcDespertar( void )
 {
     /*
-     * Escritura DIRECTA, y en DOS pasos porque el orden lo pide el RM0351:
-     * primero salir del deep power-down, después encender el regulador.
+     * ⛔ ESTO NO ES `CR = 0` SEGUIDO DE `CR = ADVREGEN`, y la diferencia costó
+     * una bajada (2026-10-02): escribir el registro entero **APAGA el regulador
+     * si ya estaba encendido**, y entonces cada medida lo reenciende y lee antes
+     * de que la referencia se asiente. El síntoma era VDDA informando 3,05-3,17 V
+     * contra 3,32 del tester, **variable** — un sesgo sería de calibración, la
+     * dispersión delata un transitorio.
      *
-     * ⚠ No se usa la capa LL —que sería lo propio— porque `stm32l4xx_ll_adc.h`
-     * NO está en el proyecto: CubeMX sólo copia la HAL. Incluirlo obligaría a
-     * tocar el árbol de Drivers/, que es generado.
+     * Se replica lo que hace la LL de ST: `MODIFY_REG` tocando UN bit y forzando
+     * los "rs" a 0. (No se usa la LL misma porque `stm32l4xx_ll_adc.h` no está
+     * en el proyecto: CubeMX sólo copia la HAL.)
      *
-     * Los siete bits de propiedad "rs" (ADEN, ADDIS, ADSTART, ADSTP, ADCAL,
-     * JADSTART, JADSTP) son SET-ONLY: escribirles 0 no tiene efecto, así que
-     * escribir el registro entero es seguro.
+     * El orden lo pide el RM0351: primero salir del deep power-down, después el
+     * regulador.
      */
-    hadc1.Instance->CR = 0UL;                   /* sale de deep power-down */
-    hadc1.Instance->CR = ADC_CR_ADVREGEN;       /* y enciende el regulador */
+    MODIFY_REG( hadc1.Instance->CR, ADC_CR_RS | ADC_CR_DEEPPWD,  0UL );
+    MODIFY_REG( hadc1.Instance->CR, ADC_CR_RS | ADC_CR_ADVREGEN, ADC_CR_ADVREGEN );
 
     prvEsperarUs( ADCVREG_STUP_US );
 
