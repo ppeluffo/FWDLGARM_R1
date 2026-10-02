@@ -18,8 +18,43 @@
 #include "drv_rs485.h"
 #include "drv_uart.h"
 #include "drv_sd.h"
+#include "drv_adc.h"
 #include "pwr_lock.h"
 #include "main.h"
+
+/*
+ * ⛔ ESTE DEFINE VA ACÁ ARRIBA Y NO MÁS ABAJO.
+ * Un `#if` sobre un `#define` declarado después en el archivo se lee como 0 y
+ * compila el bloque equivocado SIN DECIR NADA. Ya pasó dos veces en el
+ * rearranque: con un `#include` y con `prvLeerCNT`.
+ *
+ * ---------------------------------------------------------------------------
+ * INSTRUMENTO DE BISECT DEL CONSUMO (2026-10-02)
+ *
+ * En 0 NO se llama a `drv_adc_init()`, así que el ADC queda exactamente como lo
+ * dejó `MX_ADC1_Init()` de CubeMX: el mismo estado que tenía el `0.0.8`, que
+ * medía 5 µA.
+ *
+ * ⭐ Aísla UNA sola variable, y por eso es mejor que volver al tag `v0.0.8`:
+ * aquel difiere además en el `.ioc` —sin PB0 ni PC4— o sea dos cosas a la vez.
+ * Acá cambia una línea y el hardware queda idéntico.
+ *
+ *   mide 5 µA   -> el consumo lo agrega `drv_adc_init()`, y los registros que
+ *                  imprime `vin` dicen cuál bit quedó mal
+ *   mide 337 µA -> NO es el ADC ni el firmware: es el PCB
+ */
+/*
+ * ⭐ Este bisect YA DIO SU RESPUESTA (2026-10-02): con 0 el consumo siguió en
+ * 337 µA, o sea que el ADC quedaba despierto SIN que corriera drv_adc_init().
+ * Lo deja así `MX_ADC1_Init()` de CubeMX: llama a `HAL_ADC_Init()`, y ésa sale
+ * de deep power-down y enciende el regulador del ADC (stm32l4xx_hal_adc.c:475).
+ *
+ * ⚠ Por eso `drv_adc_init()` tiene que CORRER: es lo único que vuelve a dormir
+ * el ADC. Dejarlo en 0 no es "no tocar el ADC", es dejarlo despierto.
+ * El interruptor se conserva porque el experimento sirve para el próximo
+ * periférico que entre.
+ */
+#define TKCMD_ADC_INIT      1     /* 0 = no inicializar el ADC (bisect) */
 
 /* Memoria estática: la tarea no toca el heap. */
 StaticTask_t tkCmd_TCB;
@@ -82,6 +117,7 @@ static void cmdHelp( void )
     xprintf( "  ina             INA3221: identidad y los 3 canales de 4-20 mA\r\n" );
     xprintf( "  rs485           el SP3485 y los 3 rieles conmutados\r\n" );
     xprintf( "  sd              microSD por SPI3: energia, sectores\r\n" );
+    xprintf( "  vin             rieles por ADC1: 12 V y 3V3 (VREFINT)\r\n" );
     xprintf( "  reset           reinicia el equipo\r\n" );
     xprintf( "\r\n" );
     xprintf( "  el comando va COMPLETO: 'status', no 'st'\r\n" );
@@ -742,6 +778,197 @@ static void cmdRs485( void )
 }
 
 /*------------------------------------------------------------------------------
+ * vin — los rieles por ADC1
+ *
+ * ⭐ Dos medidas de naturaleza distinta: la de 12 V tiene hardware —divisor,
+ * load switch y seguidor— y la de 3,3 V NO TIENE NINGUNO: sale de VREFINT.
+ *----------------------------------------------------------------------------*/
+
+/* A mano y no con %f: así un comando de diagnóstico no depende de la opción
+   `-u _printf_float` del .cproject, que una reconfiguración del proyecto puede
+   perder. Mismo criterio que el comando 'ina'. */
+static void prvImprimirVolts( uint32_t ulMiliV )
+{
+    xprintf( "%lu.%03lu V",
+             ( unsigned long ) ( ulMiliV / 1000UL ),
+             ( unsigned long ) ( ulMiliV % 1000UL ) );
+}
+
+static void cmdVin( void )
+{
+    ( void ) FRTOS_CMD_makeArgv();
+
+    if( argv[ 1 ] != NULL )
+    {
+        if( strcmp( argv[ 1 ], "on" ) == 0 )
+        {
+            drv_adc_pwr_12v( true );
+            xprintf( "\r\ndivisor de 12 V conectado (consume %lu uA mientras este asi)\r\n",
+                     ( unsigned long ) ( 12000UL / 66UL ) );
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "off" ) == 0 )
+        {
+            drv_adc_pwr_12v( false );
+            xprintf( "\r\ndivisor de 12 V desconectado\r\n" );
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "raw" ) == 0 )
+        {
+            uint16_t usVref = 0U;
+            uint16_t us12   = 0U;
+
+            /* Se prende el riel para que la cuenta del divisor signifique algo:
+               con el load switch abierto la entrada del seguidor queda al aire
+               y lo que se lea no es una medida de nada. */
+            bool bYaEstaba = drv_adc_pwr_12v_estado();
+
+            if( bYaEstaba == false )
+            {
+                drv_adc_pwr_12v( true );
+                vTaskDelay( pdMS_TO_TICKS( DRV_ADC_SETTLE_MS ) );
+            }
+
+            bool bOk = drv_adc_raw_vrefint( &usVref ) && drv_adc_raw_12v( &us12 );
+
+            if( bYaEstaba == false )
+            {
+                drv_adc_pwr_12v( false );
+            }
+
+            xprintf( "\r\n" );
+
+            if( bOk == false )
+            {
+                xprintf( "ERROR: la conversion fallo\r\n" );
+                return;
+            }
+
+            xprintf( "  VREFINT : %5u cuentas\r\n", ( unsigned ) usVref );
+            xprintf( "  IN15    : %5u cuentas  (12 V, divisor 56K/10K)\r\n",
+                     ( unsigned ) us12 );
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "sleep" ) == 0 )
+        {
+            /*
+             * Escribe la dormida PASO A PASO y lee el registro después de cada
+             * escritura. Tres arreglos distintos fallaron igual, así que lo que
+             * falta no es otro arreglo: es ver en qué escritura exacta se
+             * pierde el efecto, y si el ADC tiene reloj para aceptarla.
+             */
+            xprintf( "\r\nRCC_AHB2ENR: 0x%08lX  ADCEN=%u%s\r\n",
+                     ( unsigned long ) RCC->AHB2ENR,
+                     ( unsigned ) ( ( RCC->AHB2ENR >> 13 ) & 1U ),
+                     ( ( ( RCC->AHB2ENR >> 13 ) & 1U ) == 0U ) ?
+                        "  <- SIN RELOJ: ninguna escritura puede entrar" : "" );
+
+            xprintf( "  CR al entrar        : 0x%08lX\r\n", ( unsigned long ) ADC1->CR );
+
+            ADC1->CR = 0UL;                       /* apaga ADVREGEN, nada mas */
+            __DSB();
+            xprintf( "  tras CR = 0         : 0x%08lX  (ADVREGEN deberia ser 0)\r\n",
+                     ( unsigned long ) ADC1->CR );
+
+            ADC1->CR = ADC_CR_DEEPPWD;            /* y ahora el deep power-down */
+            __DSB();
+            xprintf( "  tras CR = DEEPPWD   : 0x%08lX  (DEEPPWD deberia ser 1)\r\n",
+                     ( unsigned long ) ADC1->CR );
+
+            /* Una escritura a un registro distinto del mismo periférico: si
+               ESTA entra y las de CR no, el problema es del registro CR y no
+               del reloj ni del bus. */
+            uint32_t ulAntes = ADC1->SMPR1;
+            ADC1->SMPR1 = ulAntes ^ 0x00000007UL;
+            __DSB();
+            xprintf( "  SMPR1 %08lX -> %08lX  %s\r\n",
+                     ( unsigned long ) ulAntes, ( unsigned long ) ADC1->SMPR1,
+                     ( ADC1->SMPR1 != ulAntes ) ? "ESCRIBE OK" : "TAMPOCO ENTRA" );
+            ADC1->SMPR1 = ulAntes;
+            return;
+        }
+
+        xprintf( "\r\nERROR: vin | vin raw | vin on | vin off | vin sleep\r\n" );
+        return;
+    }
+
+    /* ---- 'vin' pelado: la medida ---- */
+    uint32_t ulVdda = 0UL;
+    uint32_t ulV12  = 0UL;
+
+    xprintf( "\r\n" );
+
+    /* ⭐ El VDDA va PRIMERO porque la medida de 12 V lo necesita: convertir el
+       divisor contra un 3,3 V nominal supuesto trasladaría directo cualquier
+       desvío del riel, y el resultado sería un número plausible y mal. */
+    if( drv_adc_vdda_mv( &ulVdda ) )
+    {
+        xprintf( "  VDDA / 3V3 : " );
+        prvImprimirVolts( ulVdda );
+        xprintf( "   (por VREFINT, SIN hardware externo)\r\n" );
+    }
+    else
+    {
+        xprintf( "  VDDA / 3V3 : ERROR de conversion\r\n" );
+    }
+
+    if( drv_adc_v12_mv( &ulV12, false ) )
+    {
+        xprintf( "  riel 12 V  : " );
+        prvImprimirVolts( ulV12 );
+        xprintf( "   (PB0 = ADC1_IN15, divisor 56K/10K)\r\n" );
+    }
+    else
+    {
+        xprintf( "  riel 12 V  : ERROR de conversion\r\n" );
+    }
+
+    xprintf( "  EN_SENS12V : %s\r\n", drv_adc_pwr_12v_estado() ? "ON" : "off" );
+
+    /*
+     * ⭐ Los registros, SIEMPRE. Mismo criterio que el CONFIG del INA3221: un
+     * periférico que quedó despierto no tiene ningún síntoma salvo la
+     * autonomía, así que el comando tiene que decirlo sin que nadie pregunte.
+     *
+     * ADC_CR : DEEPPWD (b31) y ADVREGEN (b29) son el estado de reposo correcto
+     *          (1 y 0); ADEN (b0) en 1 significa que el ADC quedó habilitado.
+     * ADC_CCR: VREFEN (b22) es el buffer de la referencia interna, TSEN (b23)
+     *          el sensor de temperatura y VBATEN (b24) el divisor de VBAT.
+     *          ⚠ Este registro es COMÚN y el deep power-down NO lo apaga.
+     */
+    uint32_t ulCr  = ADC1->CR;
+    uint32_t ulCcr = ADC123_COMMON->CCR;
+
+    xprintf( "\r\n  ADC_CR     : 0x%08lX  DEEPPWD=%u ADVREGEN=%u ADEN=%u%s\r\n",
+             ( unsigned long ) ulCr,
+             ( unsigned ) ( ( ulCr >> 31 ) & 1U ),
+             ( unsigned ) ( ( ulCr >> 29 ) & 1U ),
+             ( unsigned ) ( ulCr & 1U ),
+             ( ( ( ulCr >> 31 ) & 1U ) == 1U ) ? "  <- dormido, como debe" :
+                                                 "  <- NO esta en deep power-down" );
+
+    xprintf( "  tras dormir: 0x%08lX  DEEPPWD=%u ADVREGEN=%u%s\r\n",
+             ( unsigned long ) ulCrTrasDormir,
+             ( unsigned ) ( ( ulCrTrasDormir >> 31 ) & 1U ),
+             ( unsigned ) ( ( ulCrTrasDormir >> 29 ) & 1U ),
+             ( ( ( ulCrTrasDormir >> 31 ) & 1U ) == 1U ) ?
+                 "  <- la escritura SI entro: algo lo despierta despues" :
+                 "  <- la escritura NO entra" );
+
+    xprintf( "  ADC_CCR    : 0x%08lX  VREFEN=%u TSEN=%u VBATEN=%u\r\n",
+             ( unsigned long ) ulCcr,
+             ( unsigned ) ( ( ulCcr >> 22 ) & 1U ),
+             ( unsigned ) ( ( ulCcr >> 23 ) & 1U ),
+             ( unsigned ) ( ( ulCcr >> 24 ) & 1U ) );
+
+    xprintf( "\r\n  vin raw      cuentas crudas, sin convertir\r\n" );
+    xprintf( "  vin on|off   el load switch del divisor, a mano\r\n" );
+}
+
+/*------------------------------------------------------------------------------
  * sd — la tarjeta microSD
  *
  * Buffer de un sector, estático: 512 bytes NO entran en el stack de tkCmd.
@@ -1073,6 +1300,18 @@ void tkCmd( void *pvParameters )
        cerrado a GND son 82 µA las 24 horas — ver drv_sd.h. */
     ( void ) drv_sd_init();
 
+#if ( TKCMD_ADC_INIT == 1 )
+    /* ⚠ Calibra el ADC y lo deja en deep power-down. La calibración es
+       OBLIGATORIA en el STM32L4: sin ella el offset de varias cuentas se
+       multiplica por 6,6 al volver a la tensión del riel de 12 V. */
+    if( drv_adc_init() == false )
+    {
+        prvTxPoleo( "ADC: ERROR de calibracion\r\n" );
+    }
+#else
+    prvTxPoleo( "ADC: SIN INICIALIZAR (TKCMD_ADC_INIT=0, bisect de consumo)\r\n" );
+#endif
+
     if( drv_ina_init() == false )
     {
         xprintf( "\r\n[!] el INA3221 no contesta o no se identifico\r\n" );
@@ -1093,6 +1332,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "ina",    cmdIna    );
     FRTOS_CMD_register( "rs485",  cmdRs485  );
     FRTOS_CMD_register( "sd",     cmdSd     );
+    FRTOS_CMD_register( "vin",    cmdVin    );
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     /* La versión y la fecha en el banner, no sólo en 'status': es lo primero que

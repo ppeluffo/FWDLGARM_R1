@@ -230,7 +230,7 @@ PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal**
 **RTC MCP79410 con su pila** y el **INA3221** que mide los lazos de 4-20 mA, el **RS485** con su
 transceiver **SP3485** y los tres rieles conmutados, la **fuente lineal de los sensores 4-20 mA**
 (`EN_PWR_SENS420`, PB12), la **microSD** con su alimentación conmutada y la **medida de los rieles**
-(los dos load switches con sus divisores y sus seguidores TLV8802) y el **contador de pulsos** (opto,
+(los dos load switches con sus divisores y sus seguidores TLV8801) y el **contador de pulsos** (opto,
 filtro RC y 74AUP1G17) y la **electroválvula TOYI** con su load switch (soldada, confirmado por Pablo
 el 2026-08-18). **Falta poblar un solo módulo: el modem LTE** —que en la placa nueva ya tiene su
 fuente andando; falta el módulo en sí, un **WH-LTE-7S1-E**—.
@@ -1039,7 +1039,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | RS485 (modbus) | PB10 TX, PB11 RX, **PB1 `USART3_RTS_DE`** → **USART3**, 9600 8N1, transceiver **SP3485** |
 | Rieles conmutados (TPS22819, EN=1 prende, pull-down de 100 K) | PC6 `EN_PWR_RS485`, PC7 `EN_PWR_QMBUS`, PB15 `EN_PWR_CPRES` |
 | Fuente lineal de los sensores 4-20 mA | **PB12 `EN_PWR_SENS420`** (EN=1 prende) |
-| Medida del riel de 12 V (TPS22810, EN=1 prende, pull-down) | **PC4 `EN_SENS12V`**, divisor 56K/10K → seguidor TLV8802 → **PB0 `ADC1_IN15`** |
+| Medida del riel de 12 V (TPS22810, EN=1 prende, pull-down) | **PC4 `EN_SENS12V`**, divisor 56K/10K → seguidor TLV8801 → **PB0 `ADC1_IN15`** |
 | Medida del riel de 3,3 V | **existe pero NO se usa** (`EN_SENS3V3` PB2, divisor 56K/56K, PC5): el riel sale de `VREFINT` |
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | microSD | PA15 `SD_SS`, PC10 `SD_SCK`, PC11 `SD_MISO`, PC12 `SD_MOSI` → **SPI3** (NSS por software), **PD2 `SD_DET`** (a GND con tarjeta, pull-up interno), **PB3 `EN_PWR_SD`** ⚠ **0 = prende** (SI2301 canal P, pull-up de 100 K) |
@@ -1361,7 +1361,7 @@ medidas coinciden con el tester y el reposo quedó igual que antes, que es lo ú
 ADC vuelve a *deep power-down* entre medidas.
 
 **⚠ El riel de 3,3 V NO se puede medir con un ADC referenciado a él mismo.** R001 trae el circuito
-—divisor 56K/56K, load switch en PB2, seguidor TLV8802, PC5— pero la cuenta se cancela sola:
+—divisor 56K/56K, load switch en PB2, seguidor TLV8801, PC5— pero la cuenta se cancela sola:
 
 ```
 ADC = (V3V3 / 2) / VREF+ x 4095 = (V3V3 / 2) / V3V3 x 4095 = 2047, SIEMPRE
@@ -1388,7 +1388,7 @@ riel. Por eso `drv_adc_v12_mv()` lee **siempre los dos canales**, VREFINT primer
 
 **Dos cosas del hardware que condicionan el driver:**
 
-- **El TLV8802 es un operacional *nanopower*:** ~320 nA y apenas ~6 kHz de ancho de banda. Eso le deja
+- **El TLV8801 es un operacional *nanopower*:** ~320 nA y apenas ~6 kHz de ancho de banda. Eso le deja
   impedancia de salida alta a la frecuencia con la que el ADC carga su capacitor de muestreo, así que
   el muestreo va en **640,5 ciclos** (~43 µs a 15 MHz) y el riel necesita **10 ms de asentamiento**
   antes de creerle a una medida.
@@ -1408,13 +1408,13 @@ Anotado el **2026-08-17**, midiendo el punto medio del divisor de 12 V con el te
 cuando con 56K/10K y 12,2 V de entrada **tiene** que dar `12,2 x 10 / 66 = 1,85 V`.
 
 **3,7 V no es un número cualquiera: es 3,1 + 0,6, un diodo por encima del riel que alimenta al
-TLV8802.** Esa es la firma de un **diodo de protección de entrada del operacional conduciendo hacia su
+TLV8801.** Esa es la firma de un **diodo de protección de entrada del operacional conduciendo hacia su
 propio VDD**: el nodo no está ahí porque el divisor lo ponga, está *clavado* ahí porque el clamp no lo
 deja subir más. Para que pase, el divisor tendría que estar entregando bastante más que eso — con 56K
 arriba, la de abajo tendría que ser de ≥24K; el error típico es tenerlas invertidas.
 
 Y no sería sólo una lectura mala: mete corriente desde los 12 V hacia el riel de 3,3 V a través del
-operacional, y le pone al TLV8802 una entrada por encima de su máximo absoluto.
+operacional, y le pone al TLV8801 una entrada por encima de su máximo absoluto.
 
 **Cómo se descarta en un segundo, y por qué acá no era eso:** si el nodo estuviera realmente en 3,7 V
 durante la conversión, el seguidor saturaría contra su riel y **`vin` informaría ~20 V, no 12,2**.
