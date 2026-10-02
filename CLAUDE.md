@@ -167,7 +167,67 @@ argumento en silencio—. No se agregó el mecanismo: cada comando ya imprime su
 y el `help` ahora lo dice. Es la misma regla del `help` que mentía sobre el parser: **una ayuda que
 calla lo que ignora manda a dudar de la consola**.
 
-### ⭐⭐ Los 337 µA eran una FUGA DE 10 kΩ en el riel, y la ley de Ohm los encontró
+### 🛑 RETOMAR ACÁ: placa NUEVA en 3 µA, y el ADC a medio validar (2026-10-02, tarde)
+
+**Hay una PLACA NUEVA**, con sólo el **LED y la terminal** poblados, y mide **3 µA** en reposo con los
+firmwares `0.0.6` y `0.0.8`. ⭐ Es la base buena. La anterior se conserva **como instrumento, no como
+equipo**: tiene una fuga de 10 kΩ sin resolver (ver la sección siguiente).
+
+⚠ **Del ADC no hay NINGÚN número confiable.** Tres bajadas seguidas, con cambios que debían ser
+equivalentes o mejores, dieron **3 µA**, **230 µA** y **270 µA**; Pablo sospecha haber introducido un
+error en las pruebas y **se repite todo**. No tomar ninguno de esos tres valores como dato.
+
+#### ⛔⛔ EL PROTOCOLO DE MEDICIÓN, que es la lección del día
+
+```
+resetear  ->  NO tipear NADA  ->  desconectar la terminal  ->  medir
+```
+
+**Medir el reposo después de tipear comandos no mide el reposo del equipo: mide el de una sesión de
+banco.** Todo el día se midió *después* de correr `vin` —*"luego de medir, al sacar la terminal vuelve
+a los 3 µA"*— y eso **ocultó que `drv_adc_init()` dejaba el ADC despierto desde el arranque**: lo que
+lo dormía era el comando, y ⚠ **en campo nadie tipea `vin`**.
+
+⭐ Y el complemento, de la otra mitad del día: **el óhmetro entre 3V3 y GND ANTES de alimentar,
+después de cada sesión de soldadura.** Diez segundos; si el riel no está en MΩ hay un puente y no
+tiene sentido bajar nada.
+
+#### ⚠ Dónde está cada cosa: TRES ramas con ADC
+
+| Rama | Qué tiene |
+|---|---|
+| **`desde-cero`** | ⭐ **la viva**: `0.0.8` **sin** ADC, con `PATRON_CONSUMO` portado y toda la documentación |
+| **`adc-prueba`** | ⭐ **el firmware que se bajó hoy**: el ADC con las cuatro escrituras unificadas. Cuelga del tag `v0.0.8-microsd`, no de la rama — por eso quedó aparte |
+| `adc-en-pausa` | el ADC *antes* de los arreglos de hoy (driver reducido + comando `vin`) |
+
+⛔ **`adc-prueba` NO está mergeada a propósito**: mañana se repite todo, el código va a cambiar, y un
+merge mal resuelto ahora pierde trabajo. Lo que hay que decidir mañana es si se integra con
+cherry-pick o se rehace.
+
+#### ⚠ Lo que sí quedó establecido del ADC
+
+| | |
+|---|---|
+| ⛔ **`ADC_CR` no acepta la escritura de `DEEPPWD`** | cuatro formas probadas: `SET_BIT`/`CLEAR_BIT`, las `LL_ADC_*` de ST, `MODIFY_REG` con la máscara de los bits "rs", y la escritura entera del registro |
+| ⭐⭐ **El registro MIENTE sobre el estado del periférico** | se lee `0x20000000` —regulador encendido— en los cuatro casos, y el consumo difirió **77 veces**. Lo único que dice la verdad es **el amperímetro** |
+| ⚠ **VDDA informa 3,00-3,17 V contra 3,32 V del tester** | −9 %, sin resolver |
+
+⭐ Por eso **todas** las escrituras a `ADC_CR` quedaron como **escritura entera del registro** —en
+`prvAdcDespertar()`, `prvAdcDormir()` y `drv_adc_init()`—: es lo único que se midió apagando el
+regulador. Con `MODIFY_REG` la dispersión de VDDA bajaba de 180 a 33 mV, pero el reposo se iba a
+230 µA. **El consumo manda.**
+
+#### ⭐ La pista del sesgo de VDDA, para empezar por ahí
+
+Una lectura dio **exactamente 3.000 mV**, y eso es lo que sale cuando `VREFINT_leído == VREFINT_CAL`.
+Como ese valor de fábrica **se calibra a VDDA = 3,0 V**, el ADC estaría diciendo que *su* VDDA está en
+3,0 — o sea que **el firmware dice la verdad y hay una caída entre el riel y el pin del micro**.
+
+**Dos mediciones con el tester:** en el **pin `VDDA`** del micro (no en el riel) y en **`VREF+`**, si
+en este encapsulado está separado. `vin raw` ya imprime las tres cifras para cerrar la cuenta a mano:
+las cuentas leídas, el `VREFINT_CAL` de este chip, y `3000 × CAL / leído`.
+
+### ⭐⭐ Los 337 µA de la PLACA VIEJA eran una fuga de 10 kΩ, y la ley de Ohm los encontró
 
 **Medido el 2026-10-02**, después de seis bajadas de firmware persiguiendo al ADC:
 
