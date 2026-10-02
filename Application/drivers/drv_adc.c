@@ -91,8 +91,22 @@ static void prvAdcDormir( void )
      * poner el registro entero en DEEPPWD es seguro y deja ADVREGEN en 0 por
      * construcción. Es lo mismo que hace la LL, pero sin leer antes.
      */
-    MODIFY_REG( hadc1.Instance->CR, ADC_CR_RS | ADC_CR_ADVREGEN, 0UL );
-    MODIFY_REG( hadc1.Instance->CR, ADC_CR_RS | ADC_CR_DEEPPWD, ADC_CR_DEEPPWD );
+/*
+     * ⛔ ACÁ SÍ VA LA ESCRITURA ENTERA, y NO `MODIFY_REG`. Medido el 2026-10-02:
+     * con MODIFY_REG el reposo se fue a **230 µA**; con esto son **3 µA**.
+     *
+     * El mecanismo, que es sutil: la escritura de `ADVREGEN = 0` **no entra**
+     * (el registro leído lo demuestra), así que el `MODIFY_REG` siguiente lee
+     * `ADVREGEN` todavía en 1 y escribe **DEEPPWD junto con ADVREGEN**
+     * (`0xA0000000`), que es un estado contradictorio. Escribiendo el registro
+     * entero va `DEEPPWD` SOLO, y aunque el valor leído después sea el mismo,
+     * **el efecto físico sobre el regulador sí es apagarlo**.
+     *
+     * ⚠ O sea que acá el registro MIENTE sobre el estado real del periférico:
+     * lo único que dice la verdad es el amperímetro. Por eso el criterio para
+     * tocar estas dos líneas es el consumo medido, nunca lo que se lee.
+     */
+    hadc1.Instance->CR = ADC_CR_DEEPPWD;
     __DSB();
 
     /* ⭐ Y se captura EN EL ACTO. Si esto dice DEEPPWD=1 y el registro leído
@@ -232,6 +246,14 @@ bool drv_adc_raw_vrefint( uint16_t *pusRaw )
 bool drv_adc_raw_12v( uint16_t *pusRaw )
 {
     return prvMedirCanal( ADC_CHANNEL_15, pusRaw );
+}
+//------------------------------------------------------------------------------
+uint16_t drv_adc_vrefint_cal( void )
+{
+    /* El valor de calibración de fábrica de ESTE chip, grabado en la memoria de
+       sistema y medido a VDDA = 3,0 V. Es el numerador de la cuenta de VDDA, y
+       sin él esa cuenta no se puede verificar a mano. */
+    return *( ( uint16_t * ) VREFINT_CAL_ADDR );
 }
 //------------------------------------------------------------------------------
 bool drv_adc_vdda_mv( uint32_t *pulMiliV )

@@ -846,7 +846,14 @@ static void cmdVin( void )
                 return;
             }
 
-            xprintf( "  VREFINT : %5u cuentas\r\n", ( unsigned ) usVref );
+            /* ⭐ Las tres cifras que cierran la cuenta a mano:
+                  VDDA = 3000 mV x CAL / leido  */
+            xprintf( "  VREFINT : %5u cuentas   (CAL de fabrica: %u)\r\n",
+                     ( unsigned ) usVref, ( unsigned ) drv_adc_vrefint_cal() );
+            xprintf( "            VDDA = 3000 x %u / %u = %lu mV\r\n",
+                     ( unsigned ) drv_adc_vrefint_cal(), ( unsigned ) usVref,
+                     ( usVref != 0U ) ?
+                        ( unsigned long ) ( ( 3000UL * drv_adc_vrefint_cal() ) / usVref ) : 0UL );
             xprintf( "  IN15    : %5u cuentas  (12 V, divisor 56K/10K)\r\n",
                      ( unsigned ) us12 );
             return;

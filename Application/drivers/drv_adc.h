@@ -129,6 +129,9 @@ bool drv_adc_pwr_12v_estado( void );
 bool drv_adc_raw_12v    ( uint16_t *pusRaw );
 bool drv_adc_raw_vrefint( uint16_t *pusRaw );
 
+/* El VREFINT_CAL de fábrica de este chip. Cierra la cuenta de VDDA a mano. */
+uint16_t drv_adc_vrefint_cal( void );
+
 /* ADC_CR tal como quedó en el instante siguiente a la última dormida. Separa
    "la escritura no entra" de "algo vuelve a despertar el ADC". */
 extern volatile uint32_t ulCrTrasDormir;
