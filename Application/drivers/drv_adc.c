@@ -118,22 +118,20 @@ static void prvAdcDormir( void )
 static void prvAdcDespertar( void )
 {
     /*
-     * ⛔ ESTO NO ES `CR = 0` SEGUIDO DE `CR = ADVREGEN`, y la diferencia costó
-     * una bajada (2026-10-02): escribir el registro entero **APAGA el regulador
-     * si ya estaba encendido**, y entonces cada medida lo reenciende y lee antes
-     * de que la referencia se asiente. El síntoma era VDDA informando 3,05-3,17 V
-     * contra 3,32 del tester, **variable** — un sesgo sería de calibración, la
-     * dispersión delata un transitorio.
+     * ⛔ ESCRITURA ENTERA, igual que en prvAdcDormir(), y NO `MODIFY_REG`.
+     * Medido el 2026-10-02: con `MODIFY_REG` acá el reposo se fue a 230-270 µA.
+     * La razón es que la escritura de `ADVREGEN = 0` de la dormida **no entra**,
+     * así que un read-modify-write arrastra el bit encendido para siempre.
      *
-     * Se replica lo que hace la LL de ST: `MODIFY_REG` tocando UN bit y forzando
-     * los "rs" a 0. (No se usa la LL misma porque `stm32l4xx_ll_adc.h` no está
-     * en el proyecto: CubeMX sólo copia la HAL.)
+     * ⚠ El precio es la dispersión de VDDA: con `MODIFY_REG` bajaba de 180 a
+     * 33 mV, porque el regulador no se reencendía en cada medida. **El consumo
+     * manda**, así que se paga esa imprecisión y queda anotada como pendiente.
      *
      * El orden lo pide el RM0351: primero salir del deep power-down, después el
      * regulador.
      */
-    MODIFY_REG( hadc1.Instance->CR, ADC_CR_RS | ADC_CR_DEEPPWD,  0UL );
-    MODIFY_REG( hadc1.Instance->CR, ADC_CR_RS | ADC_CR_ADVREGEN, ADC_CR_ADVREGEN );
+    hadc1.Instance->CR = 0UL;                   /* sale de deep power-down */
+    hadc1.Instance->CR = ADC_CR_ADVREGEN;       /* y enciende el regulador */
 
     prvEsperarUs( ADCVREG_STUP_US );
 
@@ -205,9 +203,20 @@ bool drv_adc_init( void )
        de una resistencia para un estado que le corresponde. */
     drv_adc_pwr_12v( false );
 
-    /* Salir de deep power-down y levantar el regulador antes de calibrar. */
-    CLEAR_BIT( hadc1.Instance->CR, ADC_CR_DEEPPWD );
-    SET_BIT  ( hadc1.Instance->CR, ADC_CR_ADVREGEN );
+    /*
+     * Salir de deep power-down y levantar el regulador antes de calibrar.
+     *
+     * ⛔ Con las MISMAS escrituras que prvAdcDespertar(), y no con
+     * CLEAR_BIT/SET_BIT: son read-modify-write, y acá eso NO funciona.
+     *
+     * ⚠ Esta función corre al arrancar y es la que fija el estado de reposo del
+     * equipo —**nadie va a tipear `vin` en campo**—, así que si deja el ADC
+     * despierto son ~270 µA las 24 horas sin que nada lo delate. El 2026-10-02
+     * el reposo se midió siempre DESPUÉS de correr `vin`, y por eso el problema
+     * tardó en aparecer: era el comando el que lo dormía.
+     */
+    hadc1.Instance->CR = 0UL;
+    hadc1.Instance->CR = ADC_CR_ADVREGEN;
     prvEsperarUs( ADCVREG_STUP_US );
 
     /*
