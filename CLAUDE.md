@@ -167,11 +167,54 @@ argumento en silencio—. No se agregó el mecanismo: cada comando ya imprime su
 y el `help` ahora lo dice. Es la misma regla del `help` que mentía sobre el parser: **una ayuda que
 calla lo que ignora manda a dudar de la consola**.
 
+### ⭐⭐ Los 337 µA eran una FUGA DE 10 kΩ en el riel, y la ley de Ohm los encontró
+
+**Medido el 2026-10-02**, después de seis bajadas de firmware persiguiendo al ADC:
+
+```
+336 µA en el riel de 3,3 V   ->   3,3 V / 336 µA = 9,8 kOhm
+ohmetro entre 3V3 y GND, placa sin alimentacion:  10 kOhm
+                                 (la referencia de esta placa: 6,8 MOhm)
+```
+
+⭐ **Dividir el consumo por la tensión del riel da la resistencia equivalente, y eso dice de entrada
+si la fuga es resistiva.** Es una cuenta de dos segundos que no hicimos hasta el final.
+
+⭐ El sospechoso es la **resistencia de 10K del divisor** que se había desoldado: quedó puenteando el
+riel a GND. Es decir que **la fuga la introdujo el trabajo de soldadura de la etapa**, no el diseño.
+
+#### ⛔⛔ LA LECCIÓN, y es la más importante de esta etapa
+
+**Un número que no se mueve ante nada NO está midiendo lo que creemos.** Los 337 µA no cambiaron ni
+un µA ante:
+
+| Se cambió | |
+|---|---|
+| Resistencias invertidas → corregidas (el clamp dejó de conducir) | sin cambio |
+| **TLV8801 desoldado** | sin cambio |
+| **TPS22810, resistencias, TODO despoblado** | sin cambio |
+| `drv_adc_init()` llamado y no llamado (`TKCMD_ADC_INIT`) | sin cambio |
+| Correr `vin` o no tipear nada tras el reset | sin cambio |
+| **El ST-LINK y la terminal fuera del USB** | sin cambio |
+| ⭐ **El firmware `0.0.7`, el MISMO binario que había medido 5 µA** | **sin cambio** |
+
+⭐ Es la regla de `diagnostico-hardware-metodo` dada vuelta: *si algo deja de ser repetible, el
+sospechoso no es el diseño* — y **si algo es DEMASIADO repetible ante cambios que deberían moverlo,
+el sospechoso no es el circuito ni el firmware: es una fuga, o el instrumento**.
+
+⚠ **Y la pista estaba desde el principio**: una fuga en el riel de **3,3 V** no puede verse afectada
+por nada del circuito del ADC, que cuelga entero de los **12 V**. Saber **dónde está el amperímetro**
+habría acotado la búsqueda seis bajadas antes — fue el dato que más tardó en aparecer.
+
 ### ⏸ El ADC1 quedó EN PAUSA: 337 µA sin atribuir (2026-10-02)
 
 El driver y el comando `vin` **andaban** —las dos medidas validadas contra el tester— pero el reposo
-se fue a **337 µA** y no se pudo atribuir a nada. Pablo decidió volver al punto de 5 µA y sacar el
-ADC del `.ioc` y del firmware.
+se fue a **337 µA** y no se pudo atribuir a nada, así que Pablo decidió volver al punto de 5 µA y
+sacar el ADC del `.ioc` y del firmware.
+
+⭐ **Y resultó que el ADC no tenía nada que ver**: era la fuga de 10 kΩ de la sección anterior. El
+ADC se saca igual —el reposo hay que recuperarlo primero— pero **reponerlo es un checkout de la rama
+`adc-en-pausa`**, no rehacer el trabajo.
 
 ⭐ **El trabajo está en la rama `adc-en-pausa`** (`drv_adc.{h,c}` reducido, el comando `vin` con el
 volcado de registros y el `.ioc` con PB0/PC4). No hay que rehacerlo.
