@@ -17,6 +17,7 @@
 #include "drv_ina3221.h"
 #include "drv_rs485.h"
 #include "drv_uart.h"
+#include "drv_sd.h"
 #include "pwr_lock.h"
 #include "main.h"
 
@@ -80,9 +81,15 @@ static void cmdHelp( void )
     xprintf( "  rtc             RTC MCP79410: hora, validez, estado\r\n" );
     xprintf( "  ina             INA3221: identidad y los 3 canales de 4-20 mA\r\n" );
     xprintf( "  rs485           el SP3485 y los 3 rieles conmutados\r\n" );
+    xprintf( "  sd              microSD por SPI3: energia, sectores\r\n" );
     xprintf( "  reset           reinicia el equipo\r\n" );
     xprintf( "\r\n" );
     xprintf( "  el comando va COMPLETO: 'status', no 'st'\r\n" );
+    /* ⚠ `help <comando>` NO existe, y el 2026-10-02 alguien lo tipeó: salía la
+       lista entera sin decir que el argumento se descartaba. Cada comando ya
+       imprime su propia ayuda cuando se tipea solo, así que se apunta ahí en
+       vez de agregar un mecanismo duplicado. */
+    xprintf( "  el detalle de un comando sale tipeandolo SOLO: 'sd', 'rs485', 'ee'\r\n" );
 }
 
 /*
@@ -734,6 +741,263 @@ static void cmdRs485( void )
     xprintf( "  rs485 tx <texto>                  transmite y escucha la respuesta\r\n" );
 }
 
+/*------------------------------------------------------------------------------
+ * sd — la tarjeta microSD
+ *
+ * Buffer de un sector, estático: 512 bytes NO entran en el stack de tkCmd.
+ *----------------------------------------------------------------------------*/
+static uint8_t pucSector[ DRV_SD_SECTOR_BYTES ];
+
+static void prvSdVolcar( const uint8_t *pucDatos, uint32_t ulLargo )
+{
+    for( uint32_t i = 0U; i < ulLargo; i += 16U )
+    {
+        xprintf( "  %04lX: ", ( unsigned long ) i );
+
+        for( uint32_t j = 0U; j < 16U; j++ )
+        {
+            xprintf( "%02X ", ( unsigned ) pucDatos[ i + j ] );
+        }
+
+        xprintf( " |" );
+
+        for( uint32_t j = 0U; j < 16U; j++ )
+        {
+            char c = ( char ) pucDatos[ i + j ];
+            xputChar( ( ( c >= 0x20 ) && ( c < 0x7F ) ) ? c : '.' );
+        }
+
+        xprintf( "|\r\n" );
+    }
+}
+
+static void prvSdEstado( void )
+{
+    /* Con el riel apagado la detección no dice nada, y decir "vacia" sería
+       inventar: el pin está en alta impedancia justamente para no gastar los
+       82 µA del pull-up. Ver drv_sd.h. */
+    xprintf( "  ranura      : %s\r\n",
+             ( drv_sd_power_estado() == false ) ? "sin saber (riel apagado)" :
+             ( drv_sd_presente() ? "TARJETA PRESENTE" : "vacia" ) );
+    xprintf( "  riel        : %s  (EN_PWR_SD = PB3, 0 = PRENDE)\r\n",
+             drv_sd_power_estado() ? "ENCENDIDO" : "apagado" );
+    xprintf( "  tarjeta     : %s\r\n", drv_sd_tipo_texto() );
+
+    if( drv_sd_tipo() != sdTIPO_NINGUNA )
+    {
+        uint32_t ulSectores = drv_sd_sectores();
+
+        /* En MB para que el número sea legible: con 512 bytes por sector, cada
+           2048 sectores es 1 MB. */
+        xprintf( "  capacidad   : %lu sectores (%lu MB)\r\n",
+                 ( unsigned long ) ulSectores,
+                 ( unsigned long ) ( ulSectores / 2048UL ) );
+    }
+
+    xprintf( "  pwr locks   : 0x%08lX %s\r\n",
+             ( unsigned long ) pwr_lock_estado(),
+             pwr_deep_sleep_permitido() ? "(Stop 2 habilitado)" : "(solo Sleep)" );
+}
+
+static bool prvSdListo( void )
+{
+    if( drv_sd_tipo() != sdTIPO_NINGUNA )
+    {
+        return true;                    /* ya inicializada */
+    }
+
+    /* PRIMERO prender, DESPUÉS preguntar si hay tarjeta: con el riel apagado el
+       pin de detección está en alta impedancia y no dice nada. Ver drv_sd.h. */
+    if( drv_sd_power_estado() == false )
+    {
+        drv_sd_power( true );
+    }
+
+    if( drv_sd_presente() == false )
+    {
+        xprintf( "no hay tarjeta en la ranura (SD_DET en alto)\r\n" );
+        drv_sd_power( false );
+        return false;
+    }
+
+    if( drv_sd_arrancar() == false )
+    {
+        xprintf( "ERROR: la tarjeta no inicializo\r\n" );
+        return false;
+    }
+
+    return true;
+}
+
+static void cmdSd( void )
+{
+    /* ⚠ El criterio es `argv[N] != NULL` y NO el retorno de makeArgv(): esa
+       función devuelve ARGUMENTOS, no tokens, y compararla contra un número ya
+       hizo que tres subcomandos cayeran en su propia ayuda. */
+    ( void ) FRTOS_CMD_makeArgv();
+
+    if( argv[ 1 ] == NULL )
+    {
+        xprintf( "\r\nmicroSD (SPI3, CS por software en PA15)\r\n" );
+        prvSdEstado();
+        xprintf( "\r\n  sd on|off           energia de la tarjeta\r\n" );
+        xprintf( "  sd init             prende e inicializa\r\n" );
+        xprintf( "  sd info             CID y CSD crudos\r\n" );
+        xprintf( "  sd read <sector>    vuelca un sector en hexa\r\n" );
+        xprintf( "  sd test <sector>    ESCRIBE un patron y lo relee\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "on" ) == 0 )
+    {
+        drv_sd_power( true );
+        xprintf( "\r\nriel de la microSD ENCENDIDO (sin inicializar: 'sd init')\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "off" ) == 0 )
+    {
+        drv_sd_power( false );
+        xprintf( "\r\nriel de la microSD apagado\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "init" ) == 0 )
+    {
+        xprintf( "\r\n" );
+
+        if( prvSdListo() )
+        {
+            xprintf( "tarjeta inicializada\r\n" );
+            prvSdEstado();
+        }
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "info" ) == 0 )
+    {
+        uint8_t pucReg[ 16 ];
+
+        xprintf( "\r\n" );
+
+        if( prvSdListo() == false )
+        {
+            return;
+        }
+
+        if( drv_sd_cid( pucReg ) )
+        {
+            xprintf( "CID:\r\n" );
+            prvSdVolcar( pucReg, 16U );
+
+            /* Los campos legibles del CID: el nombre del producto son 5
+               caracteres ASCII, y sirven para saber que se está leyendo bien —
+               si sale basura, el problema es el enlace y no el parseo. */
+            xprintf( "  fabricante 0x%02X, producto '%c%c%c%c%c'\r\n",
+                     ( unsigned ) pucReg[ 0 ],
+                     pucReg[ 3 ], pucReg[ 4 ], pucReg[ 5 ], pucReg[ 6 ], pucReg[ 7 ] );
+        }
+        else
+        {
+            xprintf( "ERROR leyendo el CID\r\n" );
+        }
+
+        if( drv_sd_csd( pucReg ) )
+        {
+            xprintf( "CSD (version %u):\r\n", ( unsigned ) ( pucReg[ 0 ] >> 6 ) + 1U );
+            prvSdVolcar( pucReg, 16U );
+        }
+        else
+        {
+            xprintf( "ERROR leyendo el CSD\r\n" );
+        }
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "read" ) == 0 ) && ( argv[ 2 ] != NULL ) )
+    {
+        uint32_t ulSector = ( uint32_t ) strtoul( argv[ 2 ], NULL, 0 );
+
+        xprintf( "\r\n" );
+
+        if( prvSdListo() == false )
+        {
+            return;
+        }
+
+        if( drv_sd_leer_sector( ulSector, pucSector ) == false )
+        {
+            xprintf( "ERROR leyendo el sector %lu\r\n", ( unsigned long ) ulSector );
+            return;
+        }
+
+        xprintf( "sector %lu:\r\n", ( unsigned long ) ulSector );
+        prvSdVolcar( pucSector, DRV_SD_SECTOR_BYTES );
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "test" ) == 0 ) && ( argv[ 2 ] != NULL ) )
+    {
+        uint32_t ulSector = ( uint32_t ) strtoul( argv[ 2 ], NULL, 0 );
+
+        xprintf( "\r\n" );
+
+        if( prvSdListo() == false )
+        {
+            return;
+        }
+
+        /*
+         * El patrón es i*7+sector y no un valor fijo: así un sector que quedó de
+         * una prueba anterior no se confunde con uno recién escrito, y si el
+         * driver leyera un sector equivocado el contenido lo delata.
+         */
+        for( uint32_t i = 0U; i < DRV_SD_SECTOR_BYTES; i++ )
+        {
+            pucSector[ i ] = ( uint8_t ) ( ( i * 7U ) + ulSector );
+        }
+
+        xprintf( "escribiendo el sector %lu...\r\n", ( unsigned long ) ulSector );
+
+        if( drv_sd_escribir_sector( ulSector, pucSector ) == false )
+        {
+            xprintf( "ERROR: la escritura fallo\r\n" );
+            return;
+        }
+
+        /* Se borra el buffer antes de releer: si no, una lectura que no hiciera
+           nada dejaría los datos viejos en RAM y el test pasaría igual. Ese
+           falso positivo es justo el que hay que evitar. */
+        memset( pucSector, 0, DRV_SD_SECTOR_BYTES );
+
+        if( drv_sd_leer_sector( ulSector, pucSector ) == false )
+        {
+            xprintf( "ERROR: la relectura fallo\r\n" );
+            return;
+        }
+
+        for( uint32_t i = 0U; i < DRV_SD_SECTOR_BYTES; i++ )
+        {
+            if( pucSector[ i ] != ( uint8_t ) ( ( i * 7U ) + ulSector ) )
+            {
+                xprintf( "ERROR en el byte %lu: esperaba 0x%02X, leyo 0x%02X\r\n",
+                         ( unsigned long ) i,
+                         ( unsigned ) ( uint8_t ) ( ( i * 7U ) + ulSector ),
+                         ( unsigned ) pucSector[ i ] );
+                return;
+            }
+        }
+
+        xprintf( "sector %lu: escritura y relectura OK, los 512 bytes\r\n",
+                 ( unsigned long ) ulSector );
+        return;
+    }
+
+    xprintf( "\r\nERROR: on | off | init | info | read <sector> | test <sector>\r\n" );
+    xprintf( "  ATENCION: 'sd test' PISA el sector que se le indique.\r\n" );
+    xprintf( "  El 0 es el MBR: usar un sector alto en una tarjeta con datos.\r\n" );
+}
+
 /*
  * Reset por NVIC_SystemReset, que pulsa NRST.
  *
@@ -804,6 +1068,11 @@ void tkCmd( void *pvParameters )
         xprintf( "\r\n[!] el RS485 no se pudo inicializar\r\n" );
     }
 
+    /* ⭐ Deja el riel apagado Y el pull-up de SD_DET fuera. Eso segundo es lo que
+       importa: con la tarjeta puesta, el pull-up interno contra el contacto
+       cerrado a GND son 82 µA las 24 horas — ver drv_sd.h. */
+    ( void ) drv_sd_init();
+
     if( drv_ina_init() == false )
     {
         xprintf( "\r\n[!] el INA3221 no contesta o no se identifico\r\n" );
@@ -823,6 +1092,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "rtc",    cmdRtc    );
     FRTOS_CMD_register( "ina",    cmdIna    );
     FRTOS_CMD_register( "rs485",  cmdRs485  );
+    FRTOS_CMD_register( "sd",     cmdSd     );
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     /* La versión y la fecha en el banner, no sólo en 'status': es lo primero que

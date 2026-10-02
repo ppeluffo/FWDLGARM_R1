@@ -21,7 +21,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 
 | Dónde | Qué es |
 |---|---|
-| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.7`. FreeRTOS, la consola, el I2C, el INA y el RS485 |
+| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.8`. FreeRTOS, la consola, el I2C, el INA, el RS485 y la microSD |
 | rama `main` | el firmware completo `0.0.78` más `PATRON_CONSUMO` |
 | tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
 | `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
@@ -37,6 +37,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | **`0.0.5`** | ⭐ **I2C2 + EEPROM M24M01 + RTC MCP79410**, los tres con datos reales | **9 mA / 5 µA** |
 | **`0.0.6`** | ⭐ **INA3221**, identificado y convirtiendo (⏳ sin `EN_PWR_SENS420`) | **9 mA / 5 µA** |
 | **`0.0.7`** | ⭐ **RS485: los 3 rieles conmutados** (⚠ la comunicación no se reprobó acá) | **9 mA / 5 µA** |
+| **`0.0.8`** | ⭐ **microSD por SPI3**: SDHC de 3716 MB, sectores leídos y escritos | **9 mA / 5 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -121,6 +122,50 @@ referencia. Es una decisión razonable, pero conviene no darla por probada acá:
 `&huart3`, su buffer de 256 B y `pwrLOCK_RS485`—. Si algo quedara mal ahí, **no se vería hasta la
 primera transacción**: el driver del 485 y los rieles andan igual, y lo que fallaría es la recepción
 o el candado. La primera vez que se hable con un esclavo, eso queda cubierto.
+
+### ✅ La microSD, y el pull-up que NO volvió a morder (2026-10-02)
+
+```
+cmd>sd info                                   cmd>sd
+CID:  9F 54 49 30 30 30 30 30 …                 ranura    : TARJETA PRESENTE
+      fabricante 0x9F, producto '00000'         tarjeta   : SDHC/SDXC
+CSD (version 2):                                capacidad : 7610368 sectores (3716 MB)
+      40 0E 00 32 5B 59 00 00 1D 07 …           pwr locks : 0x00000041
+cmd>sd test 10
+sector 10: escritura y relectura OK, los 512 bytes
+```
+
+⭐ **Cuatro cosas que ese log confirma, y ninguna es "contesta":**
+
+1. ⭐ **El reposo NO se movió: 5 µA con la tarjeta INSERTADA y el riel apagado.** Es el único
+   escenario que ejercita el bug que costó una tarde en la placa vieja —el pull-up interno de
+   `SD_DET` (30-50 kΩ) contra el contacto cerrado a GND son **82 µA las 24 horas**— y con la tarjeta
+   afuera es invisible. `drv_sd_init()` lo evita quitando el pull-up junto con el riel.
+2. ⭐ **La capacidad se verificó A MANO contra la CSD**, no se le creyó al firmware:
+   `C_SIZE = ((0x00 & 0x3F) << 16) | (0x1D << 8) | 0x07 = 7431`, y `(7431 + 1) × 1024` da
+   **7.610.368 sectores** — el número exacto que informó el equipo, y **el mismo que dio esta tarjeta
+   en `v0.0.10`**, o sea que el cálculo cruza dos implementaciones independientes.
+3. ⭐ **`sd read 1` leyó bytes escritos por OTRO firmware.** Ese sector trae
+   `01 08 0F 16 1D 24 2B…` —diferencias de 7 desde 1—, que es el patrón `i*7 + sector` que dejó una
+   prueba del `0.0.78`. Es más fuerte que el ida y vuelta de `sd test`, que podría pasar con un
+   driver internamente consistente y mal. (Que el patrón se repita en `0x0100` es correcto por
+   construcción: `1792 mod 256 = 0`.)
+4. **El candado se toma y se suelta.** `pwr locks = 0x41` es `TERM` + **`SD`**, y los 5 µA del final
+   prueban que se liberó: con `pwrLOCK_SD` tomado el idle **gira** y el consumo sería de
+   milliamperes.
+
+⚠ **El driver vino TAL CUAL de la referencia**, y es el primero: sólo depende de `pwr_lock.h` y
+`main.h`, así que no hubo nada que reducir. Lo único nuevo es el comando, con el criterio
+`argv[N] != NULL` en vez del contador de `makeArgv()`.
+
+⛔ **Y lo que NO entró a propósito: FatFs.** Esto mueve **sectores**; el sistema de archivos es capa
+de aplicación y arrastraría `user_diskio.c`. La referencia lo tiene en `Mcu.IP1=FATFS`; acá el `.ioc`
+quedó sin él.
+
+ℓ **De paso, `help sd` destapó que `help <comando>` no existe** —salía la lista entera descartando el
+argumento en silencio—. No se agregó el mecanismo: cada comando ya imprime su ayuda al tipearse solo,
+y el `help` ahora lo dice. Es la misma regla del `help` que mentía sobre el parser: **una ayuda que
+calla lo que ignora manda a dudar de la consola**.
 
 ### ⛔ Las tres lecciones de firmware que costó el rearranque
 
