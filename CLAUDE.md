@@ -21,7 +21,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 
 | Dónde | Qué es |
 |---|---|
-| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.3`. Sólo FreeRTOS, `tkCtl` y la consola |
+| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.7`. FreeRTOS, la consola, el I2C, el INA y el RS485 |
 | rama `main` | el firmware completo `0.0.78` más `PATRON_CONSUMO` |
 | tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
 | `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
