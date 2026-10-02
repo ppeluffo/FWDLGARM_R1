@@ -167,6 +167,90 @@ argumento en silencio—. No se agregó el mecanismo: cada comando ya imprime su
 y el `help` ahora lo dice. Es la misma regla del `help` que mentía sobre el parser: **una ayuda que
 calla lo que ignora manda a dudar de la consola**.
 
+### ⏸ El ADC1 quedó EN PAUSA: 337 µA sin atribuir (2026-10-02)
+
+El driver y el comando `vin` **andaban** —las dos medidas validadas contra el tester— pero el reposo
+se fue a **337 µA** y no se pudo atribuir a nada. Pablo decidió volver al punto de 5 µA y sacar el
+ADC del `.ioc` y del firmware.
+
+⭐ **El trabajo está en la rama `adc-en-pausa`** (`drv_adc.{h,c}` reducido, el comando `vin` con el
+volcado de registros y el `.ioc` con PB0/PC4). No hay que rehacerlo.
+
+| Qué quedó validado | |
+|---|---|
+| El riel de **12 V** | **12,025 V** contra 11,98 del tester, +0,4 % — divisor 56K/10K |
+| El riel de **3,3 V** | **3,13 V** por `VREFINT`, sin un solo componente externo |
+| El driver | **reducido**: se fueron `drv_adc_pwr_3v3()` y su estado, porque Pablo eliminó de la placa el TPS22810 de ese circuito |
+
+#### ⭐ Las resistencias del divisor estaban INVERTIDAS, y la firma ya estaba escrita acá
+
+El nodo medía **3,904 V** donde 56K/10K con 11,98 V tiene que dar 1,82. Y 3,904 = **VDDA + 0,77**, o
+sea **el riel más un diodo**: el nodo no estaba ahí porque el divisor lo pusiera, estaba **clavado**
+por el diodo de protección de entrada del TLV8801 conduciendo hacia su propio VDD.
+
+⭐ Eso es *exactamente* lo que decía la nota del 2026-08-17 más abajo, incluida la causa: *"con 56K
+arriba, la de abajo tendría que ser de ≥24K; **el error típico es tenerlas invertidas**"*. Con 10K
+arriba el divisor pedía 10,16 V y el clamp lo cortó en 3,9.
+
+⚠ **Y el ADC convertía perfecto todo el tiempo**: informaba `20,717 V`, que es `3,13 × 66/10`
+exacto. El firmware no se equivocaba — leía fielmente un nodo saturado. Lo que lo delató fue
+`vin raw`: **`IN15 = 4094` de 4095**, o sea el ADC contra el riel.
+
+#### ⛔ `ADC_CR` no entra en deep power-down, y sigue abierto
+
+```
+ADC_CR : 0x20000000  DEEPPWD=0 ADVREGEN=1 ADEN=0   <- despues de dormirlo
+```
+
+**Tres formas de escribirlo fallaron igual**: `SET_BIT`/`CLEAR_BIT`, las funciones `LL_ADC_*` de ST
+—que enmascaran los siete bits de propiedad "rs" y son la implementación de referencia— y la
+escritura directa del registro completo. Con `ADEN=0` el RM0351 permite escribir los dos bits, así
+que la causa no se encontró. ⏳ Queda para cuando el ADC vuelva.
+
+⚠ **Pero NO es un problema de consumo**, y eso está medido: `MX_ADC1_Init()` de CubeMX deja el ADC
+despierto igual (`HAL_ADC_Init()` sale de deep power-down y enciende el regulador,
+`stm32l4xx_hal_adc.c:475`), **y eso corría idéntico en el `0.0.8`, que medía 5 µA**. Si con el ADC
+despierto el total era 5 µA, el ADC despierto cuesta menos que eso.
+
+⭐ Lo que encontró el problema es el **volcado de `ADC_CR` y `ADC_CCR` que imprime `vin`**, puesto
+con el mismo criterio que el `CONFIG` del INA3221: un periférico que quedó despierto **no tiene
+ningún síntoma salvo la autonomía**, así que el comando lo dice sin que nadie pregunte.
+
+#### ⛔⛔ LA LECCIÓN: un número que no se mueve ante nada NO está midiendo lo que creemos
+
+Es la más importante de esta etapa, y es de método. Los 337 µA no cambiaron **ni un µA** ante:
+
+| Se cambió | |
+|---|---|
+| Resistencias invertidas → corregidas (el clamp dejó de conducir) | sin cambio |
+| **TLV8801 desoldado** | sin cambio |
+| **TPS22810, resistencias, TODO despoblado** | sin cambio |
+| `drv_adc_init()` llamado y no llamado (`TKCMD_ADC_INIT`) | sin cambio |
+| Correr `vin` o no tipear nada tras el reset | sin cambio |
+| ⭐ **El firmware `0.0.7`, el MISMO binario que había medido 5 µA** | **sin cambio** |
+
+⭐ **La última fila es la que cierra**: mismo binario, mismo `.ioc`, **menos** componentes que cuando
+midió 5 µA, y 67 veces más consumo. Eso descarta a la vez el firmware y el hardware de la etapa.
+
+⭐ Es la regla de `diagnostico-hardware-metodo` dada vuelta: *si algo deja de ser repetible, el
+sospechoso no es el diseño* — y **si algo es DEMASIADO repetible ante cambios que deberían moverlo,
+el sospechoso es el instrumento o el montaje**.
+
+⚠ **Sospechoso anotado: el ST-LINK enchufado al USB**, que aporta **+145 µA medidos en esta misma
+placa** (ver la tabla de bajo consumo). Los logs informan `reset por … PIN` en casi todos los
+arranques, o sea que el dongle estaba conectado. La regla ya escrita acá es que **las mediciones de
+bajo consumo se hacen con el dongle desenchufado del USB** — no alcanza con sacar el cable a la
+placa. Falta verificarlo.
+
+#### ⭐ `PATRON_CONSUMO` se portó a la rama viva
+
+Estaba sólo en `main` (con el `0.0.78`). Ahora está en `desde-cero`, en `main.c`, con el mismo
+mecanismo que `PRUEBA_UART`: en 1, `main()` se desvía antes de inicializar nada y **no vuelve**.
+
+Es el patrón absoluto: bare-metal, sin FreeRTOS, **todos los pines en analógico**, LSE + RTC vivos,
+Stop 2 permanente. **Dio 3 µA el 2026-09-29.** Si hoy da 337, está probado que no hay firmware que
+discutir. ⚠ `PC_PERIF_ADC1` quedó sin a quién llamar al salir el ADC del `.ioc`.
+
 ### ⛔ Las tres lecciones de firmware que costó el rearranque
 
 1. ⭐ **Sin RX no hay diagnóstico, y el banner sale una sola vez.** Cuando el RX falla no hay forma de
@@ -230,7 +314,7 @@ PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal**
 **RTC MCP79410 con su pila** y el **INA3221** que mide los lazos de 4-20 mA, el **RS485** con su
 transceiver **SP3485** y los tres rieles conmutados, la **fuente lineal de los sensores 4-20 mA**
 (`EN_PWR_SENS420`, PB12), la **microSD** con su alimentación conmutada y la **medida de los rieles**
-(los dos load switches con sus divisores y sus seguidores TLV8802) y el **contador de pulsos** (opto,
+(los dos load switches con sus divisores y sus seguidores TLV8801) y el **contador de pulsos** (opto,
 filtro RC y 74AUP1G17) y la **electroválvula TOYI** con su load switch (soldada, confirmado por Pablo
 el 2026-08-18). **Falta poblar un solo módulo: el modem LTE** —que en la placa nueva ya tiene su
 fuente andando; falta el módulo en sí, un **WH-LTE-7S1-E**—.
@@ -1039,7 +1123,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | RS485 (modbus) | PB10 TX, PB11 RX, **PB1 `USART3_RTS_DE`** → **USART3**, 9600 8N1, transceiver **SP3485** |
 | Rieles conmutados (TPS22819, EN=1 prende, pull-down de 100 K) | PC6 `EN_PWR_RS485`, PC7 `EN_PWR_QMBUS`, PB15 `EN_PWR_CPRES` |
 | Fuente lineal de los sensores 4-20 mA | **PB12 `EN_PWR_SENS420`** (EN=1 prende) |
-| Medida del riel de 12 V (TPS22810, EN=1 prende, pull-down) | **PC4 `EN_SENS12V`**, divisor 56K/10K → seguidor TLV8802 → **PB0 `ADC1_IN15`** |
+| Medida del riel de 12 V (TPS22810, EN=1 prende, pull-down) | **PC4 `EN_SENS12V`**, divisor 56K/10K → seguidor TLV8801 → **PB0 `ADC1_IN15`** |
 | Medida del riel de 3,3 V | **existe pero NO se usa** (`EN_SENS3V3` PB2, divisor 56K/56K, PC5): el riel sale de `VREFINT` |
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | microSD | PA15 `SD_SS`, PC10 `SD_SCK`, PC11 `SD_MISO`, PC12 `SD_MOSI` → **SPI3** (NSS por software), **PD2 `SD_DET`** (a GND con tarjeta, pull-up interno), **PB3 `EN_PWR_SD`** ⚠ **0 = prende** (SI2301 canal P, pull-up de 100 K) |
@@ -1361,7 +1445,7 @@ medidas coinciden con el tester y el reposo quedó igual que antes, que es lo ú
 ADC vuelve a *deep power-down* entre medidas.
 
 **⚠ El riel de 3,3 V NO se puede medir con un ADC referenciado a él mismo.** R001 trae el circuito
-—divisor 56K/56K, load switch en PB2, seguidor TLV8802, PC5— pero la cuenta se cancela sola:
+—divisor 56K/56K, load switch en PB2, seguidor TLV8801, PC5— pero la cuenta se cancela sola:
 
 ```
 ADC = (V3V3 / 2) / VREF+ x 4095 = (V3V3 / 2) / V3V3 x 4095 = 2047, SIEMPRE
@@ -1388,7 +1472,7 @@ riel. Por eso `drv_adc_v12_mv()` lee **siempre los dos canales**, VREFINT primer
 
 **Dos cosas del hardware que condicionan el driver:**
 
-- **El TLV8802 es un operacional *nanopower*:** ~320 nA y apenas ~6 kHz de ancho de banda. Eso le deja
+- **El TLV8801 es un operacional *nanopower*:** ~320 nA y apenas ~6 kHz de ancho de banda. Eso le deja
   impedancia de salida alta a la frecuencia con la que el ADC carga su capacitor de muestreo, así que
   el muestreo va en **640,5 ciclos** (~43 µs a 15 MHz) y el riel necesita **10 ms de asentamiento**
   antes de creerle a una medida.
@@ -1408,13 +1492,13 @@ Anotado el **2026-08-17**, midiendo el punto medio del divisor de 12 V con el te
 cuando con 56K/10K y 12,2 V de entrada **tiene** que dar `12,2 x 10 / 66 = 1,85 V`.
 
 **3,7 V no es un número cualquiera: es 3,1 + 0,6, un diodo por encima del riel que alimenta al
-TLV8802.** Esa es la firma de un **diodo de protección de entrada del operacional conduciendo hacia su
+TLV8801.** Esa es la firma de un **diodo de protección de entrada del operacional conduciendo hacia su
 propio VDD**: el nodo no está ahí porque el divisor lo ponga, está *clavado* ahí porque el clamp no lo
 deja subir más. Para que pase, el divisor tendría que estar entregando bastante más que eso — con 56K
 arriba, la de abajo tendría que ser de ≥24K; el error típico es tenerlas invertidas.
 
 Y no sería sólo una lectura mala: mete corriente desde los 12 V hacia el riel de 3,3 V a través del
-operacional, y le pone al TLV8802 una entrada por encima de su máximo absoluto.
+operacional, y le pone al TLV8801 una entrada por encima de su máximo absoluto.
 
 **Cómo se descarta en un segundo, y por qué acá no era eso:** si el nodo estuviera realmente en 3,7 V
 durante la conversión, el seguidor saturaría contra su riel y **`vin` informaría ~20 V, no 12,2**.
