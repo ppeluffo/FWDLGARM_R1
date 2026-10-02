@@ -36,7 +36,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | **`0.0.4`** | ⭐ **`TERM_SENSE` decide**: con terminal no duerme, sin terminal Stop 2 | **9 mA / 3 µA** |
 | **`0.0.5`** | ⭐ **I2C2 + EEPROM M24M01 + RTC MCP79410**, los tres con datos reales | **9 mA / 5 µA** |
 | **`0.0.6`** | ⭐ **INA3221**, identificado y convirtiendo (⏳ sin `EN_PWR_SENS420`) | **9 mA / 5 µA** |
-| ⏳ | **RS485 (SP3485) y los 3 rieles conmutados** — escrito y compilando | **sin probar** |
+| **`0.0.7`** | ⭐ **RS485: los 3 rieles conmutados** (⚠ la comunicación no se reprobó acá) | **9 mA / 5 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -106,6 +106,21 @@ cmd>i2c scan            cmd>ina
 ⚠ **Los 0,000 mA son CORRECTOS en esta etapa**: `EN_PWR_SENS420` queda afuera a propósito para medir
 el consumo de a un integrado por vez, así que los lazos no están alimentados. El comando lo dice en
 cada corrida para que nadie lo lea como un sensor roto.
+
+### ✅ El RS485 entró sin mover el reposo (2026-10-02)
+
+Con los tres rieles apagados el reposo **vuelve a 5 µA**, o sea que el SP3485 y los dos TPS22810
+nuevos no aportan nada medible mientras están cortados. El criterio de aceptación de la etapa —que
+agregar hardware no arruine el reposo— se cumple.
+
+⚠ **Lo que esta etapa NO validó: la COMUNICACIÓN.** Pablo probó sólo los rieles, porque el diálogo
+Modbus ya estaba validado en el firmware `0.0.78` y el driver vino **sin tocar** del tag de
+referencia. Es una decisión razonable, pero conviene no darla por probada acá:
+
+⭐ **Lo único NUEVO de esta etapa es la fila de `drvUART_RS485` en la tabla de `drv_uart`** —
+`&huart3`, su buffer de 256 B y `pwrLOCK_RS485`—. Si algo quedara mal ahí, **no se vería hasta la
+primera transacción**: el driver del 485 y los rieles andan igual, y lo que fallaría es la recepción
+o el candado. La primera vez que se hable con un esclavo, eso queda cubierto.
 
 ### ⛔ Las tres lecciones de firmware que costó el rearranque
 
