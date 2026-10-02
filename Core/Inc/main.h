@@ -81,6 +81,8 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define EN_SENS12V_Pin GPIO_PIN_4
+#define EN_SENS12V_GPIO_Port GPIOC
 #define RS485_RTS_Pin GPIO_PIN_1
 #define RS485_RTS_GPIO_Port GPIOB
 #define RS485_TX_Pin GPIO_PIN_10
