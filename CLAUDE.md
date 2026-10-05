@@ -173,9 +173,36 @@ calla lo que ignora manda a dudar de la consola**.
 firmwares `0.0.6` y `0.0.8`. ⭐ Es la base buena. La anterior se conserva **como instrumento, no como
 equipo**: tiene una fuga de 10 kΩ sin resolver (ver la sección siguiente).
 
-⚠ **Del ADC no hay NINGÚN número confiable.** Tres bajadas seguidas, con cambios que debían ser
-equivalentes o mejores, dieron **3 µA**, **230 µA** y **270 µA**; Pablo sospecha haber introducido un
-error en las pruebas y **se repite todo**. No tomar ninguno de esos tres valores como dato.
+#### ⭐⭐ ATRIBUCIÓN CERRADA (2026-10-05): los ~232 µA son del ADC
+
+Sobre la **placa nueva** —sin la fuga de 10 kΩ que tapaba todo el viernes— y con el protocolo de
+medición correcto, la misma placa y una sola variable:
+
+| Firmware | Reposo |
+|---|---|
+| `0.0.8` **sin** ADC (rama `desde-cero`) | ⭐ **3 µA** |
+| con el ADC (rama `adc-prueba`) | ⛔ **235 µA** |
+
+⭐ **Y eso REFUTA lo que se había concluido el 2026-10-02** —que el ADC despierto no costaba µA—. El
+razonamiento era: *"el `0.0.4` tenía `Mcu.IP0=ADC1` en el `.ioc` y medía 3 µA, así que
+`MX_ADC1_Init()` dejando el regulador encendido no cuesta nada"*. El hueco: **el `0.0.4` tenía el ADC
+en el `.ioc` pero NO corría `drv_adc_init()`**.
+
+⭐⭐ Así que la conclusión correcta es la inversa, y **acota el sospechoso**: `MX_ADC1_Init()` de
+CubeMX **no** es el problema —midió 3 µA en el `0.0.4`—; lo que cuesta los 232 µA está en el driver,
+y el candidato concreto es que **`drv_adc_init()` CALIBRA** (`HAL_ADCEx_Calibration_Start()`, que
+habilita el ADC poniendo `ADEN`) y después `prvAdcDormir()` no logra llevarlo a deep power-down.
+
+⏳ **El bisect que lo separa, y ahora sí vale porque la placa está limpia**: `TKCMD_ADC_INIT = 0`
+sobre la placa nueva. Con 0 el ADC queda como lo dejó CubeMX, igual que en el `0.0.4`.
+⚠ El mismo experimento se corrió el 2026-10-02 y dio 337 µA, pero **ese dato está contaminado por la
+fuga de 10 kΩ** de la placa vieja: hay que repetirlo.
+
+⚠ **Y los tres números del 2026-10-02 —3, 230 y 270 µA— siguen sin ser interpretables**, por la misma
+razón. El único par comparable es el de la tabla de arriba.
+
+⚠ **Los números del 2026-10-02 no son interpretables** (la placa vieja tenía la fuga): 3, 230 y
+270 µA ante cambios que debían ser equivalentes. La atribución válida es la de la sección anterior.
 
 #### ⛔⛔ EL PROTOCOLO DE MEDICIÓN, que es la lección del día
 
