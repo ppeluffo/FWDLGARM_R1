@@ -99,7 +99,7 @@
  *   volver a programarlo hay que conectarse con Mode = "Under reset"
  *   (mode=UR por CLI). NRST sigue funcionando siempre.
  */
-#define PATRON_CONSUMO          1     /* 0 = operación normal */
+#define PATRON_CONSUMO          0     /* 0 = operación normal */
 
 
 
