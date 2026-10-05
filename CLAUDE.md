@@ -21,7 +21,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 
 | Dónde | Qué es |
 |---|---|
-| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.8`. FreeRTOS, la consola, el I2C, el INA, el RS485 y la microSD |
+| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.9`. FreeRTOS, la consola, el I2C, el INA, el RS485, la microSD y el ADC |
 | rama `main` | el firmware completo `0.0.78` más `PATRON_CONSUMO` |
 | tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
 | `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
@@ -38,6 +38,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | **`0.0.6`** | ⭐ **INA3221**, identificado y convirtiendo (⏳ sin `EN_PWR_SENS420`) | **9 mA / 5 µA** |
 | **`0.0.7`** | ⭐ **RS485: los 3 rieles conmutados** (⚠ la comunicación no se reprobó acá) | **9 mA / 5 µA** |
 | **`0.0.8`** | ⭐ **microSD por SPI3**: SDHC de 3716 MB, sectores leídos y escritos | **9 mA / 5 µA** |
+| **`0.0.9`** | ⭐ **ADC1**: `VREFINT` midiendo, y el reposo intacto (⏳ sin el divisor poblado) | **3 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -167,92 +168,93 @@ argumento en silencio—. No se agregó el mecanismo: cada comando ya imprime su
 y el `help` ahora lo dice. Es la misma regla del `help` que mentía sobre el parser: **una ayuda que
 calla lo que ignora manda a dudar de la consola**.
 
-### 🛑 RETOMAR ACÁ: placa NUEVA en 3 µA, y el ADC a medio validar (2026-10-02, tarde)
-
-**Hay una PLACA NUEVA**, con sólo el **LED y la terminal** poblados, y mide **3 µA** en reposo con los
-firmwares `0.0.6` y `0.0.8`. ⭐ Es la base buena. La anterior se conserva **como instrumento, no como
-equipo**: tiene una fuga de 10 kΩ sin resolver (ver la sección siguiente).
-
-#### ⭐⭐ ATRIBUCIÓN CERRADA (2026-10-05): los ~232 µA son del ADC
-
-Sobre la **placa nueva** —sin la fuga de 10 kΩ que tapaba todo el viernes— y con el protocolo de
-medición correcto, la misma placa y una sola variable:
-
-| Firmware | Reposo |
-|---|---|
-| `0.0.8` **sin** ADC (rama `desde-cero`) | ⭐ **3 µA** |
-| con el ADC (rama `adc-prueba`) | ⛔ **235 µA** |
-
-⭐ **Y eso REFUTA lo que se había concluido el 2026-10-02** —que el ADC despierto no costaba µA—. El
-razonamiento era: *"el `0.0.4` tenía `Mcu.IP0=ADC1` en el `.ioc` y medía 3 µA, así que
-`MX_ADC1_Init()` dejando el regulador encendido no cuesta nada"*. El hueco: **el `0.0.4` tenía el ADC
-en el `.ioc` pero NO corría `drv_adc_init()`**.
-
-⭐⭐ Así que la conclusión correcta es la inversa, y **acota el sospechoso**: `MX_ADC1_Init()` de
-CubeMX **no** es el problema —midió 3 µA en el `0.0.4`—; lo que cuesta los 232 µA está en el driver,
-y el candidato concreto es que **`drv_adc_init()` CALIBRA** (`HAL_ADCEx_Calibration_Start()`, que
-habilita el ADC poniendo `ADEN`) y después `prvAdcDormir()` no logra llevarlo a deep power-down.
-
-⏳ **El bisect que lo separa, y ahora sí vale porque la placa está limpia**: `TKCMD_ADC_INIT = 0`
-sobre la placa nueva. Con 0 el ADC queda como lo dejó CubeMX, igual que en el `0.0.4`.
-⚠ El mismo experimento se corrió el 2026-10-02 y dio 337 µA, pero **ese dato está contaminado por la
-fuga de 10 kΩ** de la placa vieja: hay que repetirlo.
-
-⚠ **Y los tres números del 2026-10-02 —3, 230 y 270 µA— siguen sin ser interpretables**, por la misma
-razón. El único par comparable es el de la tabla de arriba.
-
-⚠ **Los números del 2026-10-02 no son interpretables** (la placa vieja tenía la fuga): 3, 230 y
-270 µA ante cambios que debían ser equivalentes. La atribución válida es la de la sección anterior.
-
-#### ⛔⛔ EL PROTOCOLO DE MEDICIÓN, que es la lección del día
+### ✅ El ADC1 entró sin mover el reposo, y el camino costó tres días (2026-10-05)
 
 ```
-resetear  ->  NO tipear NADA  ->  desconectar la terminal  ->  medir
+cmd>vin
+  VDDA / 3V3 : 3.125 V   (por VREFINT, SIN hardware externo)
+  ADC_CR     : 0x20000000  DEEPPWD=1 ADVREGEN=0 ADEN=0  <- deep power-down
+  ADC_CCR    : 0x00030000  VREFEN=0 TSEN=0 VBATEN=0
 ```
 
-**Medir el reposo después de tipear comandos no mide el reposo del equipo: mide el de una sesión de
-banco.** Todo el día se midió *después* de correr `vin` —*"luego de medir, al sacar la terminal vuelve
-a los 3 µA"*— y eso **ocultó que `drv_adc_init()` dejaba el ADC despierto desde el arranque**: lo que
-lo dormía era el comando, y ⚠ **en campo nadie tipea `vin`**.
+⭐ **3 µA al arrancar y 3 µA después de medir** — el segundo es el que prueba que el ciclo
+despertar/medir/dormir deja el ADC bien. La medida de 12 V da basura **a propósito**: el divisor no
+está poblado y PB0 queda flotando.
 
-⭐ Y el complemento, de la otra mitad del día: **el óhmetro entre 3V3 y GND ANTES de alimentar,
-después de cada sesión de soldadura.** Diez segundos; si el riel no está en MΩ hay un puente y no
-tiene sentido bajar nada.
+#### ⛔⛔ EL ADC EN DEEP POWER-DOWN COSTABA 232 µA: era `VREFEN` sin su regulador
 
-#### ⚠ Dónde está cada cosa: TRES ramas con ADC
+Es el hallazgo, y es **contraintuitivo**:
 
-| Rama | Qué tiene |
+| Estado final del ADC | Reposo |
 |---|---|
-| **`desde-cero`** | ⭐ **la viva**: `0.0.8` **sin** ADC, con `PATRON_CONSUMO` portado y toda la documentación |
-| **`adc-prueba`** | ⭐ **el firmware que se bajó hoy**: el ADC con las cuatro escrituras unificadas. Cuelga del tag `v0.0.8-microsd`, no de la rama — por eso quedó aparte |
-| `adc-en-pausa` | el ADC *antes* de los arreglos de hoy (driver reducido + comando `vin`) |
+| **DESPIERTO** (`ADVREGEN=1`, como lo deja CubeMX) | **3 µA** |
+| **DORMIDO** (`DEEPPWD=1`, tras `drv_adc_init()`) | ⛔ **235 µA** |
 
-⛔ **`adc-prueba` NO está mergeada a propósito**: mañana se repite todo, el código va a cambiar, y un
-merge mal resuelto ahora pierde trabajo. Lo que hay que decidir mañana es si se integra con
-cherry-pick o se rehace.
+La causa es lo único que no cambiaba en los tres momentos del init: **`ADC_CCR` con `VREFEN = 1`**. Ese
+buffer de la referencia interna lo enciende `HAL_ADC_ConfigChannel()` al configurar `VREFINT`, y
+**`CCR` es un registro COMÚN: el deep power-down NO lo apaga**. Queda habilitado sin el regulador del
+ADC que lo polariza — un estado intermedio inválido, **la misma trampa que el `MODE ≠ 0` del
+INA3221**: ni midiendo ni dormido.
 
-#### ⚠ Lo que sí quedó establecido del ADC
+⭐ El arreglo son dos líneas: `prvAdcDormir()` apaga `VREFEN` **antes** del deep power-down y
+`prvAdcDespertar()` lo repone.
 
-| | |
+#### ⛔⛔⛔ Y LO QUE COSTÓ LOS TRES DÍAS: un volcado de registros MAL DECODIFICADO
+
+Las posiciones reales de `ADC_CR`, verificadas en `stm32l496xx.h`:
+
+```
+ADVREGEN = 28      ADCALDIF = 30
+DEEPPWD  = 29      ADCAL    = 31
+```
+
+⛔ El comando imprimía **`DEEPPWD` desde el bit 31** —que es `ADCAL`— y **`ADVREGEN` desde el 29**, que
+es `DEEPPWD`. Así, `CR = 0x20000000` (que es `DEEPPWD=1`, **correcto**) se leía como *"NO está en deep
+power-down"*.
+
+⭐ **O sea que `prvAdcDormir()` funcionó desde el principio.** El 2026-10-02 se hicieron **cuatro
+"arreglos"** sobre algo que no estaba roto —`SET_BIT`/`CLEAR_BIT`, las `LL_ADC_*` de ST, `MODIFY_REG`
+con la máscara de los bits "rs", y la escritura entera— y los 230 y 270 µA que aparecieron fueron
+**romper lo que andaba**.
+
+⚠ **La lección: un volcado de registros mal decodificado es PEOR que no tener volcado**, porque
+dirige el diagnóstico con autoridad hacia el lugar equivocado. Las posiciones de bits se verifican en
+el header del CMSIS —`grep ADC_CR_..._Pos`— y nunca de memoria. Es la segunda vez que un instrumento
+miente en este proyecto: la primera fue la FAT que acusaba a la pila del MCP79410.
+
+#### ⭐ Lo que llevó al hallazgo: medir el estado AL ARRANCAR, no después de `vin`
+
+El `ADC_CR` se había leído siempre **después** de correr el comando, y el estado que importa para el
+reposo es **el que queda al arrancar** — en campo nadie tipea `vin`. Por eso `drv_adc_init()` captura
+`ADC_CR` y `ADC_CCR` en **tres momentos** (como lo dejó CubeMX, tras calibrar, tras dormirlo) y el
+arranque los imprime **por poleo**, antes de que nadie toque nada. Ese volcado de tres líneas es lo
+que cerró el diagnóstico en una bajada.
+
+#### ⚠ Y el bisect que acotó el sospechoso
+
+`TKCMD_ADC_INIT` en `tkCmd.c`: en 0 el ADC pasa sólo por `MX_ADC1_Init()` de CubeMX.
+
+| | Reposo |
 |---|---|
-| ⛔ **`ADC_CR` no acepta la escritura de `DEEPPWD`** | cuatro formas probadas: `SET_BIT`/`CLEAR_BIT`, las `LL_ADC_*` de ST, `MODIFY_REG` con la máscara de los bits "rs", y la escritura entera del registro |
-| ⭐⭐ **El registro MIENTE sobre el estado del periférico** | se lee `0x20000000` —regulador encendido— en los cuatro casos, y el consumo difirió **77 veces**. Lo único que dice la verdad es **el amperímetro** |
-| ⚠ **VDDA informa 3,00-3,17 V contra 3,32 V del tester** | −9 %, sin resolver |
+| sin ADC en el firmware | 3 µA |
+| ADC en el `.ioc` + `MX_ADC1_Init()` **solo** | ⭐ **3 µA** |
+| ADC completo, con `drv_adc_init()` | ⛔ 235 µA |
 
-⭐ Por eso **todas** las escrituras a `ADC_CR` quedaron como **escritura entera del registro** —en
-`prvAdcDespertar()`, `prvAdcDormir()` y `drv_adc_init()`—: es lo único que se midió apagando el
-regulador. Con `MODIFY_REG` la dispersión de VDDA bajaba de 180 a 33 mV, pero el reposo se iba a
-230 µA. **El consumo manda.**
+⭐ Eso descartó CubeMX y dejó el problema dentro del driver. **Se conserva el interruptor**: el mismo
+experimento sirve para el próximo periférico que entre.
 
-#### ⭐ La pista del sesgo de VDDA, para empezar por ahí
+#### ⏳ Lo que queda abierto: el sesgo de VDDA
 
-Una lectura dio **exactamente 3.000 mV**, y eso es lo que sale cuando `VREFINT_leído == VREFINT_CAL`.
-Como ese valor de fábrica **se calibra a VDDA = 3,0 V**, el ADC estaría diciendo que *su* VDDA está en
-3,0 — o sea que **el firmware dice la verdad y hay una caída entre el riel y el pin del micro**.
+`VREFINT` informa **3,125 V** y el tester medía **3,32 V** en el riel — unos **−6 %**. ⚠ **No bloquea
+hoy** porque el divisor no está poblado, **pero sí va a bloquear la medida de 12 V**, que convierte
+contra ese valor: el error se traslada directo.
 
-**Dos mediciones con el tester:** en el **pin `VDDA`** del micro (no en el riel) y en **`VREF+`**, si
-en este encapsulado está separado. `vin raw` ya imprime las tres cifras para cerrar la cuenta a mano:
-las cuentas leídas, el `VREFINT_CAL` de este chip, y `3000 × CAL / leído`.
+⭐ La pista: una lectura del 2026-10-02 dio **exactamente 3.000 mV**, que es lo que sale cuando
+`VREFINT_leído == VREFINT_CAL`, y **ese valor de fábrica se calibra a VDDA = 3,0 V**. O sea que el ADC
+diría que *su* VDDA está en 3,0 — lo que apunta a una **caída entre el riel y el pin del micro** y no
+a un error de cuenta. **Hay que medir el tester en el pin `VDDA`, no en el riel**, y revisar si
+`VREF+` está separado en este encapsulado. `vin raw` ya imprime las cuentas leídas, el `VREFINT_CAL`
+de este chip y `3000 × CAL / leído` para cerrar la cuenta a mano.
 
 ### ⭐⭐ Los 337 µA de la PLACA VIEJA eran una fuga de 10 kΩ, y la ley de Ohm los encontró
 
