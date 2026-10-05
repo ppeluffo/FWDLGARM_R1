@@ -243,18 +243,23 @@ que cerró el diagnóstico en una bajada.
 ⭐ Eso descartó CubeMX y dejó el problema dentro del driver. **Se conserva el interruptor**: el mismo
 experimento sirve para el próximo periférico que entre.
 
-#### ⏳ Lo que queda abierto: el sesgo de VDDA
+#### ✅ Y la medida de VDDA quedó VALIDADA contra el tester
 
-`VREFINT` informa **3,125 V** y el tester medía **3,32 V** en el riel — unos **−6 %**. ⚠ **No bloquea
-hoy** porque el divisor no está poblado, **pero sí va a bloquear la medida de 12 V**, que convierte
-contra ese valor: el error se traslada directo.
+**No había ningún sesgo** (Pablo, 2026-10-05): `vin` informa **3,125 V** y eso es **exactamente lo que
+el tester mide en el riel** de esta placa.
 
-⭐ La pista: una lectura del 2026-10-02 dio **exactamente 3.000 mV**, que es lo que sale cuando
-`VREFINT_leído == VREFINT_CAL`, y **ese valor de fábrica se calibra a VDDA = 3,0 V**. O sea que el ADC
-diría que *su* VDDA está en 3,0 — lo que apunta a una **caída entre el riel y el pin del micro** y no
-a un error de cuenta. **Hay que medir el tester en el pin `VDDA`, no en el riel**, y revisar si
-`VREF+` está separado en este encapsulado. `vin raw` ya imprime las cuentas leídas, el `VREFINT_CAL`
-de este chip y `3000 × CAL / leído` para cerrar la cuenta a mano.
+⚠ **El riel de la placa nueva está en 3,125 V**, no en los 3,28 V que documenta el resto de este
+archivo. Dentro de tolerancia para un 3,3 nominal, y el flasheo no corre riesgo —el problema conocido
+es la tensión **alta**, con el máximo absoluto en 3,6 V— pero conviene saberlo: **todas las medidas
+del ADC se escalan contra ese número**.
+
+⭐ Y de paso explica la dispersión de 180 mV que se veía el 2026-10-02: con el buffer de `VREFINT`
+quedando en el estado intermedio inválido entre una medida y otra, las lecturas no eran repetibles.
+Apagándolo y reponiéndolo con sus 25 µs de arranque, la medida se estabilizó.
+
+⏳ **Lo único que falta del ADC es la medida de 12 V**, que no se puede validar hasta que el divisor
+esté poblado. ⚠ Cuando se pueble: **56K arriba, 10K abajo** — el error de invertirlas ya se cometió
+una vez y clava el nodo en `VDDA + 0,77` por el clamp del TLV8801.
 
 ### ⭐⭐ Los 337 µA de la PLACA VIEJA eran una fuga de 10 kΩ, y la ley de Ohm los encontró
 
