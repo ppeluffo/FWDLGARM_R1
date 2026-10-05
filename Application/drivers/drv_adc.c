@@ -117,6 +117,25 @@ static void prvAdcDormir( void )
      * lo único que dice la verdad es el amperímetro. Por eso el criterio para
      * tocar estas dos líneas es el consumo medido, nunca lo que se lee.
      */
+    /*
+     * ⭐⭐ VREFEN PRIMERO, y es el arreglo del 2026-10-05.
+     *
+     * Medido: con el ADC en deep power-down el reposo era **235 µA**, y con el
+     * ADC simplemente DESPIERTO (como lo deja CubeMX) **3 µA**. O sea que el
+     * deep power-down costaba 232 µA, al revés de lo esperado.
+     *
+     * La causa es el buffer de la referencia interna: `ADC_CCR.VREFEN` queda en
+     * 1 —lo enciende `HAL_ADC_ConfigChannel()` al configurar VREFINT— y el
+     * registro CCR es COMÚN: **el deep power-down NO lo apaga**. Entonces el
+     * buffer se queda habilitado sin el regulador del ADC que lo polariza, que
+     * es un estado intermedio inválido. Es la misma trampa que el `MODE ≠ 0`
+     * del INA3221: el periférico no está ni midiendo ni dormido.
+     *
+     * ⚠ Y por eso se apaga ACÁ y no en otro lado: tiene que estar en 0 ANTES de
+     * que el ADC pierda su regulador.
+     */
+    CLEAR_BIT( ADC123_COMMON->CCR, ADC_CCR_VREFEN );
+
     hadc1.Instance->CR = ADC_CR_DEEPPWD;
     __DSB();
 
@@ -143,6 +162,11 @@ static void prvAdcDespertar( void )
      */
     hadc1.Instance->CR = 0UL;                   /* sale de deep power-down */
     hadc1.Instance->CR = ADC_CR_ADVREGEN;       /* y enciende el regulador */
+
+    /* Y el buffer de la referencia, que la dormida apaga. `HAL_ADC_ConfigChannel()`
+       lo pondría igual al pedir VREFINT, pero así queda listo antes y no depende
+       de qué canal se configure después. */
+    SET_BIT( ADC123_COMMON->CCR, ADC_CCR_VREFEN );
 
     prvEsperarUs( ADCVREG_STUP_US );
 

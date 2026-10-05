@@ -949,21 +949,25 @@ static void cmdVin( void )
     uint32_t ulCr  = ADC1->CR;
     uint32_t ulCcr = ADC123_COMMON->CCR;
 
+    /*
+     * ⛔ Las posiciones son ADVREGEN=28, DEEPPWD=29, ADCALDIF=30, ADCAL=31.
+     * La primera versión usaba 31 para DEEPPWD y 29 para ADVREGEN, o sea leía
+     * ADCAL y DEEPPWD: **todo el diagnóstico del 2026-10-02 salió de ahí**, con
+     * cuatro "arreglos" sobre un dormido que funcionaba desde el principio.
+     * Verificar las posiciones en el header del CMSIS, no de memoria.
+     */
     xprintf( "\r\n  ADC_CR     : 0x%08lX  DEEPPWD=%u ADVREGEN=%u ADEN=%u%s\r\n",
              ( unsigned long ) ulCr,
-             ( unsigned ) ( ( ulCr >> 31 ) & 1U ),
-             ( unsigned ) ( ( ulCr >> 29 ) & 1U ),
+             ( unsigned ) ( ( ulCr >> ADC_CR_DEEPPWD_Pos  ) & 1U ),
+             ( unsigned ) ( ( ulCr >> ADC_CR_ADVREGEN_Pos ) & 1U ),
              ( unsigned ) ( ulCr & 1U ),
-             ( ( ( ulCr >> 31 ) & 1U ) == 1U ) ? "  <- dormido, como debe" :
-                                                 "  <- NO esta en deep power-down" );
+             ( ( ( ulCr >> ADC_CR_DEEPPWD_Pos ) & 1U ) == 1U ) ?
+                 "  <- deep power-down" : "  <- despierto" );
 
-    xprintf( "  tras dormir: 0x%08lX  DEEPPWD=%u ADVREGEN=%u%s\r\n",
+    xprintf( "  tras dormir: 0x%08lX  DEEPPWD=%u ADVREGEN=%u\r\n",
              ( unsigned long ) ulCrTrasDormir,
-             ( unsigned ) ( ( ulCrTrasDormir >> 31 ) & 1U ),
-             ( unsigned ) ( ( ulCrTrasDormir >> 29 ) & 1U ),
-             ( ( ( ulCrTrasDormir >> 31 ) & 1U ) == 1U ) ?
-                 "  <- la escritura SI entro: algo lo despierta despues" :
-                 "  <- la escritura NO entra" );
+             ( unsigned ) ( ( ulCrTrasDormir >> ADC_CR_DEEPPWD_Pos  ) & 1U ),
+             ( unsigned ) ( ( ulCrTrasDormir >> ADC_CR_ADVREGEN_Pos ) & 1U ) );
 
     xprintf( "  ADC_CCR    : 0x%08lX  VREFEN=%u TSEN=%u VBATEN=%u\r\n",
              ( unsigned long ) ulCcr,
