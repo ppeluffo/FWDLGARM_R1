@@ -136,4 +136,9 @@ uint16_t drv_adc_vrefint_cal( void );
    "la escritura no entra" de "algo vuelve a despertar el ADC". */
 extern volatile uint32_t ulCrTrasDormir;
 
+/* ADC_CR y ADC_CCR en los tres momentos de drv_adc_init(): como lo dejó CubeMX,
+   tras la calibración, y tras dormirlo. Los imprime `status` al arrancar. */
+extern volatile uint32_t ulDiagCr[ 3 ];
+extern volatile uint32_t ulDiagCcr[ 3 ];
+
 #endif /* APPLICATION_DRIVERS_DRV_ADC_H_ */

@@ -54,7 +54,7 @@
  * El interruptor se conserva porque el experimento sirve para el próximo
  * periférico que entre.
  */
-#define TKCMD_ADC_INIT      0     /* 0 = no inicializar el ADC (bisect) */
+#define TKCMD_ADC_INIT      1     /* 0 = no inicializar el ADC (bisect) */
 
 /* Memoria estática: la tarea no toca el heap. */
 StaticTask_t tkCmd_TCB;
@@ -1317,6 +1317,29 @@ void tkCmd( void *pvParameters )
     }
 #else
     prvTxPoleo( "ADC: SIN INICIALIZAR (TKCMD_ADC_INIT=0, bisect de consumo)\r\n" );
+#endif
+#if ( TKCMD_ADC_INIT == 1 )
+    /*
+     * ⭐ Los tres momentos del init, por POLEO y en el arranque: es el único
+     * estado que importa para el reposo, porque en campo nadie corre `vin`.
+     * Sale acá y no en `status` para que se lea ANTES de tipear nada.
+     */
+    {
+        char cBuf[ 72 ];
+
+        for( uint32_t i = 0U; i < 3U; i++ )
+        {
+            static const char *pcMomento[ 3 ] =
+                { "tras MX_ADC1_Init ", "tras CALIBRAR     ", "tras dormirlo     " };
+
+            ( void ) snprintf( cBuf, sizeof( cBuf ),
+                               "ADC %s CR=0x%08lX CCR=0x%08lX\r\n",
+                               pcMomento[ i ],
+                               ( unsigned long ) ulDiagCr[ i ],
+                               ( unsigned long ) ulDiagCcr[ i ] );
+            prvTxPoleo( cBuf );
+        }
+    }
 #endif
 
     if( drv_ina_init() == false )

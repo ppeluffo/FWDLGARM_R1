@@ -26,6 +26,17 @@ static bool     b12vOn      = false;
 volatile uint32_t ulCrTrasDormir = 0UL;
 
 /*
+ * Diagnóstico del arranque: ADC_CR y ADC_CCR en los tres momentos de
+ * drv_adc_init(). Hace falta porque el registro que se mira con `vin` es el de
+ * DESPUÉS de medir, y el bisect del 2026-10-05 mostró que el estado que importa
+ * es el que queda AL ARRANCAR: con MX_ADC1_Init() solo son 3 µA y con el init
+ * del driver son 235, y los dos dejan ADC_CR en 0x20000000. O sea que lo que
+ * cuesta no se ve en ese registro.
+ */
+volatile uint32_t ulDiagCr[ 3 ]  = { 0UL, 0UL, 0UL };
+volatile uint32_t ulDiagCcr[ 3 ] = { 0UL, 0UL, 0UL };
+
+/*
  * Los bits de ADC_CR con propiedad de hardware "rs" (read-set): se ponen por
  * software y los limpia el hardware. ⛔ NUNCA hay que reescribirlos desde una
  * lectura ni dejarlos en 0 por accidente: hay que FORZARLOS a 0 en la máscara,
@@ -215,6 +226,9 @@ bool drv_adc_init( void )
      * el reposo se midió siempre DESPUÉS de correr `vin`, y por eso el problema
      * tardó en aparecer: era el comando el que lo dormía.
      */
+    ulDiagCr[ 0 ]  = ADC1->CR;              /* como lo dejó MX_ADC1_Init() */
+    ulDiagCcr[ 0 ] = ADC123_COMMON->CCR;
+
     hadc1.Instance->CR = 0UL;
     hadc1.Instance->CR = ADC_CR_ADVREGEN;
     prvEsperarUs( ADCVREG_STUP_US );
@@ -231,7 +245,13 @@ bool drv_adc_init( void )
 
     ulCalFactor = HAL_ADCEx_Calibration_GetValue( &hadc1, ADC_SINGLE_ENDED );
 
+    ulDiagCr[ 1 ]  = ADC1->CR;              /* lo que deja la CALIBRACIÓN */
+    ulDiagCcr[ 1 ] = ADC123_COMMON->CCR;
+
     prvAdcDormir();
+
+    ulDiagCr[ 2 ]  = ADC1->CR;              /* y lo que queda tras dormirlo */
+    ulDiagCcr[ 2 ] = ADC123_COMMON->CCR;
 
     return true;
 }
