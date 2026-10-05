@@ -168,6 +168,38 @@ argumento en silencio—. No se agregó el mecanismo: cada comando ya imprime su
 y el `help` ahora lo dice. Es la misma regla del `help` que mentía sobre el parser: **una ayuda que
 calla lo que ignora manda a dudar de la consola**.
 
+### ⭐⭐ EL PRESUPUESTO DE CONSUMO, medido de a un componente (placa nueva, 2026-10-05)
+
+Se pobló la placa nueva midiendo el reposo en cada paso, con el firmware `0.0.9` y el protocolo
+correcto (resetear → no tipear nada → desconectar la terminal → medir). **Es la primera vez que se
+tiene el perfil separado por componente:**
+
+| Poblado | Reposo | Aporte |
+|---|---|---|
+| base: LED + terminal | **3 µA** | — |
+| + EEPROM M24M01 + RTC MCP79410 (I2C2) | **5 µA** | ~2 µA los dos juntos |
+| + INA3221 | **5 µA** | ⭐ **por debajo de 1 µA medible** |
+| + RS485: SP3485 y los 3 rieles conmutados | **5 µA** | ⭐ nada medible (500 nA por TPS22810) |
+| + microSD | **6-7 µA** | ~1-2 µA |
+| + divisor de 12 V, su TPS22810 y el TLV8801 | ⭐ **6 µA** | nada medible |
+
+⭐ **Y el total coincide con los 6 µA que medía la placa ORIGINAL con todo poblado** (`v0.0.13`), así
+que el diseño es repetible y el número no era una casualidad de aquella placa.
+
+⚠ **Los pull-ups de 10 kΩ del I2C no aparecen**, y es correcto: en reposo las líneas quedan en alto y
+nadie las hunde. Si alguna quedara clavada en bajo serían **312 µA** (`3,125 V / 10 kΩ`) — la cuenta
+que sirve de detector, y que el `i2c scan` delata en el acto.
+
+#### ⏳ Lo que de esta tanda quedó SIN confirmar
+
+No hay que darlo por validado:
+
+| | |
+|---|---|
+| **La medida de 12 V contra el TESTER** | Pablo informó que *"el riel de 12 V lo está leyendo"*, pero **no se comparó el número**. En la placa anterior dio `12,025 V` contra `11,98` del tester (+0,4 %) |
+| **`ee test` y `rtc`** | el `i2c scan` encontró los 6 dispositivos, pero **un ACK no prueba el direccionamiento de 17 bits**: eso lo prueba el `ee test` en `0x0FFF0`, que cruza el borde de bloque de 64 KB |
+| ⚠ **La microSD con la tarjeta INSERTADA** | es el único escenario que ejercita el pull-up de `SD_DET` contra el contacto cerrado a GND (**82 µA**), y con la tarjeta afuera es invisible |
+
 ### ✅ El ADC1 entró sin mover el reposo, y el camino costó tres días (2026-10-05)
 
 ```
