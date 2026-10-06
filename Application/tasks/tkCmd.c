@@ -20,6 +20,7 @@
 #include "drv_sd.h"
 #include "drv_adc.h"
 #include "drv_pulsos.h"
+#include "drv_valvula.h"
 #include "pwr_lock.h"
 #include "main.h"
 
@@ -120,6 +121,8 @@ static void cmdHelp( void )
     xprintf( "  sd              microSD por SPI3: energia, sectores\r\n" );
     xprintf( "  vin             rieles por ADC1: 12 V y 3V3 (VREFINT)\r\n" );
     xprintf( "  cnt             contador de pulsos CNT0 (PA12): cuenta y pin\r\n" );
+    xprintf( "  ev              electrovalvula TOYI: abrir, cerrar y estado\r\n" );
+    xprintf( "  cls | clear     limpia la pantalla de la terminal\r\n" );
     xprintf( "  reset           reinicia el equipo\r\n" );
     xprintf( "\r\n" );
     xprintf( "  el comando va COMPLETO: 'status', no 'st'\r\n" );
@@ -1377,6 +1380,117 @@ static void cmdCnt( void )
     xprintf( "\r\ncnt: subcomando desconocido '%s'\r\n", argv[ 1 ] );
 }
 
+/*==============================================================================
+ * ev  -  la electrovalvula TOYI (PA6 = energia, PA7 = direccion)
+ *
+ * ⚠ Es un SERVO, no una biestable: mientras esta alimentada se mueve hacia donde
+ * diga CTL y al llegar al tope se queda ahi. El firmware solo le da tiempo.
+ *
+ * ⚠ Y el estado es una CREENCIA, no una medicion: no hay realimentacion de
+ * posicion en la placa. Lo que informa el driver es el ultimo comando que
+ * ejecuto, y por eso 'ev' dice ASUMIDO mientras no se haya movido nunca.
+ *============================================================================*/
+
+static void prvEvEstado( void )
+{
+    xprintf( "  estado     : %s%s\r\n",
+             ( drv_valvula_estado() == valvulaABIERTA ) ? "ABIERTA" : "CERRADA",
+             drv_valvula_estado_asumido() ? "  (ASUMIDO: todavia no se movio)" : "" );
+    xprintf( "  movimientos: %lu desde el arranque\r\n",
+             ( unsigned long ) drv_valvula_movimientos() );
+    xprintf( "  PA6 pwr    : %s\r\n",
+             drv_valvula_pin_pwr_estado() ? "[!] 1 - servo ALIMENTADO"
+                                          : "0 - apagado (reposo)" );
+    xprintf( "  PA7 ctl    : %s\r\n",
+             drv_valvula_pin_ctl_estado() ? "1 - abrir" : "0 - cerrar (reposo)" );
+}
+//------------------------------------------------------------------------------
+static void cmdEv( void )
+{
+    ( void ) FRTOS_CMD_makeArgv();
+
+    if( argv[ 1 ] == NULL )
+    {
+        xprintf( "\r\nelectrovalvula TOYI (servo, sin realimentacion de posicion)\r\n" );
+        prvEvEstado();
+        xprintf( "\r\n  ev abrir | cerrar   mueve la valvula (%u s con el motor energizado)\r\n",
+                 ( unsigned ) ( DRV_VALVULA_MS_RECORRIDO / 1000U ) );
+        xprintf( "  ev pwr on|off       EN_EV_TOYI (PA6) a mano\r\n" );
+        xprintf( "  ev ctl on|off       CTL_EV_TOYI (PA7) a mano: 1=abrir, 0=cerrar\r\n" );
+        xprintf( "\r\n" );
+        xprintf( "  [!] 'pwr' y 'ctl' saltean la secuencia y el mutex: son para\r\n" );
+        xprintf( "      medir con el tester, NO para mover la valvula.\r\n" );
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "abrir" ) == 0 ) ||
+        ( strcmp( argv[ 1 ], "cerrar" ) == 0 ) )
+    {
+        bool bAbrir = ( argv[ 1 ][ 0 ] == 'a' );
+
+        xprintf( "\r\n%s la valvula, %u s...\r\n",
+                 bAbrir ? "abriendo" : "cerrando",
+                 ( unsigned ) ( DRV_VALVULA_MS_RECORRIDO / 1000U ) );
+
+        if( bAbrir ? drv_valvula_abrir() : drv_valvula_cerrar() )
+        {
+            xprintf( "  hecho: valvula %s\r\n", bAbrir ? "ABIERTA" : "CERRADA" );
+        }
+        else
+        {
+            /* El segundo en llegar recibe false en vez de encolarse: encolar
+               movimientos de una valvula no significa nada, y dos solapados
+               serian CTL cambiando con el motor energizado. */
+            xprintf( "  ERROR: hay otro movimiento en curso\r\n" );
+        }
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "pwr" ) == 0 ) && ( argv[ 2 ] != NULL ) )
+    {
+        bool bOn = ( strcmp( argv[ 2 ], "on" ) == 0 );
+
+        drv_valvula_pin_pwr( bOn );
+        xprintf( "\r\nEN_EV_TOYI (PA6) = %s\r\n",
+                 bOn ? "1 (servo ALIMENTADO)" : "0 (apagado)" );
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "ctl" ) == 0 ) && ( argv[ 2 ] != NULL ) )
+    {
+        bool bOn = ( strcmp( argv[ 2 ], "on" ) == 0 );
+
+        drv_valvula_pin_ctl( bOn );
+        xprintf( "\r\nCTL_EV_TOYI (PA7) = %s\r\n", bOn ? "1 (abrir)" : "0 (cerrar)" );
+        return;
+    }
+
+    xprintf( "\r\nev: subcomando desconocido '%s'\r\n", argv[ 1 ] );
+}
+
+/*------------------------------------------------------------------------------
+ * cls / clear  -  limpia la pantalla de la terminal
+ *
+ * Son dos secuencias ANSI, las mismas que usaba FWDLGX:
+ *
+ *   ESC [ 2 J   borra toda la pantalla
+ *   ESC [ H     manda el cursor a 1,1
+ *
+ * ⚠ El orden importa: `[2J` borra pero NO mueve el cursor, así que sin el `[H`
+ * el prompt saldría en la fila donde hubiera quedado y la pantalla se vería
+ * vacía por arriba.
+ *
+ * ⚠ Esto lo interpreta la TERMINAL, no el equipo. Con minicom, picocom o cualquier
+ * emulador ANSI anda; si alguna vez se engancha un capturador que no interprete
+ * escapes, va a ver los cinco caracteres crudos en el log. Es inofensivo y es el
+ * precio de que sea sólo texto.
+ *----------------------------------------------------------------------------*/
+static void cmdCls( void )
+{
+    xputChar( 0x1B ); xprintf( "[2J" );     /* borrar toda la pantalla */
+    xputChar( 0x1B ); xprintf( "[H"  );     /* cursor a 1,1            */
+}
+
 /*
  * Reset por NVIC_SystemReset, que pulsa NRST.
  *
@@ -1458,6 +1572,13 @@ void tkCmd( void *pvParameters )
        MX_GPIO_Init(), como todo el resto. */
     drv_pulsos_init();
 
+    /* Deja los dos pines en reposo —sin alimentar y con la direccion en
+       "cerrar"— y crea el mutex. ⚠ NO mueve la valvula: en que condiciones
+       conviene moverla al energizar el equipo es politica de la capa de
+       aplicacion, y un cierre automatico serian 5 s de motor en CADA reset,
+       incluidos los diez seguidos de una sesion de flasheo. */
+    drv_valvula_init();
+
 #if ( TKCMD_ADC_INIT == 1 )
     /* ⚠ Calibra el ADC y lo deja en deep power-down. La calibración es
        OBLIGATORIA en el STM32L4: sin ella el offset de varias cuentas se
@@ -1515,6 +1636,11 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "sd",     cmdSd     );
     FRTOS_CMD_register( "vin",    cmdVin    );
     FRTOS_CMD_register( "cnt",    cmdCnt    );
+    FRTOS_CMD_register( "ev",     cmdEv     );
+    /* Los dos nombres a la misma función: el parser exige el comando COMPLETO,
+       así que no se puede abreviar uno en el otro y cuesta un slot de los 32. */
+    FRTOS_CMD_register( "cls",    cmdCls    );
+    FRTOS_CMD_register( "clear",  cmdCls    );
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     /* La versión y la fecha en el banner, no sólo en 'status': es lo primero que

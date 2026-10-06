@@ -297,6 +297,51 @@ Apagándolo y reponiéndolo con sus 25 µs de arranque, la medida se estabilizó
 esté poblado. ⚠ Cuando se pueble: **56K arriba, 10K abajo** — el error de invertirlas ya se cometió
 una vez y clava el nodo en `VDDA + 0,77` por el clamp del TLV8801.
 
+### 🔨 La electroválvula TOYI volvió al firmware (2026-10-06) — ⏳ sin cerrar la etapa
+
+`drv_valvula.{h,c}` copiados **tal cual** de la referencia (dependen sólo de `main.h` y FreeRTOS) más
+el comando `ev`. PA6 `EN_EV_TOYI` y PA7 `CTL_EV_TOYI`, los dos `GPIO_Output` con *Output Level* en
+**Low**: el servo sin alimentar y la dirección en "cerrar", que es el seguro.
+
+✅ **Abre y cierra.** ⏳ **Pero la etapa NO está cerrada**, y por eso `FW_VERSION` sigue en `0.0.11`:
+
+| | |
+|---|---|
+| ⛔ **Con 5 s no llegaba a cerrar** | corregido a **10 s**, **sin reprobar todavía** |
+| **El reposo** | no se midió después del movimiento |
+
+#### ⛔⛔ Los 5 s eran la REGRESIÓN: el número del AVR estaba bien
+
+FWDLGX usa **10 s**. El 2026-08-18 se bajó a **5 s** con un dato nuevo de Pablo, y en banco el
+2026-10-06 **la válvula no llegó a cerrar**. O sea que lo que falló fue el cambio, no el valor
+heredado — y conviene dejarlo escrito, porque la nota vieja decía *"el tiempo pasa de 10 s a 5 s"* y
+el próximo que la lea pensaría que 5 era el valor afinado.
+
+⭐ **La asimetría es la que decide, y por eso el número va generoso:**
+
+| Un tiempo… | Cuesta |
+|---|---|
+| **de más** | motor contra el tope — y **el fin de carrera ya lo desconectó**, así que no cuesta energía |
+| ⛔ **de menos** | una **válvula a medio camino que el firmware cree cerrada** |
+
+Lo segundo es exactamente el desenlace contra el que está diseñado el `estado_asumido`, y acá se vio
+en banco. **En campo habría sido invisible**: nada en la placa mide la posición.
+
+⭐ **La lección general: acortar un tiempo que nadie puede verificar no tiene ningún síntoma hasta que
+falla.** Es la misma forma del `MODE` del INA3221 y del `VREFEN` del ADC — un estado intermedio sin
+nada que lo delate.
+
+⚠ De paso se corrigieron **las cinco menciones de "5 s" dispersas en el header** y las cinco de este
+archivo. Una constante que cambia con los comentarios diciendo el valor viejo es el mismo problema
+que el `help` que mentía sobre el parser: el que lee termina dudando de lo que mide, no del texto.
+
+#### ✅ Y volvió el `cls` de FWDLGX
+
+Pedido de Pablo. Dos secuencias ANSI —`ESC[2J` borra la pantalla y `ESC[H` manda el cursor a 1,1— y
+⚠ **el orden importa**: `[2J` no mueve el cursor, así que sin el `[H` el prompt saldría donde
+hubiera quedado. Registrado con **los dos nombres**, `cls` y `clear`, a la misma función: el parser
+exige el comando completo, así que uno no se puede abreviar en el otro.
+
 ### ✅ `EN_PWR_SENS420`: el riel de los sensores 4-20 mA (2026-10-06)
 
 Con esto el INA3221 queda **completo**: hasta `0.0.10` medía con los lazos sin alimentar, y por eso
@@ -1995,7 +2040,7 @@ firmware sólo le da tiempo —**5 s**— y después le corta la energía:
 ```
 1. CTL a la dirección deseada        <- PRIMERO la dirección
 2. EN = 1                            <- recién ahí se energiza
-3. esperar 5 s                       <- el recorrido, con la tarea BLOQUEADA
+3. esperar 10 s                      <- el recorrido, con la tarea BLOQUEADA
 4. EN = 0
 5. CTL = 0                           <- DESPUÉS de cortar
 ```
@@ -2017,12 +2062,12 @@ situaciones, igual que la firma del MCP79410 distingue una hora confiable de una
 ⏳ **Pero el movimiento de arranque NO lo manda el firmware de hoy** (decidido por Pablo el
 2026-08-18). Estuvo escrito en `tkCmd` un rato y se sacó: **en qué condiciones conviene mover una
 válvula al energizar el equipo es política de la capa de aplicación**, junto con el registro de
-muestras y el watchdog. Mientras eso no esté definido, un cierre automático significaría 5 s de motor
+muestras y el watchdog. Mientras eso no esté definido, un cierre automático significaría 10 s de motor
 en cada reset —incluidos los diez seguidos de una sesión de flasheo y los espurios que meta el
 watchdog cuando exista—. La válvula se mueve sólo cuando alguien lo pide. **No adelantarlo.**
 
 **Energía.** En reposo no consume nada: el load switch cortado deja al servo sin alimentar y los dos
-pines quedan en 0 contra sus pull-down. Lo que se paga son los 5 s de motor, que van a ser **la
+pines quedan en 0 contra sus pull-down. Lo que se paga son los 10 s de motor, que van a ser **la
 corriente más grande del equipo, aunque el fin de carrera acota cuánto duran**. Durante esa ventana **el micro duerme en
 Stop 2** —los GPIO conservan su estado—, así que el driver **no toma ningún candado de energía**, por
 el mismo razonamiento que el INA3221 con su ventana de 1,4 s.
@@ -2035,7 +2080,7 @@ válvula en una posición que nadie conoce— porque el motor está aguas arriba
 **Qué se portó de FWDLGX** (`ULIBS/toyi_valves.{c,h}`): la secuencia, que era correcta, y poco más. Lo
 que cambió:
 
-- el tiempo pasa de **10 s a 5 s** (dato nuevo de Pablo);
+- ⛔ el tiempo **se quedó en los 10 s del AVR**. Estuvo en 5 s entre el 2026-08-18 y el 2026-10-06, por un dato que resultó equivocado: en banco **la válvula no llegaba a cerrar**;
 - `vTaskDelay( 10000 / portTICK_PERIOD_MS )` → `pdMS_TO_TICKS()`, obligatorio acá (ver la sección del
   tick);
 - los accesos a `PORTC.OUT` bajan al driver, y el `t_valve_status valve_status` que aquel header
@@ -4752,7 +4797,7 @@ presión ~14, y hacerlo dentro de `tkWan` dejaría la sesión con el servidor co
 vaciado. Es lo que hace el AVR y por lo que existen las dos tareas.
 
 ⚠ Y `tkFlow` **no abre la válvula al arrancar**, aunque el AVR sí lo haga
-(`VALVE_DEFAULT_ACTION()` = `VALVE_open()`): es la decisión del 2026-08-18 — son 5 s de motor en cada
+(`VALVE_DEFAULT_ACTION()` = `VALVE_open()`): es la decisión del 2026-08-18 — son 10 s de motor en cada
 reset, incluidos los diez seguidos de una sesión de flasheo.
 
 ### Tres cosas que se aprendieron y NO se borran con el código
