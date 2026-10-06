@@ -19,6 +19,7 @@
 #include "drv_uart.h"
 #include "drv_sd.h"
 #include "drv_adc.h"
+#include "drv_pulsos.h"
 #include "pwr_lock.h"
 #include "main.h"
 
@@ -118,6 +119,7 @@ static void cmdHelp( void )
     xprintf( "  rs485           el SP3485 y los 3 rieles conmutados\r\n" );
     xprintf( "  sd              microSD por SPI3: energia, sectores\r\n" );
     xprintf( "  vin             rieles por ADC1: 12 V y 3V3 (VREFINT)\r\n" );
+    xprintf( "  cnt             contador de pulsos CNT0 (PA12): cuenta y pin\r\n" );
     xprintf( "  reset           reinicia el equipo\r\n" );
     xprintf( "\r\n" );
     xprintf( "  el comando va COMPLETO: 'status', no 'st'\r\n" );
@@ -1236,6 +1238,116 @@ static void cmdSd( void )
     xprintf( "  El 0 es el MBR: usar un sector alto en una tarjeta con datos.\r\n" );
 }
 
+/*==============================================================================
+ * cnt  -  el contador de pulsos CNT0 (PA12)
+ *
+ * ⚠ REDUCIDO respecto de la referencia a propósito: allá el comando trae además
+ * `cnt log` y un bloque de caudal, que dependen de `caudal.{h,c}`,
+ * `caudal_log.{h,c}`, `fs_sd` y la configuración del contador — o sea de la capa
+ * de aplicación, que en este firmware todavía no existe. Lo que queda es
+ * exactamente lo que se puede validar contra el hardware poblado.
+ *============================================================================*/
+
+static void prvCntEstado( void )
+{
+    drv_pulsos_cfg_t xCfg = { 0 };
+
+    drv_pulsos_config( &xCfg );
+
+    xprintf( "  total      : %lu pulsos desde el arranque\r\n",
+             ( unsigned long ) drv_pulsos_total() );
+    xprintf( "  pendientes : %lu (los que se llevaria 'cnt tomar')\r\n",
+             ( unsigned long ) drv_pulsos_pendientes() );
+    xprintf( "  pin PA12   : %s  ->  contacto %s\r\n",
+             drv_pulsos_nivel_pin() ? "alto" : "BAJO",
+             drv_pulsos_nivel_pin() ? "abierto (reposo)" : "CERRADO" );
+
+    /* ⭐ El pull TIENE que decir flotante, y por eso se imprime siempre: un
+       pull-down acá cuesta 82 µA las 24 horas —el reposo del pin es el nivel
+       alto— y es lo que una regeneración de CubeMX podría meter sin avisar. Es
+       la misma trampa que costó 89 µA con SD_DET, y no tiene ningún otro
+       síntoma salvo la autonomía. */
+    xprintf( "  config     : modo %lu (0=entrada), pull %lu (%s)\r\n",
+             ( unsigned long ) xCfg.ulModer, ( unsigned long ) xCfg.ulPupdr,
+             ( xCfg.ulPupdr == 0UL ) ? "flotante, CORRECTO"
+                                     : "OJO: NO deberia tener pull" );
+}
+//------------------------------------------------------------------------------
+static void cmdCnt( void )
+{
+    /* El criterio es `argv[N] != NULL` y no el retorno de makeArgv() — ver la
+       nota en cmdSd(). */
+    ( void ) FRTOS_CMD_makeArgv();
+
+    if( argv[ 1 ] == NULL )
+    {
+        xprintf( "\r\ncontador de pulsos CNT0 (PA12, flanco de BAJADA)\r\n" );
+        prvCntEstado();
+        xprintf( "\r\n  cnt watch [seg]  cuenta durante N segundos (10 por omision)\r\n" );
+        xprintf( "  cnt tomar        devuelve los pendientes y los DESCUENTA\r\n" );
+        xprintf( "  cnt reset        pone los dos contadores en cero\r\n" );
+        xprintf( "\r\n" );
+        xprintf( "  El pulso se cuenta al CERRAR el contacto. En reposo esta\r\n" );
+        xprintf( "  abierto y el pin en alto. El antirrebote es de hardware\r\n" );
+        xprintf( "  (RC de 4K7/1uF + Schmitt): admite ~30 Hz y filtra todo lo\r\n" );
+        xprintf( "  que dure menos de ~5 ms.\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "reset" ) == 0 )
+    {
+        drv_pulsos_reset();
+        xprintf( "\r\ncontadores en cero\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "tomar" ) == 0 )
+    {
+        xprintf( "\r\ntomados %lu pulsos (quedan 0 pendientes)\r\n",
+                 ( unsigned long ) drv_pulsos_tomar() );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "watch" ) == 0 )
+    {
+        uint32_t ulSeg = 10UL;
+        uint32_t ulIni;
+        uint32_t ulN;
+        uint32_t ulMiliHz;
+
+        if( argv[ 2 ] != NULL )
+        {
+            ulSeg = ( uint32_t ) atoi( argv[ 2 ] );
+        }
+
+        if( ( ulSeg == 0UL ) || ( ulSeg > 600UL ) )
+        {
+            xprintf( "\r\nERROR: la ventana va de 1 a 600 segundos\r\n" );
+            return;
+        }
+
+        ulIni = drv_pulsos_total();
+
+        xprintf( "\r\ncontando %lu s...\r\n", ( unsigned long ) ulSeg );
+        vTaskDelay( pdMS_TO_TICKS( ulSeg * 1000UL ) );
+
+        ulN = drv_pulsos_total() - ulIni;
+
+        /* La frecuencia en mHz y con enteros: un comando de diagnóstico no
+           depende del `-u _printf_float` del .cproject, que una reconfiguración
+           del proyecto puede perder. Mismo criterio que el comando `ina`. */
+        ulMiliHz = ( ulN * 1000UL ) / ulSeg;
+
+        xprintf( "  %lu pulsos en %lu s  ->  %lu.%03lu Hz\r\n",
+                 ( unsigned long ) ulN, ( unsigned long ) ulSeg,
+                 ( unsigned long ) ( ulMiliHz / 1000UL ),
+                 ( unsigned long ) ( ulMiliHz % 1000UL ) );
+        return;
+    }
+
+    xprintf( "\r\ncnt: subcomando desconocido '%s'\r\n", argv[ 1 ] );
+}
+
 /*
  * Reset por NVIC_SystemReset, que pulsa NRST.
  *
@@ -1311,6 +1423,12 @@ void tkCmd( void *pvParameters )
        cerrado a GND son 82 µA las 24 horas — ver drv_sd.h. */
     ( void ) drv_sd_init();
 
+    /* Pone los contadores en cero y descarta un flanco que hubiera quedado
+       latcheado antes de que el NVIC se habilitara: sin esto el primer pulso del
+       equipo sería uno que nunca ocurrió. El pin y la EXTI los configura
+       MX_GPIO_Init(), como todo el resto. */
+    drv_pulsos_init();
+
 #if ( TKCMD_ADC_INIT == 1 )
     /* ⚠ Calibra el ADC y lo deja en deep power-down. La calibración es
        OBLIGATORIA en el STM32L4: sin ella el offset de varias cuentas se
@@ -1367,6 +1485,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "rs485",  cmdRs485  );
     FRTOS_CMD_register( "sd",     cmdSd     );
     FRTOS_CMD_register( "vin",    cmdVin    );
+    FRTOS_CMD_register( "cnt",    cmdCnt    );
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     /* La versión y la fecha en el banner, no sólo en 'status': es lo primero que

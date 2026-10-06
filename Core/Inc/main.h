@@ -95,6 +95,9 @@ void Error_Handler(void);
 #define EN_PWR_RS485_GPIO_Port GPIOC
 #define EN_PWR_QMBUS_Pin GPIO_PIN_7
 #define EN_PWR_QMBUS_GPIO_Port GPIOC
+#define CNT0_Pin GPIO_PIN_12
+#define CNT0_GPIO_Port GPIOA
+#define CNT0_EXTI_IRQn EXTI15_10_IRQn
 #define SD_SS_Pin GPIO_PIN_15
 #define SD_SS_GPIO_Port GPIOA
 #define SD_SCK_Pin GPIO_PIN_10
@@ -150,7 +153,7 @@ void Error_Handler(void);
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
 #define FW_NOMBRE              "FWDLGARM_R1"   /* el del banner, NO el del frame */
-#define FW_VERSION             "0.0.9"
+#define FW_VERSION             "0.0.10"
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*

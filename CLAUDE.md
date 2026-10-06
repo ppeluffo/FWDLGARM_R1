@@ -21,7 +21,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 
 | Dónde | Qué es |
 |---|---|
-| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.9`. FreeRTOS, la consola, el I2C, el INA, el RS485, la microSD y el ADC |
+| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.10`. FreeRTOS, la consola, el I2C, el INA, el RS485, la microSD, el ADC y el contador de pulsos |
 | rama `main` | el firmware completo `0.0.78` más `PATRON_CONSUMO` |
 | tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
 | `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
@@ -39,6 +39,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | **`0.0.7`** | ⭐ **RS485: los 3 rieles conmutados** (⚠ la comunicación no se reprobó acá) | **9 mA / 5 µA** |
 | **`0.0.8`** | ⭐ **microSD por SPI3**: SDHC de 3716 MB, sectores leídos y escritos | **9 mA / 5 µA** |
 | **`0.0.9`** | ⭐ **ADC1**: `VREFINT` midiendo, y el reposo intacto (⏳ sin el divisor poblado) | **3 µA** |
+| **`0.0.10`** | ⭐ **Contador de pulsos CNT0 por EXTI**: cuenta, y el pin sin pull | **6 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -182,6 +183,7 @@ tiene el perfil separado por componente:**
 | + RS485: SP3485 y los 3 rieles conmutados | **5 µA** | ⭐ nada medible (500 nA por TPS22810) |
 | + microSD | **6-7 µA** | ~1-2 µA |
 | + divisor de 12 V, su TPS22810 y el TLV8801 | ⭐ **6 µA** | nada medible |
+| + el contador de pulsos (opto VO618A, filtro y 74AUP2G17) | ⭐ **6 µA** | nada medible **con el contacto abierto** — ver abajo |
 
 ⭐ **Y el total coincide con los 6 µA que medía la placa ORIGINAL con todo poblado** (`v0.0.13`), así
 que el diseño es repetible y el número no era una casualidad de aquella placa.
@@ -292,6 +294,104 @@ Apagándolo y reponiéndolo con sus 25 µs de arranque, la medida se estabilizó
 ⏳ **Lo único que falta del ADC es la medida de 12 V**, que no se puede validar hasta que el divisor
 esté poblado. ⚠ Cuando se pueble: **56K arriba, 10K abajo** — el error de invertirlas ya se cometió
 una vez y clava el nodo en `VDDA + 0,77` por el clamp del TLV8801.
+
+### ✅ El contador de pulsos CNT0 entró sin mover el reposo (2026-10-06)
+
+```
+cmd>cnt
+  total      : 1 pulsos desde el arranque
+  pendientes : 1 (los que se llevaria 'cnt tomar')
+  pin PA12   : alto  ->  contacto abierto (reposo)
+  config     : modo 0 (0=entrada), pull 0 (flotante, CORRECTO)
+
+cmd>cnt watch 10
+  13 pulsos en 10 s  ->  1.300 Hz
+```
+
+⭐ **Reposo en 6 µA**, o sea que el opto, el filtro y el 74AUP2G17 **no aportan nada medible
+mientras el contacto está abierto**, que es el reposo de campo.
+
+⭐ **Y la línea que más dice es la del `pull`.** Un pull-down en PA12 son **82 µA las 24 horas**
+—el reposo de este pin es el nivel ALTO, o sea el peor de los dos casos— y **no tiene ningún
+síntoma salvo la autonomía**. Por eso el comando lo imprime siempre: es para cazar una regeneración
+de CubeMX que lo meta de vuelta. Es la misma trampa que costó 89 µA con `SD_DET`.
+
+⚠ **El driver vino TAL CUAL de la referencia** —sólo depende de `main.h` y FreeRTOS, nada que
+reducir—. Lo único que se redujo fue **el comando**: allá `cnt` trae además `cnt log` y un bloque de
+caudal que dependen de `caudal.{h,c}`, `caudal_log.{h,c}` y `fs_sd`, o sea capa de aplicación que
+este firmware todavía no tiene.
+
+⭐ **Lo que el link verificó y no se ve de otra forma**: el `HAL_GPIO_EXTI_Callback()` que quedó
+linkeado es **el de `drv_pulsos.c`** y no la weak de la HAL. Si hubiera ganado la de ST el contador
+no contaría **y no habría ningún otro síntoma** — se comprueba en el `.map`.
+
+#### ⏳ Lo que NO se probó
+
+| | |
+|---|---|
+| **`cnt tomar`** | el log muestra `pendientes: 1` pero nadie lo corrió. Es el camino que usará el registro de muestras, y el único que ejercita la sección crítica |
+| ⚠ **Que cuente BIEN, no que cuente** | los 13 pulsos en 10 s se hicieron a mano y **no se contaron los cierres**. Lo que falta es cerrar N veces a propósito y verificar que informe N: eso es lo que prueba el **antirrebote de hardware**, porque un contacto a mano rebota y sin el filtro un solo cierre daría varias cuentas |
+
+#### ⛔⛔ Los 325 µA al cerrar el contacto NO son una fuga: son `R40`, y es el DISEÑO
+
+Apareció el 2026-10-06 al poblar el circuito, y la ley de Ohm lo cerró antes de medir nada:
+
+```
+325 µA  ->  3,125 V / 325 µA = 9,6 kOhm  ~=  10 kOhm
+3,125 V / 10K (R40) = 312 uA            <- contra los 325 medidos
+```
+
+⭐ **En el circuito hay exactamente dos resistencias de 10 K, y sólo una puede drenar del riel de
+3,3 V**: `R40`, el pull-up del colector. `R41` cuelga del ánodo, que con `JP13` en 12 V no toca ese
+riel. Para que `R40` drene, el fototransistor tiene que estar **saturado**; para eso el LED tiene que
+conducir; y para eso **el cátodo tiene que estar a GND** — o sea, **el contacto cerrado**. No admite
+otra lectura: `R41` está en paralelo con el LED justamente para que con el contacto abierto el cátodo
+quede al potencial del ánodo y el LED con 0 V.
+
+**Confirmado en banco**: con el contacto abierto el reposo volvió solo a 6 µA.
+
+⭐ **La lección de método es la de siempre, y van tres**: dividir el consumo por la tensión del riel
+da la **resistencia equivalente**, y acá apuntó al componente exacto en una cuenta de dos segundos.
+La primera vez encontró la fuga de 10 kΩ de la placa vieja; acá evitó buscar una falla que no existía.
+
+##### ⭐ Y por qué `JP13` en 12 V es la posición correcta
+
+La cuenta que faltaba, con el contacto **cerrado**:
+
+| `JP13` | Corriente del LED | **De qué riel sale** | Lo que ve el amperímetro de 3V3 |
+|---|---|---|---|
+| **12 V** (`R39` 2K2) | (12 − 1,2)/2K2 = 4,9 mA | de los **12 V** | ⭐ **312 µA** (sólo `R40`) |
+| 3,3 V (`R38` 330) | (3,125 − 1,2)/330 = 5,8 mA | ⛔ del **riel de 3V3** | **~6,1 mA** |
+
+O sea que en la posición de 3,3 V el riel de 3V3 vería **veinte veces más**. Y de yapa los 12 V dan
+mejor tensión de mojado al contacto seco, que es lo que rompe la película de óxido de un reed parado
+meses — la elección es de campo y es de Pablo, pero las dos razones apuntan al mismo lado.
+
+##### ⏳ El pendiente REAL que deja esto: el ciclo de trabajo del reed
+
+`R40` drena 312 µA **todo el tiempo que el contacto esté cerrado**, y eso **no está medido**. Lo que
+decía esta documentación —"se paga sólo durante el pulso"— asume que el pulso es corto:
+
+| Si el reed queda cerrado… | Promedio en el riel de 3,3 V |
+|---|---|
+| 5 % del tiempo | 16 µA |
+| **50 % del tiempo** | ⛔ **156 µA** — veintiséis veces el reposo de 6 µA |
+
+⚠ **Y la palanca obvia no es gratis.** Subir `R40` baja esa corriente, pero `R40` y `R42`/`C17` fijan
+el tiempo de **carga** del filtro: con `R40` en 100 K, τ_subida pasa de 14,7 ms a 105 ms y **el techo
+de frecuencia cae de ~60 Hz a ~8 Hz**. Habría que bajar `C17` en la misma proporción — es rediseño
+del filtro, no un cambio de resistencia.
+
+##### ℹ️ Dos correcciones al esquemático que estaba documentado
+
+| | Decía | **Es** |
+|---|---|---|
+| La compuerta | `74AUP1G17` | **`74AUP2G17`** — dos compuertas; la mitad B está bien terminada con su entrada a GND (una entrada CMOS flotante oscila y consume) |
+| El opto | sin nombrar | **VO618A**, CTR 20-300 % |
+
+⭐ Con 4,9 mA de LED hace falta un CTR del **5,9 %** para saturar (`(3,125 − 0,2)/10K = 292 µA`), así
+que el VO618A tiene margen de sobra — al revés de la unidad fallada de la placa original, que daba
+**1,5 %** y por eso el colector no bajaba de 2,53 V.
 
 ### ⭐⭐ Los 337 µA de la PLACA VIEJA eran una fuga de 10 kΩ, y la ley de Ohm los encontró
 
@@ -484,7 +584,7 @@ PC14/PC15** con sus condensadores de carga a GND, el **conector de la terminal**
 transceiver **SP3485** y los tres rieles conmutados, la **fuente lineal de los sensores 4-20 mA**
 (`EN_PWR_SENS420`, PB12), la **microSD** con su alimentación conmutada y la **medida de los rieles**
 (los dos load switches con sus divisores y sus seguidores TLV8801) y el **contador de pulsos** (opto,
-filtro RC y 74AUP1G17) y la **electroválvula TOYI** con su load switch (soldada, confirmado por Pablo
+filtro RC y 74AUP2G17) y la **electroválvula TOYI** con su load switch (soldada, confirmado por Pablo
 el 2026-08-18). **Falta poblar un solo módulo: el modem LTE** —que en la placa nueva ya tiene su
 fuente andando; falta el módulo en sí, un **WH-LTE-7S1-E**—.
 
@@ -1296,7 +1396,7 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | Medida del riel de 3,3 V | **existe pero NO se usa** (`EN_SENS3V3` PB2, divisor 56K/56K, PC5): el riel sale de `VREFINT` |
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | microSD | PA15 `SD_SS`, PC10 `SD_SCK`, PC11 `SD_MISO`, PC12 `SD_MOSI` → **SPI3** (NSS por software), **PD2 `SD_DET`** (a GND con tarjeta, pull-up interno), **PB3 `EN_PWR_SD`** ⚠ **0 = prende** (SI2301 canal P, pull-up de 100 K) |
-| Contador de pulsos CNT0 | **PA12 `CNT0`**, EXTI por flanco de **bajada**, **sin pull interno**. Contacto seco → opto (open-collector con pull-up de 10K a 3V3) → RC de 4K7 / 1 µF → **74AUP1G17** (Schmitt, no inversor) |
+| Contador de pulsos CNT0 | **PA12 `CNT0`**, EXTI por flanco de **bajada**, **sin pull interno**. Contacto seco → opto (open-collector con pull-up de 10K a 3V3) → RC de 4K7 / 1 µF → **74AUP2G17** (Schmitt, no inversor) |
 | Electroválvula TOYI (servo) | **PA6 `EN_EV_TOYI`** (TPS22810, EN=1 alimenta al servo), **PA7 `CTL_EV_TOYI`** (1 = abrir, 0 = cerrar). Sin realimentación de posición; el riel del servo lo elige un jumper: 12 V o 3,3 V |
 | Analógicas | PC5, PB0 |
 | LED | **PB9** (en el `.ioc`; no figura en el CSV). ⛔ **PA2 ya NO es LED2**: iba a un pin de SIM del módulo y por eso el modem no leía su tarjeta. Quedó sin asignar el 2026-09-09 |
@@ -1721,7 +1821,7 @@ El esquemático es `Circuito del contador de pulsos.png` ("CAUDALIMETRO PULSOS")
 3V3RAIL --R38 330--/       |               |  R40 10K
                            |  U14          |   |
                         ánodo |\   colector +---+--- R42 4K7 --+--- U13 --> CNT0 (PA12)
-                              | \                              |   74AUP1G17
+                              | \                              |   74AUP2G17
    JP12 (contacto) -----------+cátodo   emisor --> GND        C17 1uF     (Schmitt,
                            |                                   |           NO inversor)
                         C18 10pF                              GND
@@ -1734,12 +1834,12 @@ El esquemático es `Circuito del contador de pulsos.png` ("CAUDALIMETRO PULSOS")
 mientras el contacto está abierto, así el LED queda apagado y el nodo definido. `C18` de 10 pF es
 filtro de RF/ESD en el borne de entrada, **no** antirrebote: con 10K da 0,1 µs.
 
-**Polaridad:** contacto cerrado → conduce el opto → el nodo cae → el 1G17 **no invierte**, así que
+**Polaridad:** contacto cerrado → conduce el opto → el nodo cae → el 2G17 **no invierte**, así que
 **PA12 queda en BAJO mientras el contacto está cerrado**. Se cuenta el **flanco de bajada**, que es el
 cierre.
 
 **El filtro no es simétrico**, y eso fija el techo de frecuencia: descarga por 4K7 (τ = 4,7 ms) y carga
-por 10K + 4K7 (τ = 14,7 ms). Con los umbrales del 74AUP1G17 a 3,3 V (VT+ ≈ 1,8 V, VT− ≈ 1,2 V):
+por 10K + 4K7 (τ = 14,7 ms). Con los umbrales del 74AUP2G17 a 3,3 V (VT+ ≈ 1,8 V, VT− ≈ 1,2 V):
 
 | | |
 |---|---|
@@ -1754,7 +1854,7 @@ antirrebote por software:** sólo daría otra forma de perder pulsos.
 
 **Tres cosas que conviene no tener que volver a averiguar:**
 
-- **El pin va sin pull interno.** La salida del 1G17 es CMOS push-pull. Un pull interno pelearía
+- **El pin va sin pull interno.** La salida del 2G17 es CMOS push-pull. Un pull interno pelearía
   contra él y costaría 82 µA cada vez que el driver empuja al lado contrario: un **pull-up** mientras
   el contacto está cerrado, y un **pull-down las 24 horas**, porque el reposo es el nivel alto. Por eso
   el comando `cnt` imprime `PUPDR` — para cazar una regeneración de CubeMX que lo meta de vuelta.
@@ -1792,7 +1892,7 @@ dormido. Si la cuenta apretara, la palanca es subir `R39`: un opto con CTR ≥ 5
 #### ⚠ El opto no saturaba, y la cuenta que lo dice en dos renglones
 
 Durante el bring-up (2026-08-17) el contador no contaba nada, y el síntoma parecía de firmware: con el
-contacto cerrado el colector del opto **bajaba de 3,25 V a 2,53 V y ahí se quedaba**. El 74AUP1G17
+contacto cerrado el colector del opto **bajaba de 3,25 V a 2,53 V y ahí se quedaba**. El 74AUP2G17
 hacía lo correcto —2,53 V es un ALTO perfectamente válido contra su `VT−` de ~1,2 V—, así que en PA12
 no había flanco y no había nada que el driver pudiera hacer.
 
