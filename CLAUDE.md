@@ -21,7 +21,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 
 | Dónde | Qué es |
 |---|---|
-| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.10`. FreeRTOS, la consola, el I2C, el INA, el RS485, la microSD, el ADC y el contador de pulsos |
+| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.11`. FreeRTOS, la consola, el I2C, el INA con su riel, el RS485, la microSD, el ADC y el contador de pulsos |
 | rama `main` | el firmware completo `0.0.78` más `PATRON_CONSUMO` |
 | tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
 | `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
@@ -35,11 +35,12 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | `0.0.3` | el tickless entrando a los 10 s, con el LED destellando | ⭐ **3 µA** |
 | **`0.0.4`** | ⭐ **`TERM_SENSE` decide**: con terminal no duerme, sin terminal Stop 2 | **9 mA / 3 µA** |
 | **`0.0.5`** | ⭐ **I2C2 + EEPROM M24M01 + RTC MCP79410**, los tres con datos reales | **9 mA / 5 µA** |
-| **`0.0.6`** | ⭐ **INA3221**, identificado y convirtiendo (⏳ sin `EN_PWR_SENS420`) | **9 mA / 5 µA** |
+| **`0.0.6`** | ⭐ **INA3221**, identificado y convirtiendo (sin su riel — llega en `0.0.11`) | **9 mA / 5 µA** |
 | **`0.0.7`** | ⭐ **RS485: los 3 rieles conmutados** (⚠ la comunicación no se reprobó acá) | **9 mA / 5 µA** |
 | **`0.0.8`** | ⭐ **microSD por SPI3**: SDHC de 3716 MB, sectores leídos y escritos | **9 mA / 5 µA** |
 | **`0.0.9`** | ⭐ **ADC1**: `VREFINT` midiendo, y el reposo intacto (⏳ sin el divisor poblado) | **3 µA** |
 | **`0.0.10`** | ⭐ **Contador de pulsos CNT0 por EXTI**: cuenta, y el pin sin pull | **6 µA** |
+| **`0.0.11`** | ⭐ **`EN_PWR_SENS420`**: el riel de la fuente lineal de los sensores | **6 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -106,9 +107,9 @@ cmd>i2c scan            cmd>ina
    INA, y el aporte real quedó **por debajo de 1 µA medible**. El criterio de aceptación de la etapa
    —que agregar un integrado no arruine el reposo— se cumple con margen.
 
-⚠ **Los 0,000 mA son CORRECTOS en esta etapa**: `EN_PWR_SENS420` queda afuera a propósito para medir
-el consumo de a un integrado por vez, así que los lazos no están alimentados. El comando lo dice en
-cada corrida para que nadie lo lea como un sensor roto.
+⚠ **Los 0,000 mA eran CORRECTOS en ESA etapa**: `EN_PWR_SENS420` quedó afuera a propósito para medir
+el consumo de a un integrado por vez, así que los lazos no estaban alimentados. ✅ **El riel entró en
+`0.0.11`** — ver su sección más abajo.
 
 ### ✅ El RS485 entró sin mover el reposo (2026-10-02)
 
@@ -184,6 +185,7 @@ tiene el perfil separado por componente:**
 | + microSD | **6-7 µA** | ~1-2 µA |
 | + divisor de 12 V, su TPS22810 y el TLV8801 | ⭐ **6 µA** | nada medible |
 | + el contador de pulsos (opto VO618A, filtro y 74AUP2G17) | ⭐ **6 µA** | nada medible **con el contacto abierto** — ver abajo |
+| + `EN_PWR_SENS420`, la fuente lineal de los sensores | ⭐ **6 µA** | nada medible **con el riel apagado** |
 
 ⭐ **Y el total coincide con los 6 µA que medía la placa ORIGINAL con todo poblado** (`v0.0.13`), así
 que el diseño es repetible y el número no era una casualidad de aquella placa.
@@ -294,6 +296,46 @@ Apagándolo y reponiéndolo con sus 25 µs de arranque, la medida se estabilizó
 ⏳ **Lo único que falta del ADC es la medida de 12 V**, que no se puede validar hasta que el divisor
 esté poblado. ⚠ Cuando se pueble: **56K arriba, 10K abajo** — el error de invertirlas ya se cometió
 una vez y clava el nodo en `VDDA + 0,77` por el clamp del TLV8801.
+
+### ✅ `EN_PWR_SENS420`: el riel de los sensores 4-20 mA (2026-10-06)
+
+Con esto el INA3221 queda **completo**: hasta `0.0.10` medía con los lazos sin alimentar, y por eso
+informaba 0,000 mA.
+
+⭐ **Reposo en 6 µA con el riel apagado**, que era el criterio de aceptación.
+
+El driver se **restauró del tag `v0.0.78-referencia`**, no se reescribió: el diff confirmó que lo
+único que se le había sacado era el riel. Volvieron `drv_ina_pwr_sensores()`, su estado, los **500 ms
+de asentamiento** y el parámetro `bDejarEncendido` de `drv_ina_medir()`.
+
+⚠ **El riel es ACTIVO ALTO** (EN=1 prende), como los TPS22810 del RS485 y **al revés del
+`EN_PWR_SD`** de la microSD, que es un SI2301 de canal P donde 0 prende. En CubeMX eso significa
+*Output Level* en **Low** para que arranque apagado — y en el de la SD, en **High**. Los dos
+criterios conviven en la misma placa y es el error fácil de cometer.
+
+⭐ **Tres cosas del driver que no son obvias y que están ahí por una razón:**
+
+1. **`drv_ina_init()` apaga el riel explícitamente.** Si el equipo rebotó con la fuente encendida,
+   ése es el único momento en que se puede cortar: un reset no baja un GPIO que ya estaba en alto
+   antes de que `MX_GPIO_Init()` corra.
+2. **`drv_ina_medir()` apaga el riel TAMBIÉN en el camino de error.** Si no, un fallo aislado del
+   I2C dejaría la fuente alimentando transmisores de lazo para siempre, **sin nada que lo delate
+   salvo la autonomía**. Es el mismo criterio por el que el chip se duerme en el camino de error.
+3. **`bDejarEncendido` existe para no pagar dos veces los 500 ms.** En banco lo normal es medir
+   varias veces seguidas, y en el poleo de la aplicación el `sensors_pwr_settle_time` configurable
+   se aplica encendiendo el riel desde afuera: el driver ve que ya está prendido y no vuelve a
+   esperar. Así el tiempo configurable sale **sin tocar código validado**.
+
+⚠ **Y el estado del riel se imprime en cada corrida de `ina`**, con el mismo criterio que el `MODE`
+del INA y el `PUPDR` del contador: un riel que quedó encendido **no tiene ningún síntoma salvo la
+autonomía**, y acá el costo no son microamperes sino **decenas de mA** de los transmisores de lazo.
+
+#### ⏳ Lo que NO se confirmó
+
+| | |
+|---|---|
+| **La medida contra un lazo REAL** | Pablo informó que *"funciona correcto"*, pero **no se compararon números** contra un calibrador. En la placa original el ajuste dio `I_leída = 0,99770 · I_real + 0,002` — un error de ganancia de **−0,23 %**, con todos los residuos por debajo de media cuenta |
+| **El consumo CON el riel encendido** | sólo se midió el reposo con el riel apagado. Lo que consume la fuente lineal en vacío no está medido, y es lo que va a fijar cuánto cuesta cada poleo |
 
 ### ✅ El contador de pulsos CNT0 entró sin mover el reposo (2026-10-06)
 

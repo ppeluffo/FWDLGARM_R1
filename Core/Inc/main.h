@@ -89,6 +89,8 @@ void Error_Handler(void);
 #define RS485_TX_GPIO_Port GPIOB
 #define RS485_RX_Pin GPIO_PIN_11
 #define RS485_RX_GPIO_Port GPIOB
+#define EN_PWR_SENS420_Pin GPIO_PIN_12
+#define EN_PWR_SENS420_GPIO_Port GPIOB
 #define EN_PWR_CPRES_Pin GPIO_PIN_15
 #define EN_PWR_CPRES_GPIO_Port GPIOB
 #define EN_PWR_RS485_Pin GPIO_PIN_6
@@ -153,7 +155,7 @@ void Error_Handler(void);
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
 #define FW_NOMBRE              "FWDLGARM_R1"   /* el del banner, NO el del frame */
-#define FW_VERSION             "0.0.10"
+#define FW_VERSION             "0.0.11"
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*

@@ -115,7 +115,7 @@ static void cmdHelp( void )
     xprintf( "  i2c [scan]      el bus I2C2\r\n" );
     xprintf( "  ee              EEPROM M24M01: rd, wr, test\r\n" );
     xprintf( "  rtc             RTC MCP79410: hora, validez, estado\r\n" );
-    xprintf( "  ina             INA3221: identidad y los 3 canales de 4-20 mA\r\n" );
+    xprintf( "  ina             INA3221: 4-20 mA y el riel de sensores (on|off)\r\n" );
     xprintf( "  rs485           el SP3485 y los 3 rieles conmutados\r\n" );
     xprintf( "  sd              microSD por SPI3: energia, sectores\r\n" );
     xprintf( "  vin             rieles por ADC1: 12 V y 3V3 (VREFINT)\r\n" );
@@ -573,6 +573,26 @@ static void cmdIna( void )
 
     ( void ) FRTOS_CMD_makeArgv();
 
+    /* ⚠ El riel es ACTIVO ALTO (EN=1 prende), como los TPS22810 del RS485 y al
+       revés del EN_PWR_SD de la microSD. Los dos criterios conviven en la placa. */
+    if( ( argv[ 1 ] != NULL ) && ( strcmp( argv[ 1 ], "on" ) == 0 ) )
+    {
+        drv_ina_pwr_sensores( true );
+        xprintf( "\r\nriel de sensores 4-20 mA ENCENDIDO\r\n" );
+        xprintf( "  [!] esperar %u ms antes de creerle a una medida\r\n",
+                 ( unsigned ) DRV_INA_SETTLE_MS );
+        xprintf( "  [!] ALIMENTA LOS TRANSMISORES DE LAZO: consumen mucho mas que\r\n" );
+        xprintf( "      todo el resto del equipo junto. Acordarse de 'ina off'.\r\n" );
+        return;
+    }
+
+    if( ( argv[ 1 ] != NULL ) && ( strcmp( argv[ 1 ], "off" ) == 0 ) )
+    {
+        drv_ina_pwr_sensores( false );
+        xprintf( "\r\nriel de sensores 4-20 mA apagado\r\n" );
+        return;
+    }
+
     if( ( argv[ 2 ] != NULL ) && ( strcmp( argv[ 1 ], "reg" ) == 0 ) )
     {
         uint8_t ucReg = ( uint8_t ) strtoul( argv[ 2 ], NULL, 0 );
@@ -616,11 +636,20 @@ static void cmdIna( void )
                                             : "[!] CONVIRTIENDO: ~350 uA" );
     }
 
-    xprintf( "\r\nmidiendo los 3 canales (~1,4 s)...\r\n" );
+    /* ⭐ Que el riel haya quedado encendido no tiene NINGUN sintoma salvo la
+       autonomia, igual que el MODE del INA: por eso se imprime siempre. */
+    xprintf( "  riel 4-20mA: %s\r\n",
+             drv_ina_pwr_sensores_estado() ? "[!] ENCENDIDO" : "apagado" );
+
+    xprintf( "\r\nmidiendo los 3 canales (riel + %u ms de asentamiento + ~845 ms\r\n"
+             "de barrido)...\r\n", ( unsigned ) DRV_INA_SETTLE_MS );
 
     float fMa[ inaCH_COUNT ];
 
-    if( drv_ina_medir( fMa ) == false )
+    /* Se deja el riel ENCENDIDO al salir: en banco lo normal es medir varias
+       veces seguidas, y asi la segunda no vuelve a pagar los 500 ms de
+       asentamiento. Se apaga con 'ina off', y el estado de arriba lo recuerda. */
+    if( drv_ina_medir( fMa, true ) == false )
     {
         xprintf( "  [!] la medida FALLO (el chip queda dormido igual)\r\n" );
         return;
@@ -647,9 +676,9 @@ static void cmdIna( void )
                  ( long ) ( lAbs / 1000 ), ( long ) ( lAbs % 1000 ), ( long ) lRaw );
     }
 
-    xprintf( "\r\n  [!] EN_PWR_SENS420 todavia NO se maneja: los lazos estan SIN\r\n" );
-    xprintf( "      alimentar, asi que ~0 mA es lo esperado en esta etapa.\r\n" );
-    xprintf( "\r\n  ina reg <n>   lee un registro\r\n" );
+    xprintf( "\r\n  [!] el riel quedo ENCENDIDO ('ina off' para apagarlo)\r\n" );
+    xprintf( "\r\n  ina on | off  el riel de la fuente lineal de sensores (PB12)\r\n" );
+    xprintf( "  ina reg <n>   lee un registro\r\n" );
 }
 
 /*------------------------------------------------------------------------------

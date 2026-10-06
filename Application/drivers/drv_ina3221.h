@@ -10,30 +10,12 @@
  * `DRV_INA_RSHUNT_OHM` la conversión a corriente es directa.
  *
  * ---------------------------------------------------------------------------
- * ⛔ ESTA VERSIÓN NO MANEJA `EN_PWR_SENS420` (decidido por Pablo, 2026-09-30)
- * ---------------------------------------------------------------------------
- * El riel de la fuente lineal de los sensores queda **afuera a propósito**: se
- * está repoblando de a un integrado y midiendo el consumo en cada paso, así que
- * el INA entra solo y su aporte se mide aislado.
- *
- * ⚠ **Consecuencia: los lazos de 4-20 mA NO están alimentados**, así que las
- * lecturas van a dar cerca de cero. Eso NO es una falla del driver — lo que se
- * valida en esta etapa es que el chip se identifique, convierta y duerma, no
- * que mida un sensor.
- *
- * ⏳ Cuando el riel entre hay que reponer del tag `v0.0.78-referencia`:
- * `drv_ina_pwr_sensores()`, su estado, los **500 ms de asentamiento** antes de
- * despertar el INA, y el parámetro `bDejarEncendido` de `drv_ina_medir()` —que
- * existe para que un segundo llamado no vuelva a pagar ese asentamiento—.
- *
- * ---------------------------------------------------------------------------
  * DOS ALIMENTACIONES DISTINTAS, Y CONVIENE NO CONFUNDIRLAS
  *
  *   - **El INA3221** cuelga del 3V3 permanente, como la EEPROM y el RTC. No se
  *     apaga; se lo pone en *power-down* por software.
  *   - **Los sensores de presión** los alimenta una fuente lineal aparte, que se
- *     prende con `EN_PWR_SENS420` (PB12). Esa sí se corta — ⏳ pero **este driver
- *     todavía no la maneja**: ver la advertencia del principio.
+ *     prende con `EN_PWR_SENS420` (PB12). Esa sí se corta.
  *
  * Las dos hay que encenderlas para medir, y las dos consumen de más si quedan
  * encendidas:
@@ -201,30 +183,28 @@ bool drv_ina_leer_ma  ( ina_canal_t eCanal, float   *pfMa     );
 bool drv_ina_bus_mv   ( ina_canal_t eCanal, int32_t *plMiliV  );
 
 /*------------------------------------------------------------------------------
- * ⏳ Acá iban `drv_ina_pwr_sensores()` y su estado — el riel de la fuente lineal
- * en PB12. Están en el tag `v0.0.78-referencia` y vuelven con esa etapa.
+ * Riel de los sensores 4-20 mA: la fuente lineal que se prende con PB12.
  *
- * Cuando vuelvan, dos cosas que no hay que redescubrir: hay que esperar
- * `DRV_INA_SETTLE_MS` (500 ms) antes de creerle a una medida, y hay que
- * acordarse de APAGARLO — mientras esté encendido alimenta transmisores de lazo,
- * que consumen mucho más que todo el resto del equipo junto.
+ * Es sólo el GPIO. Quien lo prenda tiene que esperar `DRV_INA_SETTLE_MS` antes de
+ * creerle a una medida, y acordarse de apagarlo: mientras esté encendido alimenta
+ * transmisores de lazo, que consumen mucho más que todo el resto del equipo junto.
  *----------------------------------------------------------------------------*/
+void drv_ina_pwr_sensores( bool bOn );
+bool drv_ina_pwr_sensores_estado( void );
 
 /*------------------------------------------------------------------------------
  * El ciclo completo de una medida, que es lo que va a usar la capa de arriba:
  *
- *   despierta el INA -> espera el barrido -> lee los 3 canales -> duerme el INA
- *
- * ⏳ Sin el riel todavía: cuando entre, el ciclo se abre con "prende el riel ->
- * espera el asentamiento" y se cierra con "apaga el riel".
+ *   prende el riel -> espera el asentamiento -> despierta el INA -> espera el
+ *   barrido -> lee los 3 canales -> duerme el INA -> apaga el riel
  *
  * `pfMa` tiene que apuntar a un arreglo de `inaCH_COUNT` floats. Tarda ~1,4 s, y
  * la tarea que llame queda bloqueada en `vTaskDelay()` casi todo ese tiempo: el
  * micro duerme mientras tanto.
  *
- * ⏳ El parámetro `bDejarEncendido` volverá con el riel: sirve para medir
+ * Si `bDejarEncendido` es true no apaga el riel al terminar — sirve para medir
  * varias veces seguidas en banco sin pagar el asentamiento cada vez.
  *----------------------------------------------------------------------------*/
-bool drv_ina_medir( float *pfMa );
+bool drv_ina_medir( float *pfMa, bool bDejarEncendido );
 
 #endif /* APPLICATION_DRIVERS_DRV_INA3221_H_ */

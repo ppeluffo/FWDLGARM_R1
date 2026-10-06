@@ -6,6 +6,15 @@
 #include "drv_i2c.h"
 #include "main.h"
 
+
+/*
+ * El User Label del .ioc es parte de la interfaz: si falta, el error de
+ * compilación tiene que decir QUÉ hacer, no sólo que el símbolo no existe.
+ */
+#if !defined( EN_PWR_SENS420_Pin )
+#error "Falta el User Label en el .ioc: PB12 = EN_PWR_SENS420, GPIO_Output, Output Level LOW (EN=1 prende)"
+#endif
+
 #define TRANSACCION_TIMEOUT_MS  250U
 
 /* Los registros de shunt y de bus del canal N son consecutivos y arrancan en 0x01,
@@ -14,6 +23,7 @@
 #define REG_BUSV( ch )  ( ( uint8_t ) ( DRV_INA_REG_CH1_BUSV + ( 2U * ( ch ) ) ) )
 
 static bool bPresente = false;
+static bool bRielOn   = false;
 
 /*------------------------------------------------------------------------------
  * Las 13 cuentas con signo que hay en `[15:3]`.
@@ -64,6 +74,10 @@ bool drv_ina_init( void )
     uint16_t usDieid = 0U;
 
     bPresente = false;
+
+    /* El riel primero y explícito: si el equipo rebotó con la fuente encendida,
+       este es el momento de apagarla. */
+    drv_ina_pwr_sensores( false );
 
     /*
      * Identificar el chip, no sólo comprobar que alguien contesta.
@@ -215,7 +229,20 @@ bool drv_ina_bus_mv( ina_canal_t eCanal, int32_t *plMiliV )
     return true;
 }
 //------------------------------------------------------------------------------
-bool drv_ina_medir( float *pfMa )
+void drv_ina_pwr_sensores( bool bOn )
+{
+    HAL_GPIO_WritePin( EN_PWR_SENS420_GPIO_Port, EN_PWR_SENS420_Pin,
+                       bOn ? GPIO_PIN_SET : GPIO_PIN_RESET );
+
+    bRielOn = bOn;
+}
+//------------------------------------------------------------------------------
+bool drv_ina_pwr_sensores_estado( void )
+{
+    return bRielOn;
+}
+//------------------------------------------------------------------------------
+bool drv_ina_medir( float *pfMa, bool bDejarEncendido )
 {
     bool bOk = true;
 
@@ -227,9 +254,13 @@ bool drv_ina_medir( float *pfMa )
         pfMa[ i ] = 0.0f;
     }
 
-    /* ⏳ Acá iba el encendido del riel de sensores y sus 500 ms de
-       asentamiento. Queda afuera mientras se mide el consumo de a un integrado
-       por vez: ver la advertencia del header. */
+    /* Si el riel ya venía encendido no se paga el asentamiento de nuevo: es lo
+       que hace útil el `bDejarEncendido` de la llamada anterior. */
+    if( bRielOn == false )
+    {
+        drv_ina_pwr_sensores( true );
+        vTaskDelay( pdMS_TO_TICKS( DRV_INA_SETTLE_MS ) );
+    }
 
     if( drv_ina_awake() == false )
     {
@@ -260,6 +291,11 @@ salir:
      * 350 µA para siempre, sin que nada lo delate salvo la autonomía.
      */
     ( void ) drv_ina_sleep();
+
+    if( bDejarEncendido == false )
+    {
+        drv_ina_pwr_sensores( false );
+    }
 
     return bOk;
 }
