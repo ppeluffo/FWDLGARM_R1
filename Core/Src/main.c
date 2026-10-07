@@ -28,6 +28,10 @@
 
 #include "tkCtl.h"
 #include "tkCmd.h"
+#include "tkSys.h"
+#include "tkWan.h"
+#include "tkCtlPres.h"
+#include "tkFlow.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -66,6 +70,30 @@
  * RXNE deja de levantarse y **el eco muere en silencio**. Sin limpiarlos, un
  * solo overrun al principio parecería un RX roto para siempre.
  */
+/*
+ * ⭐ QUE TAREAS ARRANCAN — el bisect de consumo de la fase 2.
+ *
+ * Toda la aplicacion esta COMPILADA desde `0.0.14`, pero una tarea que no se
+ * crea es codigo muerto: no corre y no puede consumir. Por eso la variable del
+ * bisect no es que archivos entran sino cuales de estos defines estan en 1.
+ *
+ * Se enciende UNA por vez y se mide el reposo. El orden va de menos a mas
+ * riesgo, por lo que cada una prende:
+ *
+ *   tkSys      los rieles de sensores y Modbus, y vuelca a la microSD
+ *   tkWan      el modem
+ *   tkCtlPres  el riel del control de presion   } mueven actuadores
+ *   tkFlow     la valvula TOYI                  }
+ *
+ * ⛔ Estos defines van ACA ARRIBA y no mas abajo: un `#if` sobre un `#define`
+ * declarado despues se lee como 0 y compila el bloque equivocado SIN DECIR
+ * NADA. Ya paso dos veces en este proyecto.
+ */
+#define ARRANCA_TKSYS           1     /* el poleo                        */
+#define ARRANCA_TKWAN           0     /* la sesion con el servidor       */
+#define ARRANCA_TKCTLPRES       0     /* la doble consigna               */
+#define ARRANCA_TKFLOW          0     /* las ordenes VOPEN/VCLOSE        */
+
 #define PRUEBA_UART             0     /* 0 = operación normal */
 
 #define PU_PATRON_MS         1000U
@@ -680,6 +708,30 @@ int main(void)
   {
     Error_Handler();
   }
+
+#if ( ARRANCA_TKSYS == 1 )
+  xHandle_tkSys = xTaskCreateStatic( tkSys, "SYS", tkSys_STACK_SIZE, NULL,
+                                     tkSys_PRIORITY, tkSys_Stack, &tkSys_TCB );
+  if ( xHandle_tkSys == NULL ) { Error_Handler(); }
+#endif
+
+#if ( ARRANCA_TKWAN == 1 )
+  xHandle_tkWan = xTaskCreateStatic( tkWan, "WAN", tkWan_STACK_SIZE, NULL,
+                                     tkWan_PRIORITY, tkWan_Stack, &tkWan_TCB );
+  if ( xHandle_tkWan == NULL ) { Error_Handler(); }
+#endif
+
+#if ( ARRANCA_TKCTLPRES == 1 )
+  xHandle_tkCtlPres = xTaskCreateStatic( tkCtlPres, "CPRES", tkCtlPres_STACK_SIZE, NULL,
+                                         tkCtlPres_PRIORITY, tkCtlPres_Stack, &tkCtlPres_TCB );
+  if ( xHandle_tkCtlPres == NULL ) { Error_Handler(); }
+#endif
+
+#if ( ARRANCA_TKFLOW == 1 )
+  xHandle_tkFlow = xTaskCreateStatic( tkFlow, "FLOW", tkFlow_STACK_SIZE, NULL,
+                                      tkFlow_PRIORITY, tkFlow_Stack, &tkFlow_TCB );
+  if ( xHandle_tkFlow == NULL ) { Error_Handler(); }
+#endif
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
