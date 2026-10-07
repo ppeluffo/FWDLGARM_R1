@@ -812,6 +812,58 @@ desajuste.
 por una en `main.c`, así que un `.c` linkeado cuya tarea nunca se crea es código muerto que no puede
 consumir. Eso permitió traer la aplicación entera de una vez sin perder la trazabilidad.
 
+#### ✅ TANDAS 2 y 3 VALIDADAS (2026-10-07): el equipo polea y transmite SOLO
+
+El bisect quedó **en el repo**: cuatro `#define ARRANCA_TK*` en `main.c`, arriba de todo. Se
+enciende una tarea por vez y se mide.
+
+| Tanda | Qué arrancó | Reposo |
+|---|---|---|
+| **2** | `tkSys` — el poleo, la primera que prende rieles | ⭐ **6 µA** |
+| **3** | `tkWan` — el modem y la sesión con el servidor | ⭐ **6 µA** (en `DISCRETO`, modem apagado) |
+
+**Lo que la tanda 3 validó, en una traza capturada en vivo:**
+
+```
+-> ID=860909055244702&HW=SPQ_ARM_R1&TYPE=FWDLGARM&VER=0.0.14&CLASS=DATA
+   &DATE=261007&TIME=153447&PA=-2.50&PB=-6.25&V0=0&bt3v3=3.005&bt12v=11.926
+<- "<html>CLASS=DATA&CLOCK=2610071535</html>"
+OK: 1 de 1 confirmados y borrados; quedan 0
+```
+
+- ⭐ **El IMEI es REAL** (`860909055244702`), no los 15 ceros: la FSM lo lee al abrir la sesión.
+- ⭐ **La hora se corrigió sola**: venía de `2001-01-01` y el `CLOCK=` del servidor la puso en
+  `261007 153447` **sin que nadie fuera al sitio**, que es el caso de uso de campo.
+- ⭐ **El ciclo cierra**: transmite → el servidor confirma → **borra**.
+- **Degrada sin la microSD**: `no hay tarjeta (SD_DET en alto)` y sigue trabajando.
+- Stacks: `tkSys` 802 de 1024, `tkWan` 1779 de 2048 (13 %).
+
+##### ⭐⭐ El contrato del hash sobrevivió intacto a traer 9.900 líneas
+
+```
+el equipo      BH=0x81  AH=0xD7  CH=0xFA  MH=0xBB  PH=0x28
+la referencia           AH=0xD7  CH=0xFA  MH=0xBB  PH=0x28     <- IDENTICOS
+```
+
+`BH` difiere sólo porque el `pwrmodo` pasó a `DISCRETO` y `[PWRMODO:%d]` entra en ese hash:
+recalculado en el host da **0x81**, y con la configuración de referencia da **0x8D**, el
+documentado. ⭐ **Y `AH=0xD7` es el que se verificó contra el `get_ainputs_hash_from_config()` del
+SERVIDOR** — el bloque `AINPUTS` coincide carácter por carácter con el de septiembre.
+
+##### ⛔ Una tarjeta microSD en corto RESETEA el equipo por brownout
+
+Apareció en la tanda 2 y vale como firma: la tarjeta no inicializaba (`CMD0/ACMD41`), y después de
+sacarla y ponerla **cada `sd init` reseteaba el equipo** con `reset por: BOR`.
+
+⭐ Lo que lo acotó: **el resto de los comandos andaba perfecto**. O sea que no era un cuelgue ni la
+alimentación general — era **encender `EN_PWR_SD`**: la tarjeta cargaba el riel lo suficiente para
+hundirlo por debajo del umbral de brownout. **No es el firmware**: `drv_sd.c` está intacto y esta
+placa leyó sectores con esa misma tarjeta el 2026-10-02. ✅ Confirmada muerta en una PC.
+
+⚠ **Lo que queda sin validar por eso**: el volcado de lotes, `fs sd format borrar`, la segunda mitad
+del vaciado de `tkWan` y el modo **`SILENT`** —el único donde la SD no es extensión sino el
+**destino**, y sin tarjeta los datos se pierden al dar la vuelta la ventana—.
+
 #### ⛔⛔ Lo que costó la tanda: 366 µA por UN init que dejó de llamarse
 
 El reposo saltó de 6 a **372 µA**, casi los 354 del `0.0.78` original. La cadena completa:

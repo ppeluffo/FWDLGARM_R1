@@ -90,7 +90,7 @@
  * NADA. Ya paso dos veces en este proyecto.
  */
 #define ARRANCA_TKSYS           1     /* el poleo                        */
-#define ARRANCA_TKWAN           0     /* la sesion con el servidor       */
+#define ARRANCA_TKWAN           1     /* la sesion con el servidor       */
 #define ARRANCA_TKCTLPRES       0     /* la doble consigna               */
 #define ARRANCA_TKFLOW          0     /* las ordenes VOPEN/VCLOSE        */
 
