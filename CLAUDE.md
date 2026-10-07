@@ -401,11 +401,29 @@ interno, y con PA5 = 0 lo sube el módulo.
 21/22 de la SIM — ✅ que, de paso, **el esquemático del 2026-09-30 ya tiene corregidos**: los pines
 20-23 salen al aire.
 
-#### ⏳ Lo que NO se verificó de esta etapa
+#### ✅ El diálogo con el módulo, validado
+
+✅ **El diálogo con el módulo quedó validado** (Pablo, 2026-10-07): `lte esc`, `lte at` y `lte exit`
+andan. Eso cierra tres cosas de un saque, y dos no eran obvias:
+
+1. ⭐ **La secuencia de escape de TRES tiempos** —`+++` / `a` / `a` / `+ok`— es lo único no obvio del
+   driver, y que llegue al `+ok` prueba **los dos sentidos del enlace**: el `+++` le llegó al módulo
+   y su respuesta volvió.
+2. ⭐ **Sacar `R2` no rompió nada.** Era el riesgo real de la corrección de hardware: el `PWRKEY`
+   quedó sostenido por el pull-up interno del módulo, referido a su propio VBAT, y el módulo
+   enciende y dialoga igual. El circuito pasó a ser el de referencia del fabricante.
+3. ⭐ **La UART de 3,0 V del módulo tolera los 3,3 V del micro.** El manual pide adaptación de
+   niveles (*"level matching is needed"*) y estaba anotado como **el primer sospechoso** si el
+   módulo no contestaba o contestaba basura. No hizo falta — reconfirmado ahora **sin** `R2`/`R6`/
+   `R7`, que es la configuración nueva.
+
+⚠ Lo que sigue sin probarse del driver es `lte bridge` y los pulsos cronometrados de `lte key`,
+que son herramientas de banco y no bloquean nada.
+
+#### ⏳ Lo que NO se verificó del HARDWARE
 
 | | |
 |---|---|
-| **La traza del `lte esc` y del `lte at`** | Pablo informó que *"prendo el modem y mando comandos"*, pero **no se vio la respuesta del módulo**. Lo que falta confirmar es la **secuencia de escape de tres tiempos**, que es lo único no obvio del driver |
 | **`NBIOT_1..6`** | las salidas `O1..O4`, `NET` y `WLED` se van del recorte del esquemático y no se sabe a dónde. No hacía falta mirarlas —los tres pull-ups ya explicaban 92 µA contra 90 medidos— pero son el próximo lugar si alguna vez queda un remanente |
 | ⚠ **`JP1`/`JP2`** | en el recorte `DCIN` y `VCAP` aparecen los dos conectados, y el módulo **lo prohíbe** (*"Can not use with DCIN simultaneously"*). Los jumpers tienen que estar fuera del dibujo; conviene confirmarlo antes de una sesión larga |
 
