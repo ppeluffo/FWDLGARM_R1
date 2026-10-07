@@ -21,7 +21,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 
 | Dónde | Qué es |
 |---|---|
-| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.13`: **TODO el hardware de R001 tiene driver otra vez** |
+| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.14`: todo el hardware con driver **y la aplicación del `0.0.78` traída**, con las tareas todavía apagadas |
 | rama `main` | el firmware completo `0.0.78` más `PATRON_CONSUMO` |
 | tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
 | `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
@@ -43,6 +43,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | **`0.0.11`** | ⭐ **`EN_PWR_SENS420`**: el riel de la fuente lineal de los sensores | **6 µA** |
 | **`0.0.12`** | ⭐ **Electroválvula TOYI**: abre y cierra, con los 10 s del AVR | **6 µA** |
 | **`0.0.13`** | ⭐ **Modem LTE**: UART4, energía y modo comando. ⛔ Costó sacar `R2`/`R6`/`R7` | **6 µA** |
+| **`0.0.14`** | ⭐ **La aplicación del `0.0.78`** (~9.900 líneas), tareas apagadas. Los 5 hashes | **6 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -753,6 +754,148 @@ discutir. ⚠ `PC_PERIF_ADC1` quedó sin a quién llamar al salir el ADC del `.i
 `drv_uart` traía una tabla de tres instancias y `frtos-io` cinco file descriptors más las operaciones
 de I2C, que dependían de un driver que ya no existe. La tabla de instancias está justamente para que
 agregar una UART sea **una fila**, no una copia del driver.
+
+## ⛔⛔ TRAER EL `0.0.78`: LOS DRIVERS NO SE TOCAN (2026-10-07)
+
+Decidido con Pablo al terminar el repoblado: en vez de rehacer la fase 2 paso a paso, **se trae la
+capa de APLICACIÓN del `0.0.78`** —que está validada contra el servidor real— sobre los drivers de
+hoy. Su advertencia, textual: *"Al traer la version 0.0.78 cuidado con los drivers."*
+
+```
+   capa de APLICACION del 0.0.78   ->  ENCIMA de los drivers de hoy
+   DRIVERS del 0.0.78              ->  ⛔ NO SE COPIAN. NUNCA.
+```
+
+⭐ **Y el motivo es concreto, no una precaución**: los **354 µA** que hicieron abandonar el `0.0.78`
+estaban casi todos en sus drivers, y **los dos arreglos que los curan NO existen allá**:
+
+| Archivo | Lo que tiene HOY y el `0.0.78` no | Cuesta |
+|---|---|---|
+| ⭐ **`drv_adc.c`** | apaga `ADC_CCR.VREFEN` antes del deep power-down | **232 µA** |
+| ⭐ **`drv_lte.c`** | `prvPinesUart()`: los pines de la UART4 se conmutan con el riel | **90 µA** |
+
+```
+232 + 90 + 6 (base)  =  328 uA       contra los 354 medidos el 2026-09-04
+```
+
+⭐ **O sea que el misterio del `0.0.78` ya está explicado** y el rearranque cumplió su objetivo. Lo
+que falta de la fase 2 es **código validado**, no un problema abierto.
+
+⚠ **Copiar `drv_adc.c` o `drv_lte.c` de la referencia revive los 322 µA**, y esta vez sin la pista
+de que fue eso. Los demás drivers difieren sólo en mejoras de diagnóstico —los `#error` de User
+Label, el `PORT_SIN_TICKLESS`— que tampoco hay que perder.
+
+**Lo único que sí hay que ampliar, y A MANO sobre la base de hoy:** `frtos-io.{h,c}` tiene sólo
+`fdTERM` (faltan `fdWAN`, `fdRS485A`, `fdI2C`, `fdNVM`) y `drv_i2c.h` está reducido. Se agregan las
+filas que la aplicación pida, **no se copia el archivo**.
+
+### ✅ TANDA 1 VALIDADA EN BANCO (`0.0.14`, 2026-10-07)
+
+Entró **toda la aplicación** —~9.900 líneas: `cfg_*`, `wan_frame`, `fs_datos`, `modbus`, `caudal`,
+`tkSys`, `tkWan`, `tkCtlPres`, `tkFlow`, `fs_sd`, `wdg`— **con las cuatro tareas nuevas sin
+arrancar**.
+
+| Criterio | Resultado |
+|---|---|
+| ⭐ **El reposo** | **6 µA** — la aplicación entera no agrega **ni un µA** |
+| ⭐ **Los cinco hashes** | reproducidos en el host con la tabla de Pearson **extraída del propio `cfg_hash.c`**: `BH=0x66 AH=0xEB CH=0xFC MH=0x35 PH=0xBD` |
+| El bus I2C | 7 de 7 dispositivos |
+| El ADC | `DEEPPWD=1`, `VREFEN=0` — el arreglo intacto |
+| Persistencia | `config default` → `save` → reset → OK |
+| ⭐ Los drivers | `drv_adc.c` y `drv_lte.c` **verificados intactos** tras la operación |
+
+⭐ **`CH`, `MH` y `PH` coinciden además con la `referencia.json` de la suite de banco.** `BH` y `AH`
+difieren porque la configuración base está en defaults y la de referencia no — verificable, no un
+desajuste.
+
+⭐ **La variable del bisect NO es qué archivos se compilan sino QUÉ TAREAS ARRANCAN.** Se crean una
+por una en `main.c`, así que un `.c` linkeado cuya tarea nunca se crea es código muerto que no puede
+consumir. Eso permitió traer la aplicación entera de una vez sin perder la trazabilidad.
+
+#### ⛔⛔ Lo que costó la tanda: 366 µA por UN init que dejó de llamarse
+
+El reposo saltó de 6 a **372 µA**, casi los 354 del `0.0.78` original. La cadena completa:
+
+```
+frtos_open_all() REDUCIDO  ->  drv_i2c_init() nunca se llamo
+                           ->  bus I2C muerto (i2c scan: 0 de 7)
+                           ->  drv_ina_init() no pudo identificar el chip
+                           ->  salio con `return false` SIN DORMIRLO
+                           ->  el INA3221 quedo MIDIENDO: ~350 uA
+```
+
+⭐ **UNA sola causa, no dos.** Y la cuenta cerró exacta: con `ina sleep` tipeado a mano el reposo
+volvió a 6 µA **sin tocar el firmware**, que es la prueba que no admite otra lectura.
+
+##### ⛔ Tres errores de método míos, y los tres valen como patrón
+
+1. ⭐ **Comparé lo que se AGREGABA al arranque y di por bueno el resto.** Lo que importaba era **qué
+   dejó de llamarse** — y un `init` que falta **no rompe el link**: compila perfecto y deja un
+   periférico mudo. Es el mismo patrón del `( void ) drv_lte_at( …, NULL, … )` del 5d.
+2. ⭐⭐ **Arreglar la causa NO deshace lo que la causa ya dejó hecho.** Con el bus ya sano el consumo
+   **no se movió**, y lo leí como "el arreglo no sirvió". Era un **residuo**: el INA seguía midiendo
+   desde el arranque anterior y nadie lo volvía a dormir. Hizo falta un **reset** para verlo.
+3. ⚠ **La ley de Ohm acota, no prueba.** Calculé que 365 µA eran los pull-ups del I2C
+   (`3,125/10k = 312`), una cuenta plausible que apuntaba al lugar equivocado. **Van tres veces en
+   esta sesión.** Lo que cerró el caso fue leer el `CONFIG` del chip, no la aritmética.
+
+##### ✅ El bug que quedó arreglado, y por qué importa aunque hoy no se vea
+
+`drv_ina_init()` ahora **duerme el chip aunque no pueda identificarlo**:
+
+```c
+if( ( leer MFID falla ) || ( leer DIEID falla ) || ( no son los esperados ) )
+{
+    ( void ) drv_ina_sleep();      /* ⭐ intentarlo no cuesta nada */
+    return false;
+}
+```
+
+⚠ Sin eso, **en campo un fallo aislado del I2C al arrancar deja el equipo en 372 µA para siempre**,
+y encima el comando dice `NO CONTESTA` — que manda a buscar un chip roto en vez de un consumo. Es la
+regla que `drv_ina_medir()` ya aplicaba en su camino de error y que faltaba en el init.
+
+##### ⚠ Y la cuenta de los 354 µA del `0.0.78` vuelve a estar ABIERTA
+
+Estaba anotado acá que eran `232 (VREFEN) + 90 (PA1 flotando) + 6`. **No puede ser**: si además el
+INA quedaba midiendo, el total pasaría de 600 µA. No bloquea nada —los dos extremos están medidos y
+acorralados— pero **no hay que darla por explicada**.
+
+### El plan, en tres tandas
+
+El criterio no es ritual: **sólo hay dos formas de que el software mueva el reposo** —un candado
+tomado y no soltado, que hace girar el idle y se ve en **mA**; o un periférico que queda encendido,
+que son **µA** y no tiene ningún otro síntoma—.
+
+| Tanda | Qué entra | ¿Puede mover el reposo? |
+|---|---|---|
+| **1** | `cfg_*`, `cfg_hash`, `wan_frame`, `fs_datos`, `drv_modbus`+`modbus`, `caudal` | ⭐ **No**: software puro sobre drivers validados |
+| **2** | `tkSys`, `fs_sd`+FatFs, `tkCtlPres`, `tkWan`, `tkFlow` | **Sí** — prenden rieles y el modem |
+| **3** | `wdg` + `drv_wdt` | **Sí**, y además nunca se validó en banco |
+
+⚠ **El watchdog va último y NO es "traer lo que ya teníamos"**: el `0.0.78` lo tiene marcado como
+*escrito, sin probar*. Y una vez arrancado **el IWDG no se puede parar**: un falso positivo deja al
+equipo en ciclo de reset, que desde afuera se parece a "la placa no arranca".
+
+⏳ **Lo que necesita CubeMX (y por lo tanto a Pablo)**: FatFs, en la tanda 2.
+
+### ⭐ Claude corre los tests por la consola serie
+
+Acordado el 2026-09-22 y reconfirmado el 2026-10-07. El adaptador es un **CP2102N en
+`/dev/ttyUSB0`**, 9600 8N1, y el usuario está en `dialout`. **No es flashear** — es lo mismo que
+hace Pablo con el minicom.
+
+| Quién | Qué |
+|---|---|
+| **Claude** | manda comandos, lee respuestas, corre la suite de `Tools/banco/` |
+| **Pablo** | ⭐ **flashea y RESETEA** el equipo para que arranque, **mide el consumo**, y mueve hardware |
+
+⚠ **No tocar DTR/RTS al abrir el puerto**: no está verificado si alguno llega a NRST en el
+adaptador, y resetear la placa sin querer en medio de una medición arruinaría la prueba.
+
+⚠ **El equipo no habla solo**: el banner sale una vez al arrancar. Si una lectura da 0 bytes no
+quiere decir que esté colgado — puede estar simplemente esperando un comando. Y con `TERM_SENSE`
+desconectado **el canal es de una sola vía**: en Stop 2 la USART no recibe.
 
 ## Sobre qué árbol se trabaja (leer primero)
 

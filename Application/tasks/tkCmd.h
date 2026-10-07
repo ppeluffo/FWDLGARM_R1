@@ -1,32 +1,63 @@
 /*
- * tkCmd.h  -  la consola TERM.
+ * tkCmd.h
  *
- * ⭐ Versión MÍNIMA (2026-09-29). El firmware se está repoblando de a un
- * periférico por vez, midiendo el consumo en cada paso, así que acá sólo están
- * los comandos que se pueden ejecutar con lo que hay montado: help, status,
- * sense y reset.
- *
- * Los demás —ee, rtc, ina, sd, vin, cnt, ev, lte, modbus, cpres, config, fs,
- * poll, frame, wdg, kill— están escritos y validados en el tag
- * v0.0.78-referencia; vuelven con su driver, no antes.
- *
- * ⚠ Y hay que acordarse de las DOS cosas que cuesta olvidar al agregar uno:
- * registrarlo con FRTOS_CMD_register() **y** ponerlo en el texto del `help`.
- * Son pasos independientes y el comando funciona igual sin el segundo, así que
- * el olvido no se nota hasta que alguien busca el comando y no lo encuentra.
+ * Tarea de la consola: lee de fdTERM y alimenta el ciclo de comandos de
+ * frtos_cmd. Es la primera pieza de diagnóstico interactivo del proyecto — hasta
+ * ahora el único canal eran los destellos del LED.
  */
-#ifndef TKCMD_H
-#define TKCMD_H
+
+#ifndef APPLICATION_TASKS_TKCMD_H_
+#define APPLICATION_TASKS_TKCMD_H_
 
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define tkCmd_STACK_SIZE    512                       /* palabras, no bytes */
+#define tkCmd_STACK_SIZE    1024    /* palabras. Necesita lugar para vsnprintf */
 #define tkCmd_PRIORITY      ( tskIDLE_PRIORITY + 1 )
+
+/*------------------------------------------------------------------------------
+ * ⛔ El bloqueo de la consola TIENE timeout, y es por el watchdog.
+ *
+ * Esperando un carácter con `portMAX_DELAY` esta tarea no pasaba nunca por
+ * ningún lado mientras nadie tipeara, así que no había forma de vigilarla. Con
+ * el timeout vuelve una vez por minuto, reporta y se vuelve a bloquear.
+ *
+ * 60 s = el mismo trozo que usan `tkSys` y `tkWan` para partir sus esperas, y
+ * bien por debajo del plazo de 90 s de `wdg.h`. El costo en consumo es una
+ * despertada por minuto: nada al lado de las 60 que ya hace `tkCtl`.
+ *
+ * ⚠ Los comandos que cambian el timeout de `fdTERM` tienen que devolverlo a
+ * ESTE valor, no a `portMAX_DELAY`.
+ *----------------------------------------------------------------------------*/
+#define TKCMD_MS_TIMEOUT_RX     60000U
+
+void tkCmd( void *pvParameters );
+
+/*------------------------------------------------------------------------------
+ * La causa del último reset, como código chico para el campo `WDG` del frame de
+ * configuración. Se lee de `RCC_CSR` al arrancar, antes de limpiarla.
+ *
+ * ⚠ **La semántica NO es la del AVR.** Allá `wdg_resetCause` lleva los bits
+ * crudos de su propio registro de reset, que son otros bits y otro micro. Acá va
+ * un código enumerado; si el servidor interpretara el valor del AVR habría que
+ * mapearlo. En el uso conocido es un dato de diagnóstico, no una decisión.
+ *
+ * En un datalogger a batería esto no es cosmético: saber si el equipo rebotó por
+ * watchdog, por BOR (batería floja) o por software es información de campo.
+ *----------------------------------------------------------------------------*/
+typedef enum {
+    wanRESET_NINGUNO = 0,   /* reinicio tibio: ninguna bandera puesta */
+    wanRESET_LPWR    = 1,
+    wanRESET_WWDG    = 2,
+    wanRESET_IWDG    = 3,
+    wanRESET_SOFT    = 4,
+    wanRESET_BOR     = 5,   /* incluye el power-on normal */
+    wanRESET_PIN     = 6
+} wan_causa_reset_t;
+
+uint8_t wan_causa_reset( void );
 
 extern StaticTask_t tkCmd_TCB;
 extern StackType_t  tkCmd_Stack[ tkCmd_STACK_SIZE ];
 
-void tkCmd( void *pvParameters );
-
-#endif /* TKCMD_H */
+#endif /* APPLICATION_TASKS_TKCMD_H_ */

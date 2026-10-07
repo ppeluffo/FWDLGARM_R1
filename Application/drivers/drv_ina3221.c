@@ -87,13 +87,26 @@ bool drv_ina_init( void )
      * heredado. Un ACK sólo prueba que hay algo; MFID y DIEID prueban qué.
      */
     if( ( drv_ina_reg_leer( DRV_INA_REG_MFID,  &usMfid  ) == false ) ||
-        ( drv_ina_reg_leer( DRV_INA_REG_DIEID, &usDieid ) == false ) )
+        ( drv_ina_reg_leer( DRV_INA_REG_DIEID, &usDieid ) == false ) ||
+        ( usMfid  != DRV_INA_MFID_ESPERADO  ) ||
+        ( usDieid != DRV_INA_DIEID_ESPERADO ) )
     {
-        return false;
-    }
-
-    if( ( usMfid != DRV_INA_MFID_ESPERADO ) || ( usDieid != DRV_INA_DIEID_ESPERADO ) )
-    {
+        /*
+         * ⛔ NO SE PUEDE SALIR SIN INTENTAR DORMIRLO, y esto costó 366 µA en
+         * banco el 2026-10-07.
+         *
+         * Con el bus caído, la identificación falla y la versión anterior hacía
+         * `return false` dejando el chip **como estaba: MIDIENDO**. Son ~350 µA
+         * permanentes —sesenta veces el reposo del equipo— y **el único síntoma
+         * es la autonomía**: el comando hasta dice "NO CONTESTA", que manda a
+         * buscar un chip roto en vez de un consumo.
+         *
+         * ⭐ Es exactamente la regla que `drv_ina_medir()` ya aplica en su
+         * camino de error, y que acá faltaba. Intentar dormirlo no cuesta nada:
+         * si el bus está caído falla y da igual, y si el bus vuelve el chip
+         * queda donde tiene que estar.
+         */
+        ( void ) drv_ina_sleep();
         return false;
     }
 

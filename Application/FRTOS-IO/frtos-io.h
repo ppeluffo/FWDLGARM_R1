@@ -33,8 +33,10 @@
  *----------------------------------------------------------------------------*/
 typedef enum {
     fdTERM = 0,
-    /* ⏳ fdWAN, fdRS485A, fdI2C y fdNVM se reponen con sus periféricos. El
-       orden de FWDLGX se conserva poniéndolos de nuevo en su lugar. */
+    fdWAN,          /* modem LTE   - UART4                                 */
+    fdRS485A,       /* Modbus      - USART3                                */
+    fdI2C,          /* bus I2C     - sin implementar                       */
+    fdNVM,          /* config      - sin implementar                       */
     fdCOUNT
 } file_descriptor_t;
 
