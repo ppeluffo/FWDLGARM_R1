@@ -41,22 +41,27 @@
 typedef enum {
     drvUART_TERM = 0,
     drvUART_RS485,
-    /* ⏳ drvUART_LTE se repone cuando entre el modem. Y que agregar una UART sea
-       UNA FILA y no una copia del driver es exactamente para lo que esta tabla
-       existe: en el AVR las cinco copias eran inevitables porque los registros
-       de cada USART eran constantes de compilación; acá cada UART es un
-       UART_HandleTypeDef. */
+    drvUART_LTE,
     drvUART_COUNT
 } drv_uart_id_t;
 
 #define DRV_UART_TERM_RXSIZE    128U    /* buffer de RX de la consola */
 #define DRV_UART_RS485_RXSIZE   256U    /* buffer de RX del Modbus    */
+#define DRV_UART_LTE_RXSIZE     512U    /* buffer de RX del modem     */
 
 /*
  * 256 bytes para el RS485: una trama Modbus RTU son 256 como máximo (PDU de 253
  * más dirección y CRC). Con menos, una respuesta larga se perdería por la mitad
  * y el síntoma —tramas que fallan sólo cuando el esclavo contesta mucho— es de
  * los que cuestan encontrar.
+ */
+
+/*
+ * 512 para el modem: es el que más datos mueve y el único que puede hablar sin
+ * que nadie le pregunte. Una respuesta AT son decenas de bytes, pero en modo
+ * transparente del otro lado hay un socket TCP, y ahí el largo lo decide el
+ * servidor. Con el buffer chico la pérdida sería SILENCIOSA —el stream buffer
+ * descarta lo que no entra— y aparecería como tramas truncadas de vez en cuando.
  */
 
 /*

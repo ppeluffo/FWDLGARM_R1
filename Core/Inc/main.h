@@ -81,6 +81,14 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define EN_LTE_DCIN_Pin GPIO_PIN_13
+#define EN_LTE_DCIN_GPIO_Port GPIOC
+#define LTE_TXD_Pin GPIO_PIN_0
+#define LTE_TXD_GPIO_Port GPIOA
+#define LTE_RXD_Pin GPIO_PIN_1
+#define LTE_RXD_GPIO_Port GPIOA
+#define LTE_PWR_Pin GPIO_PIN_5
+#define LTE_PWR_GPIO_Port GPIOA
 #define EN_EV_TOYI_Pin GPIO_PIN_6
 #define EN_EV_TOYI_GPIO_Port GPIOA
 #define CTL_EV_TOYI_Pin GPIO_PIN_7
@@ -159,7 +167,7 @@ void Error_Handler(void);
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
 #define FW_NOMBRE              "FWDLGARM_R1"   /* el del banner, NO el del frame */
-#define FW_VERSION             "0.0.12"
+#define FW_VERSION             "0.0.13"
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*

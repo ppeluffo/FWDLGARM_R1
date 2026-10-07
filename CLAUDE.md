@@ -21,7 +21,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 
 | Dónde | Qué es |
 |---|---|
-| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.12`. FreeRTOS, la consola, el I2C, el INA con su riel, el RS485, la microSD, el ADC, el contador de pulsos y la válvula TOYI |
+| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.13`: **TODO el hardware de R001 tiene driver otra vez** |
 | rama `main` | el firmware completo `0.0.78` más `PATRON_CONSUMO` |
 | tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
 | `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
@@ -42,6 +42,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | **`0.0.10`** | ⭐ **Contador de pulsos CNT0 por EXTI**: cuenta, y el pin sin pull | **6 µA** |
 | **`0.0.11`** | ⭐ **`EN_PWR_SENS420`**: el riel de la fuente lineal de los sensores | **6 µA** |
 | **`0.0.12`** | ⭐ **Electroválvula TOYI**: abre y cierra, con los 10 s del AVR | **6 µA** |
+| **`0.0.13`** | ⭐ **Modem LTE**: UART4, energía y modo comando. ⛔ Costó sacar `R2`/`R6`/`R7` | **6 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -188,6 +189,7 @@ tiene el perfil separado por componente:**
 | + el contador de pulsos (opto VO618A, filtro y 74AUP2G17) | ⭐ **6 µA** | nada medible **con el contacto abierto** — ver abajo |
 | + `EN_PWR_SENS420`, la fuente lineal de los sensores | ⭐ **6 µA** | nada medible **con el riel apagado** |
 | + la electroválvula TOYI (TPS22810 + servo) | ⭐ **6 µA** | nada medible **en reposo**: el load switch cortado y los dos pines en 0 |
+| + el modem LTE | ⭐ **6 µA** | ⛔ **+90 µA hasta sacar `R2`/`R6`/`R7`** — ver abajo |
 
 ⭐ **Y el total coincide con los 6 µA que medía la placa ORIGINAL con todo poblado** (`v0.0.13`), así
 que el diseño es repetible y el número no era una casualidad de aquella placa.
@@ -298,6 +300,114 @@ Apagándolo y reponiéndolo con sus 25 µs de arranque, la medida se estabilizó
 ⏳ **Lo único que falta del ADC es la medida de 12 V**, que no se puede validar hasta que el divisor
 esté poblado. ⚠ Cuando se pueble: **56K arriba, 10K abajo** — el error de invertirlas ya se cometió
 una vez y clava el nodo en `VDDA + 0,77` por el clamp del TLV8801.
+
+### ✅ El modem LTE cierra el repoblado (2026-10-07) — y costó DOS fugas distintas
+
+`drv_lte.{h,c}` de la referencia más el comando `lte` **reducido**: entran `on/off`, `key`, `esc`,
+`exit`, `at`, `tx`, `rx` y `bridge`; salen `info`, `set`, `save`, `ping`, `conf`, `data` y `clock`,
+que hablan con el **servidor** y dependen de `wan_frame`/`tkWan`.
+
+⭐ **La UART4 entró como UNA FILA** en la tabla de `drv_uart` —`&huart4`, 512 B y `pwrLOCK_WAN_TX`—,
+sin una línea de código nuevo de UART. Es exactamente para lo que esa tabla existe.
+
+⚠ **`fdWAN` no hizo falta**: el driver usa `drv_uart` directo, igual que el RS485. `xfprintf( fdWAN,
+… )` es de la capa de aplicación.
+
+⭐ **Reposo en 6 µA al arrancar Y después de un ciclo completo** (prender → modo AT → comandos →
+apagar). Lo segundo es lo que prueba que el driver cierra bien y no deja el módulo a medio apagar.
+
+#### ⛔⛔ Fueron DOS causas de ~90 µA cada una, y dan el MISMO número por casualidad
+
+Es lo más instructivo de la etapa: si no se hubieran separado, el número no habría apuntado a nada.
+
+| | Sin el módulo poblado | Con el módulo |
+|---|---|---|
+| Pines de la UART4 **activos** | ⛔ **96 µA** | (las dos juntas) |
+| Pines en **analógico** | ⭐ **6 µA** | ⛔ **96 µA** |
+| Analógico **+ sin `R2`/`R6`/`R7`** | 6 µA | ⭐ **6 µA** |
+
+⭐ **La tabla ES el bisect**: una variable por vez, y cada fila dice cuál de las dos causas queda.
+
+##### Causa 1 — `PA1` (el RX) flotando: lo arregla el firmware
+
+Sin nada que lo maneje, un pin de **entrada digital** queda cerca del umbral, oscila con cualquier
+ruido y hace consumir al buffer. Es la razón por la que los pines no usados van en analógico.
+
+⛔ **Y mi primer diagnóstico fue el equivocado**: dije *back-powering por el TX* —PA0 en alto contra
+un módulo sin VDD— y **el dato de que el módulo NO estaba poblado lo refuta**: sin módulo no hay
+diodo de entrada que conduzca. El arreglo sirve para los dos casos, pero la causa era la otra.
+
+**La solución es la de `drv_sd::prvPinesBus()`**: los pines de la UART4 **viven y mueren con el riel
+del modem**, en un solo lugar. Y el ORDEN importa en los dos sentidos, como el paso 5 de la válvula:
+
+```
+al PRENDER:  riel primero, pines despues   -> el TX nunca queda alto contra un modulo sin VDD
+al APAGAR:   pines primero, riel despues   -> por lo mismo, al reves
+```
+
+##### ⛔⛔ Causa 2 — TRES pull-ups de 56K a `3V3RAIL`: es HARDWARE, el firmware no puede nada
+
+```
+3V3RAIL --R2 56K--> pin 10  PWRKEY     (y al drain de Q1, con C3 de 100 pF)
+3V3RAIL --R6 56K--> pin 19  RESET
+3V3RAIL --R7 56K--> pin 18  RELOAD
+```
+
+Con el módulo instalado y su riel cortado, los tres pines de entrada tienen sus diodos de protección
+hacia un **VDD en cero**, así que **las tres resistencias alimentan el riel muerto del módulo**.
+⭐ **Ninguno de los tres caminos pasa por un pin del micro** — por eso poner la UART en analógico no
+movió el número.
+
+La cuenta cierra:
+
+```
+3 x 56K en paralelo = 18,7 kOhm
+riel del modulo flotando en ~1,4 V  ->  (3,125 - 1,4) / 18,7k = 92 uA     <- contra 90 medidos
+```
+
+✅ **Sacadas las tres, el reposo vuelve a 6 µA y el módulo sigue andando** (banco, 2026-10-07).
+
+###### ⭐⭐ La advertencia YA ESTABA ESCRITA en este archivo, para otro pin
+
+Al rediseñar la fuente quedó anotado sobre el `PG` del LMR33630: *"el pull-up va a `3V8RAIL`, **nunca
+a `3V3RAIL`** ni a `VCC`… `3V3RAIL` es el único de los tres que **sobrevive a `VIN`**, así que
+violaría la misma llamada al pie que `EN` y drenaría ~26 µA permanentes por el clamp de `PG` — la
+trampa del pull-up de `SD_DET` otra vez"*.
+
+**Ese pull-up se decidió no poner. Y el mismo error estaba cometido TRES veces en R001**, en pines
+que ya venían del esquemático original. La regla existía; lo que faltó fue aplicarla hacia atrás.
+
+⭐ **La regla general, y van cuatro veces en este proyecto** (`SD_DET`, el `PG` que se evitó, el
+contador con `R40`, y acá): **todo pull-up que cruce un dominio de alimentación conmutado hay que
+colgarlo del riel que se apaga, no del que sobrevive.** Si no, en reposo alimenta al integrado
+muerto por la puerta de atrás, y **no tiene ningún síntoma salvo la autonomía**.
+
+###### ⭐ Y las tres resistencias eran REDUNDANTES: lo dice el manual
+
+No había que moverlas a `3V8RAIL` — sobran:
+
+| Pin | El manual |
+|---|---|
+| **RESET** | *"Pull down the RESET pin for 0.5 s, then pull up **or open it**"* |
+| **RELOAD** | *"Pull down for 3~15 s, then pull up **or open it**"* |
+| **PWRKEY** | *"Power pin, **pull up by default**. Type voltage: **VBAT**"* + *"If unused, must keep this pin open"* |
+
+⭐ El `PWRKEY` ya tiene su pull-up **referido a VBAT, el riel del propio módulo**: `R2` no agregaba
+nada y era justo la que lo alimentaba por la puerta de atrás. Sin ella el circuito queda siendo
+**exactamente el de referencia del fabricante**: con PA5 = 1 `Q1` hunde el pin contra el pull-up
+interno, y con PA5 = 0 lo sube el módulo.
+
+⛔ **Para la próxima revisión de R001: `R2`, `R6` y `R7` NO VAN.** Es del mismo tipo que los pines
+21/22 de la SIM — ✅ que, de paso, **el esquemático del 2026-09-30 ya tiene corregidos**: los pines
+20-23 salen al aire.
+
+#### ⏳ Lo que NO se verificó de esta etapa
+
+| | |
+|---|---|
+| **La traza del `lte esc` y del `lte at`** | Pablo informó que *"prendo el modem y mando comandos"*, pero **no se vio la respuesta del módulo**. Lo que falta confirmar es la **secuencia de escape de tres tiempos**, que es lo único no obvio del driver |
+| **`NBIOT_1..6`** | las salidas `O1..O4`, `NET` y `WLED` se van del recorte del esquemático y no se sabe a dónde. No hacía falta mirarlas —los tres pull-ups ya explicaban 92 µA contra 90 medidos— pero son el próximo lugar si alguna vez queda un remanente |
+| ⚠ **`JP1`/`JP2`** | en el recorte `DCIN` y `VCAP` aparecen los dos conectados, y el módulo **lo prohíbe** (*"Can not use with DCIN simultaneously"*). Los jumpers tienen que estar fuera del dibujo; conviene confirmarlo antes de una sesión larga |
 
 ### ✅ La electroválvula TOYI volvió al firmware (2026-10-07)
 
