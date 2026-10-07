@@ -21,7 +21,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 
 | Dónde | Qué es |
 |---|---|
-| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.11`. FreeRTOS, la consola, el I2C, el INA con su riel, el RS485, la microSD, el ADC y el contador de pulsos |
+| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.12`. FreeRTOS, la consola, el I2C, el INA con su riel, el RS485, la microSD, el ADC, el contador de pulsos y la válvula TOYI |
 | rama `main` | el firmware completo `0.0.78` más `PATRON_CONSUMO` |
 | tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
 | `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
@@ -41,6 +41,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | **`0.0.9`** | ⭐ **ADC1**: `VREFINT` midiendo, y el reposo intacto (⏳ sin el divisor poblado) | **3 µA** |
 | **`0.0.10`** | ⭐ **Contador de pulsos CNT0 por EXTI**: cuenta, y el pin sin pull | **6 µA** |
 | **`0.0.11`** | ⭐ **`EN_PWR_SENS420`**: el riel de la fuente lineal de los sensores | **6 µA** |
+| **`0.0.12`** | ⭐ **Electroválvula TOYI**: abre y cierra, con los 10 s del AVR | **6 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -186,6 +187,7 @@ tiene el perfil separado por componente:**
 | + divisor de 12 V, su TPS22810 y el TLV8801 | ⭐ **6 µA** | nada medible |
 | + el contador de pulsos (opto VO618A, filtro y 74AUP2G17) | ⭐ **6 µA** | nada medible **con el contacto abierto** — ver abajo |
 | + `EN_PWR_SENS420`, la fuente lineal de los sensores | ⭐ **6 µA** | nada medible **con el riel apagado** |
+| + la electroválvula TOYI (TPS22810 + servo) | ⭐ **6 µA** | nada medible **en reposo**: el load switch cortado y los dos pines en 0 |
 
 ⭐ **Y el total coincide con los 6 µA que medía la placa ORIGINAL con todo poblado** (`v0.0.13`), así
 que el diseño es repetible y el número no era una casualidad de aquella placa.
@@ -297,24 +299,22 @@ Apagándolo y reponiéndolo con sus 25 µs de arranque, la medida se estabilizó
 esté poblado. ⚠ Cuando se pueble: **56K arriba, 10K abajo** — el error de invertirlas ya se cometió
 una vez y clava el nodo en `VDDA + 0,77` por el clamp del TLV8801.
 
-### 🔨 La electroválvula TOYI volvió al firmware (2026-10-06) — ⏳ sin cerrar la etapa
+### ✅ La electroválvula TOYI volvió al firmware (2026-10-07)
 
 `drv_valvula.{h,c}` copiados **tal cual** de la referencia (dependen sólo de `main.h` y FreeRTOS) más
 el comando `ev`. PA6 `EN_EV_TOYI` y PA7 `CTL_EV_TOYI`, los dos `GPIO_Output` con *Output Level* en
 **Low**: el servo sin alimentar y la dirección en "cerrar", que es el seguro.
 
-✅ **Abre y cierra.** ⏳ **Pero la etapa NO está cerrada**, y por eso `FW_VERSION` sigue en `0.0.11`:
+✅ **Abre y cierra con los 10 s, y el reposo quedó en 6 µA** — que era el criterio de aceptación: es
+lo único que podría delatar un load switch a medio apagar o un pin que quedó en alto.
 
-| | |
-|---|---|
-| ⛔ **Con 5 s no llegaba a cerrar** | corregido a **10 s**, **sin reprobar todavía** |
-| **El reposo** | no se midió después del movimiento |
+⭐ **Con esto el repoblado llega hasta el último periférico salvo el modem.**
 
 #### ⛔⛔ Los 5 s eran la REGRESIÓN: el número del AVR estaba bien
 
 FWDLGX usa **10 s**. El 2026-08-18 se bajó a **5 s** con un dato nuevo de Pablo, y en banco el
-2026-10-06 **la válvula no llegó a cerrar**. O sea que lo que falló fue el cambio, no el valor
-heredado — y conviene dejarlo escrito, porque la nota vieja decía *"el tiempo pasa de 10 s a 5 s"* y
+2026-10-06 **la válvula no llegó a cerrar**; repuesto a 10 s, **cerró bien** (2026-10-07). O sea que
+lo que falló fue el cambio, no el valor heredado — y conviene dejarlo escrito, porque la nota vieja decía *"el tiempo pasa de 10 s a 5 s"* y
 el próximo que la lea pensaría que 5 era el valor afinado.
 
 ⭐ **La asimetría es la que decide, y por eso el número va generoso:**
