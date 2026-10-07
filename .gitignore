@@ -10,5 +10,14 @@
 # build: eso vive en .cproject, que SÍ se versiona.
 /.settings/
 
-# Backups de CubeMX
+# Backups y copias de CubeMX. ⭐ Hay UNA sola fuente de verdad del .ioc, y es
+# FWDLGARM_R1.ioc: cualquier otro .ioc en la raiz es una copia de respaldo
+# —"(Copiar)", "_DEBUG_0_0_9", lo que sea— y versionarla invita a editar el
+# archivo equivocado, que es el error que mas caro sale con CubeMX.
 *.ioc.bak
+/*.ioc
+!/FWDLGARM_R1.ioc
+
+# Respaldos de Pablo: copias de .elf/.ioc por version. No se versionan — el
+# repo ya guarda cada etapa en su tag, que es la forma de volver a "aca andaba".
+/Versiones/
