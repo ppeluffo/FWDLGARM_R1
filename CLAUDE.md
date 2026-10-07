@@ -1545,6 +1545,94 @@ los que corresponden.
 - Lo que queda por delante no es optimizar esto: es que cada periférico nuevo (modem, microSD, ADC)
   entre con su candado y su corte de alimentación, sin arruinar estos 5 µA.
 
+#### ⭐⭐ EL PRESUPUESTO DE ENERGÍA, y por qué el reposo ya no es la palanca (2026-10-07)
+
+Escenario de campo: **una presión de 4-20 mA que consume 10 mA**, modo **DISCRETO** con sesión cada
+**3 h**, poleo cada **5 min**, batería de litio **12 V / 10 Ah**.
+
+| | mAh/día | |
+|---|---|---|
+| reposo: micro **1,9 µA** + fuente **14 µA** = 15,9 µA | **0,38** | 4,7 % |
+| sensor: 288 poleos × 1,4 s × 10 mA | **1,12** | 13,7 % |
+| ⛔ **modem: 8 sesiones × 60 s × 50 mA — ESTIMADO** | **6,67** | **81,6 %** |
+| | **8,17** | → **2,7 años** al 80 % de la capacidad |
+
+⛔ **El 82 % del consumo es el modem, y es el único dato que NO está medido.** La autonomía es casi
+lineal con él, así que el número honesto es un **rango**:
+
+| El modem | Autonomía |
+|---|---|
+| 30 mA × 45 s | **4,9 años** |
+| 50 mA × 60 s (la estimación) | **2,7 años** |
+| 80 mA × 90 s | 1,3 años |
+| 150 mA × 120 s (red mala, muchos reintentos) | ⛔ **0,5 años** |
+
+##### ⭐⭐⭐ El micro es el 1,2 % del consumo: el trabajo de bajo consumo YA RINDIÓ
+
+Los 6 µA se miden **en el riel de 3,3 V**; vistos desde la batería a través de la fuente son
+**1,9 µA**. Y el reposo entero —micro **más** fuente— es el **4,7 %** del total.
+
+⚠ **Si mañana el micro consumiera CERO, la autonomía pasaría de 2,7 a 2,8 años.** El tickless, el
+`VREFEN`, los pull-ups del modem, dormir el INA — todo eso ya dio lo que podía dar. **No queda nada
+ahí**, y conviene saberlo antes de invertir tiempo en optimizar el firmware por consumo.
+
+⭐ Por eso **la fuente valió más que todo el firmware junto**: 210 µA → 60 → **14 µA** (medidos el
+2026-10-07). Era el componente que dominaba.
+
+##### Las palancas que SÍ quedan, en orden
+
+1. ⭐ **Medir el modem.** Es el 82 % y es **una sola medición**: el amperímetro en los 12 V durante
+   una sesión completa. En `DISCRETO` el equipo las hace solo cada 3 h, así que no hay que provocar
+   nada. Convierte un rango de 0,5-4,9 años en un número.
+2. ⭐ **`timerdial`.** De 3 h a 6 h lleva el total a 4,8 mAh/día → **4,5 años**. Es configuración.
+3. El **`sensors_pwr_settle_time`**: cada 100 ms que se recorte del asentamiento son ~0,08 mAh/día.
+4. ⚠ **La química de la batería.** Con ~3 años de vida la autodescarga compite: una LiFePO4 al
+   3 %/año son **0,3 Ah/año sobre 2,9 de consumo**, un 10 % extra; con LiSOCl₂ (<1 %/año) es
+   despreciable. **A partir de acá eso pesa más que cualquier cosa del firmware.**
+
+##### ⭐ Y el dato de diseño que esto deja a la vista
+
+El sensor de 10 mA cuesta **1,12 mAh/día** porque `EN_PWR_SENS420` lo alimenta **1,4 s cada 5
+minutos**: un ciclo de trabajo del **0,47 %**. Permanente serían **240 mAh/día** y la batería
+duraría **40 días**. ⭐ **Esa sola decisión —conmutar el riel de los sensores— vale veinte veces más
+que todo el trabajo de bajo consumo del micro.**
+
+#### ✅ ¿Se pueden mandar a fabricar PCBs nuevas? SÍ (decidido el 2026-10-07)
+
+Pregunta de Pablo: *"¿puede ocurrir que algo en el firmware genere un aumento de corriente que
+debamos modificar la PCB?"*. El riesgo es **bajo**, y por una razón concreta:
+
+⭐ **El consumo de reposo lo fija el hardware.** El firmware sólo puede dejar un periférico
+encendido — y eso **se arregla en firmware**: pasó dos veces (el `VREFEN` del ADC, el
+`drv_ina_init()` que no dormía el chip) y ninguna tocó la placa.
+
+⭐⭐ **Y todo el circuito de R001 ya fue ejercitado**: cada riel se encendió, se apagó y se midió el
+reposo después. **Lo que falta de firmware no enciende nada nuevo** — `tkCtlPres` usa
+`EN_PWR_CPRES` (validado con los rieles del RS485), `tkFlow` usa la válvula (validada en `0.0.12`) y
+el watchdog enciende el **LSI**, ~200 nA.
+
+**Los cambios que SÍ van en la revisión nueva:**
+
+| | |
+|---|---|
+| ⛔ **Sacar `R2`, `R6`, `R7`** | 90 µA. Probado desoldándolas; el manual dice que esos pines van al aire |
+| ⛔ **`Y1` con sus condensadores de carga** | sin ellos, **+332 ppm = 28 s/día** en la hora de las muestras |
+| ✅ Pines 21/22 de la SIM al aire | ya corregido en el esquemático del 2026-09-30 |
+| ⏳ PA4 sin función | sacarlo del ruteo |
+| ⏳ *opcional* | un **TVS (SMAJ18A)** en la entrada: el TPS22810 cuelga de la batería 24 h con el mismo máximo absoluto de 20 V que el chip que murió dos veces |
+
+##### ⚠ La ÚNICA duda que puede obligar a un cambio después de fabricar
+
+**El contador de pulsos.** `R40` drena **312 µA mientras el contacto esté cerrado**, y el ciclo de
+trabajo del reed **no está medido**: al 5 % son 16 µA, **al 50 % son 156 µA**.
+
+⭐ Se cierra **antes de fabricar** y sin firmware: un caudalímetro real o un reed girando y el
+osciloscopio midiendo cuánto queda cerrado el contacto respecto del período.
+
+⚠ Y si aprieta, **el arreglo no es subir `R40` a secas**: con `R42`/`C17` fija la carga del filtro, y
+a 100 K el techo cae de ~60 Hz a ~8 Hz. Es **rediseñar el filtro** — justo lo que no se quiere
+descubrir con las placas ya hechas.
+
 #### ⛔ El consumo de la placa nueva: qué está descartado (2026-09-29)
 
 Los ~390 µA de la placa nueva **despoblada** (micro + LED, sin la fuente en la medición). Lo que se
