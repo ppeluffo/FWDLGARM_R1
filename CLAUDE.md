@@ -968,6 +968,61 @@ misma clase de arruga que el `help` que mentía sobre el parser.
 | **El diálogo con el control de presión** | la consigna está deshabilitada y el dispositivo no está en el bus. Ya quedó validado el 2026-09-22 sobre el `0.0.78` |
 | ⚠ **El stack de `tkCPres` en su camino PROFUNDO** | los 124 de 512 palabras medidos son con la tarea **sin ejecutar una consigna**; `prvEjecutar()` → `drv_cpres` → `drv_modbus` es más hondo y no se ejercitó |
 
+#### ⚠ El riel de 3,3 V está BIEN, y de paso: el ADC no promedia (2026-10-09)
+
+Episodio que costó dos diagnósticos míos equivocados y vale como caso de método.
+
+**El síntoma**: `vin` informó **2,964 V** donde el 2026-10-05 informaba 3,125 V, y los frames de esa
+misma tanda traían `bt3v3=2.976` y `2.990`. Parecía que el riel había caído 160 mV.
+
+⭐ **El riel está perfecto**, y lo cierran tres instrumentos:
+
+| | |
+|---|---|
+| tester en `3V3RAIL` | **3,192 / 3,2 V** |
+| el equipo, por `VREFINT` (media de 6) | **3,176 V** — a **0,75 %** del tester |
+| el ST-LINK en `VAPP` (3 lecturas) | 2,91 V — ⚠ **su ADC es grosero**, no sirve de árbitro |
+
+⛔⛔ **Mis dos errores, y los dos son de concluir antes del dato:**
+
+1. Con una sola lectura mala calculé *"230 mV de caída entre el regulador y el micro = ~46 Ω en
+   serie"* y mandé a Pablo a buscar una soldadura fría. **Van cuatro veces que la ley de Ohm apunta
+   al lugar equivocado en este proyecto.** La regla ya está escrita y la volví a pisar: **acota, no
+   prueba**.
+2. Después, al ver `vin` 2,964 contra `vin raw` 3,162, dije que los dos caminos del comando
+   discrepaban. **También falso**: en la corrida siguiente `vin` dio 3,201. Era **dispersión entre
+   lecturas**, no dos caminos distintos.
+
+##### ⏳ El valor atípico NO se pudo reproducir
+
+Se descartó la hipótesis natural —*"la primera medida tras el arranque es la mala"*—: con Pablo
+reseteando y seis `vin` seguidos, **las seis dieron 3,160-3,191 y ninguna baja**.
+
+Lo que queda anotado, por si vuelve: el episodio **no fue una lectura suelta sino un período**
+—dos frames separados 72 s más un `vin`, los tres en ~2,97— que desapareció solo y no volvió. Esa
+forma es la pista: hay que buscar algo que dure, no un glitch.
+
+⚠ Su firma se parece a **la dispersión de 180 mV del buffer de `VREFINT` del 2026-10-02**, pero eso
+no se afirma: el arreglo del `VREFEN` está intacto y verificado (`DEEPPWD=1 VREFEN=0` al arrancar).
+
+##### ⭐ Y el hallazgo que SÍ quedó: `OversamplingMode = DISABLE`
+
+El ADC toma **UNA sola conversión** (`NbrOfConversion = 1`), y de ahí sale la dispersión medida:
+
+| | |
+|---|---|
+| 6 lecturas seguidas | **31 mV** pico a pico |
+| otra tanda de 6 | **74 mV** (±37 mV, 2,3 %) — ~24 cuentas |
+| trasladado al riel de 12 V | ±145 mV, que es la dispersión visible en `vin` (11,47 a 12,04) |
+
+⭐ **El STM32L4 tiene oversampling POR HARDWARE** —hasta 256×, con el corrimiento automático— y es
+gratis en software: dos campos del `.ioc`. El ruido baja con √N, así que **16× lleva los ±37 mV a
+±9 mV**. El costo en tiempo es despreciable: 16 conversiones de 43 µs son 0,7 ms contra los **10 ms
+de asentamiento** que el riel ya espera.
+
+⚠ Lo configura **CubeMX**, así que es de Pablo. Y conviene hacerlo antes de calibrar nada contra un
+calibrador: calibrar sobre un número que se mueve ±2,3 % es calibrar el ruido.
+
 #### ⛔⛔ EL WATCHDOG ESTÁ ESCRITO PERO DESCONECTADO (verificado el 2026-10-09)
 
 **Nadie llama a `drv_wdt_arrancar()` ni a `wdg_todas_sanas()`.** El `tkCtl.c` que quedó es el del
