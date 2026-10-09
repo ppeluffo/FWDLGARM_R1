@@ -16,11 +16,30 @@ static volatile bool bMatada = false;
 //------------------------------------------------------------------------------
 void tkFlow_orden( flow_orden_t eOrden )
 {
-    if( xHandle_tkFlow != NULL )
+    /*
+     * ⚠ SIN LA TAREA CREADA LA ORDEN NO SE PUEDE ATENDER, Y SE DICE.
+     *
+     * `ARRANCA_TKFLOW` esta en 0 desde el 2026-10-09 porque la valvula interna
+     * no se usa todavia (ver `main.c`), asi que `xHandle_tkFlow` queda en NULL.
+     * Pero `wan_frame.c` SI parsea los `VOPEN`/`VCLOSE` del servidor y llega
+     * hasta aca.
+     *
+     * Descartarla callado seria el unico lugar del firmware donde una orden
+     * remota se pierde sin dejar rastro — contra el criterio de todo lo demas:
+     * el centinela `-9999`, el `usInvalidos` del registro, la firma del RTC, el
+     * `estado_asumido` de la valvula. Si el servidor pide algo que el equipo no
+     * puede hacer, lo que corresponde es **que se vea en el log**.
+     */
+    if( xHandle_tkFlow == NULL )
     {
-        ( void ) xTaskNotify( xHandle_tkFlow, ( uint32_t ) eOrden,
-                              eSetValueWithOverwrite );
+        xprintf( "\r\n[!] el servidor pide %s de la valvula interna, "
+                 "y tkFlow NO esta corriendo: la orden se DESCARTA.\r\n",
+                 ( eOrden == flowORDEN_ABRIR ) ? "ABRIR" : "CERRAR" );
+        return;
     }
+
+    ( void ) xTaskNotify( xHandle_tkFlow, ( uint32_t ) eOrden,
+                          eSetValueWithOverwrite );
 }
 //------------------------------------------------------------------------------
 void tkFlow_pedir_kill( void )

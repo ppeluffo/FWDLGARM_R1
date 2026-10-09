@@ -871,9 +871,16 @@ static void prvEstadoTarea( const char *pcNombre, TaskHandle_t xHandle,
 {
     const char *pcEstado;
 
+    /*
+     * ⚠ Que el handle sea NULL tiene UNA sola causa posible, y conviene decirla:
+     * su `ARRANCA_TK*` de `main.c` esta en 0. No puede ser una creacion fallida
+     * —`xTaskCreateStatic()` que devuelve NULL cae en `Error_Handler()` y el
+     * equipo no llega nunca a este comando—, asi que un "NO EXISTE" pelado
+     * mandaria a buscar un problema que no existe.
+     */
     if( xHandle == NULL )
     {
-        xprintf( "  %-7s: NO EXISTE\r\n", pcNombre );
+        xprintf( "  %-7s: no arranca (su ARRANCA_TK* esta en 0)\r\n", pcNombre );
         return;
     }
 

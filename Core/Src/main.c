@@ -91,8 +91,26 @@
  */
 #define ARRANCA_TKSYS           1     /* el poleo                        */
 #define ARRANCA_TKWAN           1     /* la sesion con el servidor       */
-#define ARRANCA_TKCTLPRES       0     /* la doble consigna               */
-#define ARRANCA_TKFLOW          0     /* las ordenes VOPEN/VCLOSE        */
+#define ARRANCA_TKCTLPRES       1     /* la doble consigna               */
+#define ARRANCA_TKFLOW          0     /* la valvula TOYI  <- ver abajo   */
+
+/*
+ * ⛔ `tkFlow` QUEDA EN 0 A PROPOSITO (decision de Pablo, 2026-10-09):
+ * *"No vamos a implementar tkFlow. Queda para versiones posteriores porque por
+ * ahora no se usa."*
+ *
+ * Es el mismo criterio con el que se elimino flowcontrol el 2026-09-22 — no
+ * ensuciar el firmware con features que no se usan — pero aplicado mas suave:
+ * aca el codigo NO se borra, solo no se crea la tarea. Y eso alcanza, porque un
+ * `.c` linkeado cuya tarea nunca arranca no corre y no puede consumir.
+ *
+ * ⚠ La consecuencia hay que tenerla presente: `wan_frame.c` SI parsea los
+ * `VOPEN`/`VCLOSE` que manda el servidor y llama a `tkFlow_orden()`. Con la
+ * tarea sin crear esa orden no se puede atender, y por eso `tkFlow_orden()`
+ * AVISA por consola en vez de descartarla en silencio: una orden del servidor
+ * que se pierde sin dejar rastro es justo lo que este firmware no hace en
+ * ningun otro lado.
+ */
 
 #define PRUEBA_UART             0     /* 0 = operación normal */
 

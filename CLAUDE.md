@@ -21,7 +21,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 
 | Dónde | Qué es |
 |---|---|
-| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.14`: todo el hardware con driver **y la aplicación del `0.0.78` traída**, con las tareas todavía apagadas |
+| rama **`desde-cero`** | ⭐ **el firmware VIVO**, en `0.0.15`: todo el hardware con driver y **la aplicación del `0.0.78` corriendo** — polea, transmite y atiende consignas, con 6 µA de reposo |
 | rama `main` | el firmware completo `0.0.78` más `PATRON_CONSUMO` |
 | tag **`v0.0.78-referencia`** | ⭐ de acá se copia código al repoblar |
 | `Firmware/FWDLGARM_R1_REF_0.0.78/` | la misma cosa como copia de archivos, para leer sin cambiar de rama |
@@ -44,6 +44,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | **`0.0.12`** | ⭐ **Electroválvula TOYI**: abre y cierra, con los 10 s del AVR | **6 µA** |
 | **`0.0.13`** | ⭐ **Modem LTE**: UART4, energía y modo comando. ⛔ Costó sacar `R2`/`R6`/`R7` | **6 µA** |
 | **`0.0.14`** | ⭐ **La aplicación del `0.0.78`** (~9.900 líneas), tareas apagadas. Los 5 hashes | **6 µA** |
+| **`0.0.15`** | ⭐ **Las tareas ARRANCAN**: `tkSys` polea, `tkWan` transmite solo y `tkCtlPres` vigila la hora. ⛔ `tkFlow` no va; el watchdog sigue detenido | **6 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -913,6 +914,73 @@ Estaba anotado acá que eran `232 (VREFEN) + 90 (PA1 flotando) + 6`. **No puede 
 INA quedaba midiendo, el total pasaría de 600 µA. No bloquea nada —los dos extremos están medidos y
 acorralados— pero **no hay que darla por explicada**.
 
+#### ✅ TANDA 4 VALIDADA (`0.0.15`, 2026-10-09): arranca `tkCtlPres`, y `tkFlow` NO va
+
+```
+tkCtlPres arrancando (consignas deshabilitadas)      <- y ni una linea mas
+tkFlow : no arranca (su ARRANCA_TK* esta en 0)
+riel cpres   : apagado        bus/qmbus/cpres : los tres apagados
+pwr locks    : 0x00000001 (solo Sleep)   <- solo TERM, ninguno de periferico
+```
+
+⭐ **Reposo en 6 µA**, y con eso **el bisect de consumo cubre la aplicación ENTERA**: no queda una
+sola tarea de la fase 2 sin arrancar.
+
+⛔ **`tkFlow` queda en 0 por decisión de Pablo** (2026-10-09): *"No vamos a implementar tkFlow. Queda
+para versiones posteriores porque por ahora no se usa."* Es el criterio con el que se eliminó
+flowcontrol el 2026-09-22 —no ensuciar el firmware con features que no se usan— aplicado más suave:
+**el código no se borra, sólo no se crea la tarea**, y eso alcanza porque un `.c` linkeado cuya tarea
+nunca arranca no corre y no puede consumir.
+
+⭐ **Lo que hace que esta etapa valide algo y no sea un trámite**: con `bEnabled = false`,
+`prvConsignaDeArranque()` sale en su **primera línea**, así que la tarea arranca **sin hablarle al
+control de presión** —que no está en el bus— y sin prender su riel. O sea que el criterio de
+aceptación quedó limpio: lo único que se midió es **qué cuesta que la tarea exista**, y la respuesta
+es nada. Despierta cada 45 s: son 80 despertadas por hora contra las **7200** del destello de
+`tkCtl`.
+
+##### ⛔ `wan_frame` SÍ parsea los `VOPEN`/`VCLOSE`, y por eso `tkFlow_orden()` tuvo que avisar
+
+Este archivo decía en dos lugares que faltaba parsearlas. **Es falso**: están en
+`wan_frame.c:1356-1409` y llaman a `tkCtlPres_orden()` y `tkFlow_orden()`. Vinieron con el `0.0.78`.
+
+Y eso tiene una consecuencia que no se ve hasta mirar el handle: con `ARRANCA_TKFLOW = 0`,
+`xHandle_tkFlow` queda en `NULL` y la versión original de `tkFlow_orden()` **descartaba la orden en
+silencio**. Sería el único lugar del firmware donde una orden remota se pierde sin dejar rastro —
+contra el criterio de todo lo demás: el centinela `-9999`, el `usInvalidos`, la firma del RTC, el
+`estado_asumido`. Ahora **avisa por consola**.
+
+⚠ **Las órdenes puntuales del servidor a `tkCtlPres` (`EXT_V0/V1_*`) se atienden SIEMPRE**, estén las
+consignas habilitadas o no — son órdenes, no parte del servicio horario. O sea que con esta tanda
+arrancada **el servidor puede mover las válvulas del control de presión**.
+
+##### ℹ️ Y de yapa, `status` dejó de dar un diagnóstico ambiguo
+
+Decía `NO EXISTE` para una tarea sin handle, y eso se lee como *"falló la creación"*. **No puede
+ser**: un `xTaskCreateStatic()` que devuelve `NULL` cae en `Error_Handler()` y el equipo no llega
+nunca a ese comando, así que la única causa posible es su `ARRANCA_TK*` en 0. Ahora lo dice. Es la
+misma clase de arruga que el `help` que mentía sobre el parser.
+
+##### ⏳ Lo que esta tanda NO probó
+
+| | |
+|---|---|
+| **El diálogo con el control de presión** | la consigna está deshabilitada y el dispositivo no está en el bus. Ya quedó validado el 2026-09-22 sobre el `0.0.78` |
+| ⚠ **El stack de `tkCPres` en su camino PROFUNDO** | los 124 de 512 palabras medidos son con la tarea **sin ejecutar una consigna**; `prvEjecutar()` → `drv_cpres` → `drv_modbus` es más hondo y no se ejercitó |
+
+#### ⛔⛔ EL WATCHDOG ESTÁ ESCRITO PERO DESCONECTADO (verificado el 2026-10-09)
+
+**Nadie llama a `drv_wdt_arrancar()` ni a `wdg_todas_sanas()`.** El `tkCtl.c` que quedó es el del
+repoblado (135 líneas, sin nada de `wdg`); el de la referencia sí los tiene (`tkCtl.c:49` y `:95`).
+
+⭐ **Y el estado intermedio es seguro, lo cual no era obvio**: las tareas ya llaman `wdg_registrar()`
+y `wdg_kick()`, así que **llenan la tabla y nadie la juzga**. El IWDG nunca arranca, así que no puede
+resetear nada. `status` lo dice en una línea: `watchdog : ⛔ DETENIDO`.
+
+⚠ Es el mismo patrón que costó los 366 µA de la tanda 1 —**un init que falta no rompe el link**— pero
+esta vez el que falta deja un mecanismo inerte en vez de un periférico midiendo. Engancharlo son ~25
+líneas de `tkCtl`, y es la tanda 5.
+
 ### El plan, en tres tandas
 
 El criterio no es ritual: **sólo hay dos formas de que el software mueva el reposo** —un candado
@@ -924,6 +992,11 @@ que son **µA** y no tiene ningún otro síntoma—.
 | **1** | `cfg_*`, `cfg_hash`, `wan_frame`, `fs_datos`, `drv_modbus`+`modbus`, `caudal` | ⭐ **No**: software puro sobre drivers validados |
 | **2** | `tkSys`, `fs_sd`+FatFs, `tkCtlPres`, `tkWan`, `tkFlow` | **Sí** — prenden rieles y el modem |
 | **3** | `wdg` + `drv_wdt` | **Sí**, y además nunca se validó en banco |
+
+⭐ **La tanda 2 se partió en tres al ejecutarla** —una tarea por bajada, que es lo que el bisect
+pedía—: `tkSys` (tanda 2), `tkWan` (tanda 3) y `tkCtlPres` (tanda 4), **todas en 6 µA**. `tkFlow`
+quedó afuera por decisión de Pablo. O sea que lo único pendiente del plan es el watchdog, que acá
+figura como tanda 3 y en los hechos es **la tanda 5**.
 
 ⚠ **El watchdog va último y NO es "traer lo que ya teníamos"**: el `0.0.78` lo tiene marcado como
 *escrito, sin probar*. Y una vez arrancado **el IWDG no se puede parar**: un falso positivo deja al
@@ -4892,6 +4965,9 @@ datos. La infraestructura está —`tkCtlPres_orden()` las recibe por notificaci
 el AVR para que `tkWan` no se bloquee 45 s en medio de una sesión— pero **falta parsearlas en
 `wan_frame`**. Entran después de validar la consigna, que es lo que se puede probar hoy.
 
+> ✅ **CORRECCIÓN (2026-10-09): ya están parseadas**, y vinieron con el `0.0.78` —
+> `wan_frame.c:1356-1409`—. Ver la tanda 4.
+
 ### Tres arreglos de la consola (Pablo, 2026-09-22)
 
 - **`modbus` y `cpres` no figuraban en el `help`.** Registrar un comando y agregarlo a la tabla de
@@ -5145,10 +5221,21 @@ hizo el equipo*, **no** para saber en qué estado está el dispositivo, que de h
 La **hora** de la última aplicación se informa porque importa: una consigna que falló hace diez horas
 no es lo mismo que una que falló recién.
 
-### ⏳ Lo que falta del paso 7
+### ✅ El paso 7 quedó COMPLETO (verificado el 2026-10-09)
 
-Las órdenes **`VOPEN`/`VCLOSE`/`EXT_V0/V1_*`** que el servidor manda en la respuesta a un frame de
-datos. `tkCtlPres_orden()` ya las recibe por notificación; **falta parsearlas en `wan_frame`**.
+Faltaban las órdenes **`VOPEN`/`VCLOSE`/`EXT_V0/V1_*`** que el servidor manda en la respuesta a un
+frame de datos. ✅ **Están, y vinieron con el `0.0.78`**: `wan_frame.c:1356-1409` las parsea y llama a
+`tkCtlPres_orden()` / `tkFlow_orden()`.
+
+⚠ Dos cosas que eso trae, y la segunda no es obvia:
+
+1. **Las órdenes puntuales se atienden estén las consignas habilitadas o no** — son órdenes, no parte
+   del servicio horario. O sea que con `tkCtlPres` arrancada **el servidor puede mover las válvulas**.
+2. ⛔ Con `ARRANCA_TKFLOW = 0` el handle de `tkFlow` es `NULL`, y `tkFlow_orden()` **descartaba la
+   orden en silencio**. Corregido: ahora avisa. Ver la tanda 4.
+
+⏳ **Lo que sigue sin ejercitarse es el camino completo**: que el servidor mande un `EXT_V0_OPEN` y el
+equipo mueva la válvula. Necesita el control de presión en el bus.
 
 ## ⛔ FLOWCONTROL: se implementó entero y se ELIMINÓ el mismo día (2026-09-22)
 
@@ -5651,7 +5738,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **6b** | Modbus: el enganche al poleo de `tkSys` | ✅ **VALIDADO el 2026-09-21** |
 | **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | ✅ **VALIDADO el 2026-09-22** |
 | ~~7b~~ | ~~`tkFlow`/flowcontrol~~ | ⛔ **ELIMINADO el 2026-09-22**: no se usa. Quedan sólo las órdenes `VOPEN`/`VCLOSE` |
-| **8** | **Watchdog cooperativo + IWDG** | 🔨 **escrito, sin probar en banco** (`0.0.74`) |
+| **8** | **Watchdog cooperativo + IWDG** | ⛔ **escrito y DESCONECTADO**: nadie llama `drv_wdt_arrancar()` ni juzga la tabla. Hoy es inerte |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo, **el período de `tkCtl`** | |
 
 ✅ Los modos `PWR_RTU` y `PWR_SILENT` **entraron el 2026-09-12** — ver la sección de los cinco modos.
