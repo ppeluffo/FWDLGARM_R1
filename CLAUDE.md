@@ -44,7 +44,7 @@ arrancó de nuevo, **poblando de a un periférico y midiendo el consumo en cada 
 | **`0.0.12`** | ⭐ **Electroválvula TOYI**: abre y cierra, con los 10 s del AVR | **6 µA** |
 | **`0.0.13`** | ⭐ **Modem LTE**: UART4, energía y modo comando. ⛔ Costó sacar `R2`/`R6`/`R7` | **6 µA** |
 | **`0.0.14`** | ⭐ **La aplicación del `0.0.78`** (~9.900 líneas), tareas apagadas. Los 5 hashes | **6 µA** |
-| **`0.0.15`** | ⭐ **Las tareas ARRANCAN**: `tkSys` polea, `tkWan` transmite solo y `tkCtlPres` vigila la hora. ⛔ `tkFlow` no va; el watchdog sigue detenido | **6 µA** |
+| **`0.0.15`** | ⭐ **Las tareas ARRANCAN**: `tkSys` polea, `tkWan` transmite solo y `tkCtlPres` vigila la hora. ⭐ Y el **oversampling 16×** del ADC: la dispersión cae 10×. ⛔ `tkFlow` no va; el watchdog sigue detenido | **6 µA** |
 
 ⭐ **El micro, el kernel y el reposo están limpios**, y de paso quedó medido lo que nunca se había
 podido separar: **el LED al 5 % de duty no aporta nada apreciable** —`0.0.1` con el LED destellando
@@ -1005,23 +1005,57 @@ forma es la pista: hay que buscar algo que dure, no un glitch.
 ⚠ Su firma se parece a **la dispersión de 180 mV del buffer de `VREFINT` del 2026-10-02**, pero eso
 no se afirma: el arreglo del `VREFEN` está intacto y verificado (`DEEPPWD=1 VREFEN=0` al arrancar).
 
-##### ⭐ Y el hallazgo que SÍ quedó: `OversamplingMode = DISABLE`
+##### ⭐⭐ Y LA CAUSA ERA RUIDO, NO EL REGULADOR: el oversampling lo bajó 10 veces
 
-El ADC toma **UNA sola conversión** (`NbrOfConversion = 1`), y de ahí sale la dispersión medida:
+El ADC tomaba **UNA sola conversión** (`OversamplingMode = DISABLE`, `NbrOfConversion = 1`). Pablo
+habilitó el **oversampling por hardware** en el `.ioc` y el resultado cierra el pendiente que el
+driver tenía anotado desde el 2026-10-02:
 
-| | |
-|---|---|
-| 6 lecturas seguidas | **31 mV** pico a pico |
-| otra tanda de 6 | **74 mV** (±37 mV, 2,3 %) — ~24 cuentas |
-| trasladado al riel de 12 V | ±145 mV, que es la dispersión visible en `vin` (11,47 a 12,04) |
+| | `VDDA` (n=12) | riel de 12 V |
+|---|---|---|
+| sin oversampling | rango **71 mV**, desv **23,5 mV** | rango **568 mV** |
+| ⭐ **con oversampling 16×** | rango **8 mV**, desv **2,4 mV** | rango **27 mV**, desv 9,7 mV |
+| | **10× mejor** | ⭐ **21× mejor** |
 
-⭐ **El STM32L4 tiene oversampling POR HARDWARE** —hasta 256×, con el corrimiento automático— y es
-gratis en software: dos campos del `.ioc`. El ruido baja con √N, así que **16× lleva los ±37 mV a
-±9 mV**. El costo en tiempo es despreciable: 16 conversiones de 43 µs son 0,7 ms contra los **10 ms
-de asentamiento** que el riel ya espera.
+⭐ **Y la media NO se movió**: 3166,2 → 3166,7 mV, medio milivoltio. Eso es lo que prueba que quitó
+**varianza sin sesgo**, y de paso que el `RightBitShift = 4` está bien puesto — con 16 conversiones
+de 12 bits el acumulador llega a 16 bits, así que **sin ese shift las medidas saldrían 16× erradas**
+y la media se habría corrido, no afinado.
 
-⚠ Lo configura **CubeMX**, así que es de Pablo. Y conviene hacerlo antes de calibrar nada contra un
-calibrador: calibrar sobre un número que se mueve ±2,3 % es calibrar el ruido.
+⛔⛔ **Y MI PREDICCIÓN FUE AL REVÉS, que es la parte que vale.** Dije que el oversampling **no** iba a
+servir, razonando que las 16 conversiones ocurren en 0,7 ms y comparten el mismo estado del regulador
+del ADC, así que promediarían un **offset constante**. Propuse en cambio subir `ADCVREG_STUP_US` de
+25 a 200 µs, y le dije a Pablo que no tocara CubeMX. **Él ya lo había hecho y preguntó si volvía
+atrás: deshacerlo habría sido el error.**
+
+El dato dice que era **ruido rápido** —el tipo de error que el promediado sí cancela— y no el
+arranque del regulador. ⭐ **La propuesta de los 200 µs queda RETIRADA**: la hipótesis está refutada
+y cambiar un número validado sin una razón es exactamente lo que este proyecto no hace.
+
+⚠ **El sesgo residual de −0,79 % contra el tester NO se corrige** (media 3167 contra 3192 mV). Está
+dentro de la tolerancia combinada de los dos instrumentos, y meterle un factor al driver lo
+esconderían donde nadie lo busca el día que cambie una placa — **la misma regla que el −0,23 % del
+INA3221**.
+
+⏳ **Lo que sigue sin explicarse**: el valor de **2,964 V** está a **8,5 desviaciones** de la
+dispersión vieja, así que no era sólo este ruido. ⭐ Pero ahora el instrumento es 10× mejor: si vuelve
+a aparecer, contra una desviación de 2,4 mV **va a salir como una anomalía gritada** en vez de
+perderse entre el ruido.
+
+##### ⚠ Y una trampa de verificación nueva: CubeMX reescribió `main.c` en CRLF
+
+La regeneración cambió el fin de línea y el `git diff` salió con **2828 líneas** cuando el cambio
+real eran **5**. En un proyecto cuya regla de oro es *"los campos del `.ioc` pueden mentir; el `.c`
+generado no"*, un diff inflado **esconde justamente lo que se vino a verificar**.
+
+```bash
+git diff --ignore-cr-at-eol Core/Src/main.c    # <- el cambio REAL
+```
+
+ℓ De paso quedó medido que el repo es mixto: **79 de 237** `.c`/`.h` tienen CRLF (los de la HAL de
+ST). `main.c` se normalizó a LF, que es como estaba. Si vuelve a pasar en cada regeneración, la
+solución de fondo es un `.gitattributes` — no se puso todavía porque normalizar el árbol entero es un
+cambio que hay que decidir, no colar.
 
 #### ⛔⛔ EL WATCHDOG ESTÁ ESCRITO PERO DESCONECTADO (verificado el 2026-10-09)
 
