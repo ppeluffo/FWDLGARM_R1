@@ -1229,6 +1229,46 @@ llegue al servidor como **`WDG=3`** (`wanRESET_IWDG`) — hoy informa `5`, que e
 cuelgue a propósito necesita un comando de prueba temporal: con el debugger no se puede, porque
 `drv_wdt_arrancar()` congela el IWDG con `__HAL_DBGMCU_FREEZE_IWDG()`.
 
+#### ⛔ LA MICROSD NO INICIALIZA, y el `R1 = 0x00` acota el sospechoso a DOS pines (2026-10-09)
+
+Apareció en la tanda 2 y se arrastró. Lo que hoy quedó **descartado uno por uno**:
+
+| | |
+|---|---|
+| ~~La tarjeta~~ | ✅ **sana**: Pablo la leyó y le **grabó un archivo** en la laptop. Y van **dos** tarjetas distintas, una virgen |
+| ~~El riel de 3,3 V~~ | ✅ **3,28 V** — era un **pote corrido** al manipular el PCB, ya reajustado |
+| ~~El firmware~~ | ✅ `MX_SPI3_Init()` y la lógica de `drv_sd.c` son **idénticos** al tag `v0.0.8-microsd`, de cuando la microSD **leía y escribía sectores** |
+| ~~Brownout~~ | ✅ ya no resetea: la tarjeta nueva no está en corto |
+
+⭐⭐ **Y el `R1` crudo descarta dos pines más, que es lo que no se podía saber antes:**
+
+```
+sd init
+  se cayo en : CMD0 (la tarjeta no contesta)
+  ultimo R1  : 0x00  <- contesta algo: el enlace SPI anda
+```
+
+| Señal | Qué dice el dato |
+|---|---|
+| **MISO** (PC11) | ✅ **anda** — llega un byte real; con la línea abierta se leería **`0xFF`** |
+| **CS** (PA15) | ✅ **anda** — la tarjeta está escuchando y contestando |
+| ⛔ **MOSI** (PC12) y **SCK** (PC10) | **el sospechoso que queda** |
+
+⭐ **Por qué `0x00` apunta ahí, y no es una corazonada**: `0x00` no es basura — es un **R1 válido** que significa *"comando aceptado, sin errores, y NO estoy en idle"*. El driver espera `0x01`
+(`R1_IDLE`) y recibe el mismo byte **sin ese bit**, diez veces seguidas. Eso es exactamente lo que
+contestaría una tarjeta que recibe un comando **bien formado pero que no es CMD0**, o sea un comando
+con un bit corrupto en el camino de ida. ⚠ Y SCK es menos probable que MOSI: con el reloj mal, la
+respuesta tampoco volvería coherente.
+
+⭐ **Sumado a la regla de siempre** —*"que algo funcionara antes y ahora no descarta el diseño: es
+contacto, no circuito"*— y a que **la placa se manipuló** para ajustar el pote, lo que corresponde es
+el **óhmetro en PC12 y PC10 contra el socket, con la placa sin alimentación**.
+
+⏳ **Y si la continuidad da bien, el segundo experimento son dos líneas**: dejar que el driver siga
+aunque CMD0 dé `0x00`, y mirar si el **CMD8 devuelve su patrón `0x01AA` intacto**. Ese patrón es un
+eco exacto, así que si vuelve bien MOSI y MISO están perfectos y el problema es otro; si vuelve
+corrido, confirma el bit malo. **Va después del óhmetro**, que no toca código validado.
+
 ### El plan, en tres tandas
 
 El criterio no es ritual: **sólo hay dos formas de que el software mueva el reposo** —un candado
