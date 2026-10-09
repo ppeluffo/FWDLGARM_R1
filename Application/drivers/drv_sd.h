@@ -149,6 +149,15 @@ bool drv_sd_arrancar( void );
 const char *drv_sd_paso_fallo( void );
 uint8_t     drv_sd_ultimo_r1( void );
 
+/*
+ * ⭐⭐ El byte leído con **CS en ALTO**, donde la tarjeta tiene el MISO en alta
+ * impedancia. Tiene que dar **`0xFF`**: eso dice que la línea descansa libre y
+ * que lo que conteste después SÍ es la tarjeta. Un **`0x00`** acá significa MISO
+ * **clavado en bajo**, y entonces el `R1` del CMD0 no es una respuesta sino el
+ * mismo cable.
+ */
+uint8_t     drv_sd_ocioso_cs_alto( void );
+
 sd_tipo_t   drv_sd_tipo( void );
 const char *drv_sd_tipo_texto( void );
 

@@ -2018,11 +2018,33 @@ static bool prvSdListo( void )
            distinto, y `R1 = 0xFF` es silencio en la línea, no una respuesta. */
         xprintf( "ERROR: la tarjeta no inicializo\r\n" );
         xprintf( "  se cayo en : %s\r\n", drv_sd_paso_fallo() );
-        xprintf( "  ultimo R1  : 0x%02X%s\r\n",
-                 ( unsigned ) drv_sd_ultimo_r1(),
-                 ( drv_sd_ultimo_r1() == 0xFFU ) ?
-                 "  <- 0xFF = NADIE contesta (linea en alto): SPI, CS, MISO o el riel de la tarjeta"
-                 : "  <- contesta algo: el enlace SPI anda" );
+        /* ⭐ PRIMERO el estado de la LINEA y despues lo que dijo la tarjeta: con
+           CS alto la tarjeta no maneja el MISO, asi que ese byte dice si el
+           cable esta libre. Si esta clavado, el R1 de abajo no significa nada. */
+        xprintf( "  con CS alto: 0x%02X%s\r\n",
+                 ( unsigned ) drv_sd_ocioso_cs_alto(),
+                 ( drv_sd_ocioso_cs_alto() == 0xFFU ) ?
+                 "  <- la linea descansa LIBRE: lo de abajo SI es la tarjeta"
+                 : "  <- ⛔ MISO CLAVADO: lo de abajo NO es la tarjeta, es el cable" );
+        /*
+         * ⚠ Este byte SOLO significa algo si la linea de arriba dio 0xFF. Con el
+         * MISO clavado, lo que se lee aca es el cable y no la tarjeta — y decir
+         * "el enlace anda" seria mentir sobre lo unico que se vino a medir. Es
+         * la regla del `help` que mentia sobre el parser.
+         */
+        if( drv_sd_ocioso_cs_alto() != 0xFFU )
+        {
+            xprintf( "  ultimo R1  : 0x%02X  <- NO se puede interpretar: la linea esta clavada\r\n",
+                     ( unsigned ) drv_sd_ultimo_r1() );
+        }
+        else
+        {
+            xprintf( "  ultimo R1  : 0x%02X%s\r\n",
+                     ( unsigned ) drv_sd_ultimo_r1(),
+                     ( drv_sd_ultimo_r1() == 0xFFU ) ?
+                     "  <- 0xFF = la tarjeta no contesta (pero la linea esta libre)"
+                     : "  <- la tarjeta SI contesta: el enlace anda en los dos sentidos" );
+        }
         return false;
     }
 

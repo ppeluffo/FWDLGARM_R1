@@ -1264,10 +1264,71 @@ respuesta tampoco volvería coherente.
 contacto, no circuito"*— y a que **la placa se manipuló** para ajustar el pote, lo que corresponde es
 el **óhmetro en PC12 y PC10 contra el socket, con la placa sin alimentación**.
 
-⏳ **Y si la continuidad da bien, el segundo experimento son dos líneas**: dejar que el driver siga
-aunque CMD0 dé `0x00`, y mirar si el **CMD8 devuelve su patrón `0x01AA` intacto**. Ese patrón es un
-eco exacto, así que si vuelve bien MOSI y MISO están perfectos y el problema es otro; si vuelve
-corrido, confirma el bit malo. **Va después del óhmetro**, que no toca código validado.
+##### ⛔⛔ Y EL `R1 = 0x00` NO PROBABA NADA: era el CABLE, no la tarjeta
+
+⚠ **Error de interpretación mío, y vale como regla.** De un `R1 = 0x00` concluí *"contesta algo, el
+enlace SPI anda"* — **y eso no se sigue**: `0xFF` es la firma de MISO **en alto** (o abierto, con su
+pull-up) y `0x00` la de MISO **en bajo**. Las dos son una línea clavada; sólo cambia el lado. Sobre
+esa conclusión mandé a Pablo a medir continuidad de dos pistas que no eran.
+
+⭐⭐ **El test que las separa es gratis y ya estaba en el driver**: los 10 bytes de los 74 clocks se
+mandan **con CS en ALTO**, donde la tarjeta tiene el MISO en alta impedancia. Ahí la lectura **tiene
+que dar `0xFF`** — y lo que se lee no es un dato de la tarjeta, es **el estado del cable**. Sólo
+había que mirarlo en vez de descartarlo:
+
+```
+sd init
+  con CS alto: 0x00  <- ⛔ MISO CLAVADO: lo de abajo NO es la tarjeta, es el cable
+  se cayo en : CMD0
+  ultimo R1  : 0x00
+```
+
+##### ⭐⭐⭐ La causa: la tarjeta NO TIENE ALIMENTACIÓN, y el micro lo delata
+
+Medido por Pablo con el riel "encendido" por firmware:
+
+| | |
+|---|---|
+| `VDD` del socket de la microSD | ⛔ **0 V** |
+| `EN_PWR_SD` | ⛔ **3,3 V** — y el SI2301 es canal P: **`1` APAGA** |
+
+Una tarjeta sin `VDD` tiene sus diodos de protección apuntando a un riel muerto, así que **clava sus
+pines en bajo** — exactamente el `0x00` de arriba. ⭐ Y explica los cuatro datos a la vez: la tarjeta
+sana, el MISO en bajo, `SD_DET` funcionando (es un contacto mecánico, no necesita VDD de la tarjeta)
+y que esto anduviera el 2026-10-02.
+
+⭐⭐ **Pero el firmware está bien, y los registros del micro lo prueban** (leídos por SWD):
+
+```
+GPIOB_MODER = 0x69F7A27F   ->  PB3 = 01 = SALIDA           ✅
+GPIOB_ODR   = 0x00000000   ->  bit3 = 0 = escribio BAJO    ✅
+GPIOB_IDR   = 0x000060D0   ->  bit3 = 0 = ⭐ EL PIN LEE BAJO
+GPIOB_PUPDR = 0x00000500   ->  sin pull interno            ✅
+DBGMCU_CR   = 0x00000000   ->  TRACE_IOEN = 0: el debug NO tomo PB3
+```
+
+⛔⛔ **El `IDR` es el nivel REAL de la pata**, y dice **0 V**; el tester midió **3,3 V** en la señal.
+**Los dos no pueden ser el mismo nodo**: entre la pata de PB3 y el gate del SI2301 el camino está
+interrumpido, o hay algo en serie.
+
+⭐ **Y eso saca al MOSFET de sospecha** —Pablo iba a desoldarlo— porque con el gate flotando su
+pull-up de 100 kΩ lo sube a 3,3 V solo, sin que el MOSFET tenga nada roto.
+
+⏳ **La medición que lo cierra**: continuidad entre **la pata de PB3 del micro** y **el gate del
+SI2301**, con la placa apagada. ⚠ Y falta saber **dónde apoyó la punta** Pablo: si fue en el gate, la
+pista está abierta; si fue en la pata del micro, el sospechoso es la soldadura de esa pata —el micro
+tira a 0 por dentro y la pata no toca el pad—.
+
+⭐ **La regla que lo predijo, y van tres veces**: *funcionaba antes y ahora no ⇒ es contacto, no
+circuito*. La placa se manipuló para ajustar el pote del riel.
+
+##### ⭐ Y `TRACE_IOEN` queda descartado, pero conviene saber que existe
+
+`PB3` es **`JTDO/TRACESWO`**, así que el bit `TRACE_IOEN` de `DBGMCU_CR` se lo puede quitar al GPIO
+**sin importar cómo esté configurado el pin** — y CubeProgrammer escribe ese registro al conectar
+(es el `Debug in Low Power mode enabled` que informa). Acá está en **0**, así que no es la causa;
+pero es el primer lugar a mirar si alguna vez `EN_PWR_SD` deja de responder con el ST-LINK
+enchufado.
 
 ### El plan, en tres tandas
 

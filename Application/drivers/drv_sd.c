@@ -440,8 +440,14 @@ bool drv_sd_presente( void )
  * `mb_result_t` de Modbus: buscar el dato que CIERRA el diagnóstico en vez de
  * acumular síntomas.
  */
-static const char *pcPasoFallo = "(no se intento)";
-static uint8_t     ucUltimoR1  = 0xFFU;
+static const char *pcPasoFallo    = "(no se intento)";
+static uint8_t     ucUltimoR1     = 0xFFU;
+static uint8_t     ucOciosoCsAlto = 0xFFU;
+
+uint8_t drv_sd_ocioso_cs_alto( void )
+{
+    return ucOciosoCsAlto;
+}
 
 const char *drv_sd_paso_fallo( void )
 {
@@ -479,7 +485,31 @@ bool drv_sd_arrancar( void )
     prvCsAlto();
     for( uint32_t i = 0U; i < 10U; i++ )
     {
-        ( void ) prvXfer( 0xFFU );
+        uint8_t ucOcioso = prvXfer( 0xFFU );
+
+        /*
+         * ⭐⭐ LO QUE SE LEE ACÁ SEPARA "LA TARJETA DICE" DE "LA LÍNEA ESTÁ
+         * CLAVADA", y es la única ventana donde se puede saber.
+         *
+         * Con **CS en alto** la tarjeta tiene el MISO en alta impedancia, así que
+         * esto **tiene que dar `0xFF`** por el reposo de la línea. Lo que se lea
+         * acá no es un dato de la tarjeta: es el estado del cable.
+         *
+         *   0xFF  la línea descansa en alto -> libre. Lo que conteste después
+         *         SÍ es la tarjeta hablando
+         *   0x00  ⛔ MISO **clavado en bajo** (corto a GND, o la tarjeta sin
+         *         soltar la línea): entonces el `R1 = 0x00` del CMD0 **no es una
+         *         respuesta**, es el mismo cable
+         *   otro  ruido o un desfase de bits en el SPI
+         *
+         * ⚠ Se puso el 2026-10-09 porque de un `R1 = 0x00` yo había concluido
+         * *"contesta algo, el enlace anda"*, y eso **no se sigue**: `0x00` y
+         * `0xFF` son las dos firmas de una línea clavada, sólo cambia el lado.
+         */
+        if( i == 0U )
+        {
+            ucOciosoCsAlto = ucOcioso;
+        }
     }
 
     prvCsBajo();
