@@ -1032,15 +1032,48 @@ El dato dice que era **ruido rápido** —el tipo de error que el promediado sí
 arranque del regulador. ⭐ **La propuesta de los 200 µs queda RETIRADA**: la hipótesis está refutada
 y cambiar un número validado sin una razón es exactamente lo que este proyecto no hace.
 
-⚠ **El sesgo residual de −0,79 % contra el tester NO se corrige** (media 3167 contra 3192 mV). Está
-dentro de la tolerancia combinada de los dos instrumentos, y meterle un factor al driver lo
-esconderían donde nadie lo busca el día que cambie una placa — **la misma regla que el −0,23 % del
-INA3221**.
+##### ⭐⭐ Y NO HABÍA NINGÚN SESGO: el ADC mide al 0,1 %, y el RIEL es el que se mueve
 
-⏳ **Lo que sigue sin explicarse**: el valor de **2,964 V** está a **8,5 desviaciones** de la
-dispersión vieja, así que no era sólo este ruido. ⭐ Pero ahora el instrumento es 10× mejor: si vuelve
-a aparecer, contra una desviación de 2,4 mV **va a salir como una anomalía gritada** en vez de
-perderse entre el ruido.
+Acá estuvo anotado un *"sesgo residual de −0,79 % que no se corrige"*. **No existe.** Lo que había
+era que el tester y el ADC se medían **en momentos distintos**, con el riel en valores distintos.
+Medidos a la vez (Pablo, 2026-10-09):
+
+| | tester | el equipo, por `VREFINT` | |
+|---|---|---|---|
+| riel de 3,3 V | **2,987 V** | **2,990 V** | ⭐ **3 mV — 0,1 %** |
+| riel de 12 V | 11,92 V | 11,899 V | 21 mV — 0,18 % |
+
+⭐ **O sea que `VREFINT` + oversampling es un instrumento del 0,1 % sin un solo componente externo**,
+y mejor que el circuito que la placa trae para esto (divisor 56K/56K + TLV8801), que acumula la
+tolerancia de dos resistencias más el offset del operacional.
+
+⛔⛔ **Y LO QUE SE MUEVE ES EL RIEL: 3,192 → 2,987 V entre dos arranques, 205 mV (6,4 %).**
+
+Así se demostró, y la firma es bonita porque **el propio ADC la delata**:
+
+```
+              antes    ahora    cambio
+VREFINT       1567     1659     +5,87 %
+IN15          2331     2473     +6,09 %      <- las DOS, en la MISMA proporcion
+```
+
+Dos cuentas que suben proporcionalmente sólo lo hace **una referencia que baja** — y la referencia
+del ADC *es* `VDDA`. ⭐ Y de paso explica por qué **la medida de 12 V no se movió**: es una **razón
+entre dos canales del mismo ADC**, así que el error de escala se cancela solo. La de `VDDA` es
+absoluta y no.
+
+⚠ **El equipo funciona perfecto en 2,99 V** (el rango del L4 es 1,71-3,6) y el flasheo tampoco corre
+riesgo —el problema conocido es la tensión **alta**—. Pero **un riel que se mueve 205 mV entre
+arranques hay que entenderlo antes de fabricar PCBs**, que es justo lo que Pablo preguntó.
+
+⏳ **El sospechoso con correlación temporal es la microSD**: las 12 lecturas de 3,17 fueron con
+`no hay tarjeta (SD_DET en alto)`, y las de 2,99 con una tarjeta puesta que **no inicializa**
+(`CMD0/ACMD41`) — la misma que causó el brownout del 2026-10-07. ⚠ No hay mecanismo obvio: el riel
+de la SD está **apagado** y `prvPinesBus()` deja sus pines en analógico. **El experimento es sacarla
+y volver a medir** — una variable por vez.
+
+⭐ **Y la lección que deja**: el equipo **detectó un cambio real de hardware que nadie había notado**,
+y `bt3v3` lo está reportando al servidor. Para eso sirve medir el riel propio.
 
 ##### ⚠ Y una trampa de verificación nueva: CubeMX reescribió `main.c` en CRLF
 
