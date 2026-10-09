@@ -167,7 +167,7 @@ void Error_Handler(void);
  * versión se olvida de subir; la fecha de compilación no miente nunca.
  */
 #define FW_NOMBRE              "FWDLGARM_R1"   /* el del banner, NO el del frame */
-#define FW_VERSION             "0.0.15"
+#define FW_VERSION             "0.0.16"
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*
@@ -200,7 +200,7 @@ void Error_Handler(void);
  * —y con `mode=UR` el SWD toma al micro antes de que ejecute una instrucción,
  * así que ni corre—.
  */
-#define ARRANCA_WDG            0     /* 0 = el perro NO se arranca */
+#define ARRANCA_WDG            1     /* 0 = el perro NO se arranca */
 
 /*
  * ⚠ REGLA: la versión SUBE CUANDO ALGO QUEDA FUNCIONANDO (Pablo, 2026-09-30):

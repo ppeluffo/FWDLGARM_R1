@@ -1160,9 +1160,31 @@ Con `ARRANCA_WDG` en 0 **y** en 1, y con los símbolos verificados en el binario
 (`drv_wdt_arrancar`, `drv_wdt_kick`, `wdg_todas_sanas`, `prvJuzgar`). **La variante que no se compila
 es justo la que esconde errores**, y acá el `#if` hace que la mitad del código no se mire.
 
-⏳ **Lo que falta es banco**: que el equipo NO se resetee en operación normal (el riesgo principal),
-que SÍ lo haga ante un cuelgue de verdad, y que la causa llegue al servidor como **`WDG=3`**
-(`wanRESET_IWDG`) — hoy informa `5`, que es `BOR`.
+##### ✅ VALIDADO EN BANCO (`0.0.16`, 2026-10-09), incluido el caso de campo
+
+```
+WDG:: perro de hardware (IWDG): CORRIENDO, ventana ~32768 ms
+tick      : 249733 / 512 = 487,8 s de corrida continua   <- casi 15 ventanas
+reset por : BOR/POR PIN                                  <- el de Pablo, NO IWDG
+```
+
+| Criterio | Resultado |
+|---|---|
+| El perro arranca | ✅ `CORRIENDO` |
+| ⭐ **No resetea un equipo sano** | ✅ 15 ventanas y el reset reason sigue siendo el del operador |
+| ⭐ **Sobrevive DURMIENDO en Stop 2** | ✅ 5 min sin terminal, que es el caso de campo: con `IWDG_STOP = 1` el perro contaba todo ese rato |
+| ⭐ **Sobrevive una sesión del modem** | ✅ arrancó sin terminal, se conectó, transmitió y volvió a dormir |
+| El reposo | ⭐ **6 µA** — el LSI del perro (~200 nA) no se mide |
+| El tick | ✅ exacto al **0,2 %** contra el RTC |
+
+⭐ **Y el test del sueño salió gratis**: es la misma acción que Pablo ya hace para medir el consumo
+—desconectar la terminal, esperar, medir—. Una sola operación probó el caso de campo **y** que el
+perro no cuesta nada de consumo.
+
+⏳ **Lo que sigue sin probar**: que el perro SÍ resetee ante un cuelgue de verdad, y que la causa
+llegue al servidor como **`WDG=3`** (`wanRESET_IWDG`) — hoy informa `5`, que es `BOR`. ⚠ Provocar un
+cuelgue a propósito necesita un comando de prueba temporal: con el debugger no se puede, porque
+`drv_wdt_arrancar()` congela el IWDG con `__HAL_DBGMCU_FREEZE_IWDG()`.
 
 ### El plan, en tres tandas
 
