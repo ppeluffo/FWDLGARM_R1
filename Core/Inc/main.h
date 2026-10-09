@@ -171,13 +171,49 @@ void Error_Handler(void);
 #define FW_FECHA               __DATE__ " " __TIME__
 
 /*
- * ⚠ REGLA: la versión SUBE EN CADA ENTREGA A BANCO (Pablo, 2026-09-08).
+ * ---------------------------------------------------------------------------
+ * ⛔ EL WATCHDOG ARRANCA O NO ARRANCA — la tanda 5 del bisect
+ * ---------------------------------------------------------------------------
+ * En 0 el perro **no se arranca y nadie juzga la tabla**: las tareas siguen
+ * llamando a `wdg_registrar()` y `wdg_kick()`, así que la tabla se llena y el
+ * comando `wdg` la muestra, pero el IWDG nunca se enciende y **no puede
+ * resetear nada**. O sea que con esto en 0 el firmware se comporta EXACTAMENTE
+ * como antes de la tanda 5.
  *
- * Es lo que permite decir sin ambigüedad qué firmware se probó, y era un
- * problema real: hasta hoy este define decía "0.0.8" mientras los tags de git
- * iban por `v0.0.14`. Se puso al día en 0.0.15 —continuando la serie de los
- * tags, para que no haya DOS numeraciones conviviendo— y de acá en más va de a
- * uno por cada binario que se entrega.
+ * ⚠ Vive acá y no en `main.c` con los `ARRANCA_TK*` porque lo necesitan DOS
+ * unidades de compilación: `main.c` no lo usa, pero `tkCtl.c` sí —es quien
+ * arranca el perro y lo patea—. Un `#define` en `main.c` no lo vería, y el `#if`
+ * se leería como 0 **sin decir nada**: la misma trampa que ya mordió dos veces
+ * en este proyecto.
+ *
+ * ⛔ Y por qué tiene interruptor propio, a diferencia de los demás módulos: una
+ * vez arrancado **el IWDG no se puede parar hasta el próximo reset**. Un falso
+ * positivo deja al equipo en ciclo de reset, que desde afuera se parece a "la
+ * placa no arranca" —y en campo, a un equipo muerto, porque no transmite—. Con
+ * el interruptor, la bajada que TRAE el código no cambia nada y encenderlo es
+ * una bajada aparte: una variable por vez.
+ *
+ * ✅ Lo que NO es un riesgo, y está verificado en esta placa con
+ * `-ob displ` (2026-10-09): `IWDG_SW = 1`, o sea que el perro **arranca sólo
+ * cuando el firmware escribe su key**. Tras cada reset queda detenido, así que
+ * el chip nunca puede quedar reseteándose por sí mismo y **se reflashea siempre**
+ * —y con `mode=UR` el SWD toma al micro antes de que ejecute una instrucción,
+ * así que ni corre—.
+ */
+#define ARRANCA_WDG            0     /* 0 = el perro NO se arranca */
+
+/*
+ * ⚠ REGLA: la versión SUBE CUANDO ALGO QUEDA FUNCIONANDO (Pablo, 2026-09-30):
+ * *"No avances de version hasta que lo que hagamos este funcionando."*
+ *
+ * ⛔ Antes decía *"sube en cada entrega a banco"*, y el rearranque demostró por
+ * qué estaba mal: se bajaron `0.0.1` a `0.0.4` y **sólo la primera funcionaba**.
+ * Con cuatro números para un solo escalón validado, la versión dejó de decir
+ * nada.
+ *
+ * ⭐ El número marca HITOS; los binarios intermedios los distingue `FW_FECHA`,
+ * que sale del compilador y no se puede olvidar de actualizar. Mientras se itera
+ * sobre un escalón, esto **queda quieto** en el último hito validado.
  *
  * Vamos por `0.0.X` durante toda la fase 2; **cuando la aplicación esté
  * terminada, la versión pasa a `1.0.0`**.

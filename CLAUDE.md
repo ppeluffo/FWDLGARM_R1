@@ -1070,6 +1070,100 @@ resetear nada. `status` lo dice en una línea: `watchdog : ⛔ DETENIDO`.
 esta vez el que falta deja un mecanismo inerte en vez de un periférico midiendo. Engancharlo son ~25
 líneas de `tkCtl`, y es la tanda 5.
 
+#### 🔨 TANDA 5: el watchdog se enganchó, con interruptor propio (2026-10-09)
+
+El juez volvió a `tkCtl` —`drv_wdt_arrancar()` y `prvJuzgar()`, de la referencia— pero **detrás de
+`ARRANCA_WDG`**, que vive en **`main.h`** y no en `main.c` con los `ARRANCA_TK*`.
+
+⚠ **Está en `main.h` porque lo necesitan DOS unidades de compilación**: `main.c` no lo usa, pero
+`tkCtl.c` sí. Y eso trajo la trampa de siempre: en `tkCtl.c` el `#include "main.h"` estaba **al
+final** de los includes, así que un `#if ( ARRANCA_WDG == 1 )` puesto antes **se habría leído como 0
+sin decir nada**. Hubo que mover `main.h` arriba. Es la tercera vez en el proyecto, y una de las
+anteriores fue también con un `#include`.
+
+⛔ **Por qué tiene interruptor propio y los demás módulos no**: una vez arrancado **el IWDG no se
+puede parar hasta el próximo reset**. Un falso positivo deja al equipo en ciclo de reset — que desde
+afuera se parece a *"la placa no arranca"* y en campo a un equipo muerto, porque no transmite. Con el
+interruptor, la bajada que **trae** el código no cambia nada y encenderlo es una bajada aparte.
+
+##### ✅ Lo que los option bytes de ESTA placa confirman (`-ob displ`, 2026-10-09)
+
+```
+IWDG_SW    : 0x1 (Software independent watchdog)    <- el perro NO arranca solo
+IWDG_STOP  : 0x1 (IWDG counter active in stop mode)
+BOR_LEV    : 0x0 (~1,7 V)                           <- el pendiente conocido, sin decidir
+```
+
+⭐ **`IWDG_SW = 1` contesta la pregunta de Pablo** —*"¿no se le podría volver a bajar otro
+firmware?"*—: tras cada reset el perro queda **detenido** hasta que el firmware escriba su key, así
+que el chip nunca puede quedar reseteándose por sí mismo. Y con `mode=UR` el SWD **gana la carrera
+por construcción**: mantiene NRST asertado mientras conecta, así que toma al micro antes de que
+ejecute una instrucción — y si el firmware no corre, el perro no cuenta.
+
+⚠ **"No se puede parar" significa que el FIRMWARE no lo puede desarmar**, no que quede armado para
+siempre. No es un estado persistente del chip: es un estado de *esa* corrida.
+
+⛔⛔ **Y `IWDG_STOP = 1` es el dato que no había considerado: el perro CUENTA durante el Stop 2**,
+donde este firmware vive el 98 % del tiempo. Es la configuración **correcta** —si se detuviera, un
+cuelgue con el micro dormido no se detectaría nunca— pero crea un acoplamiento nuevo:
+
+| | |
+|---|---|
+| ventana del IWDG | **32,8 s** (`(4095+1) × 256 / 32 kHz`) |
+| período de `tkCtl`, el único que patea | **5 s** → margen de **6,5×** |
+
+⚠ El pendiente del paso 9 propone subir el período de `tkCtl` justamente para ahorrar despertadas, y
+ahí **el techo pasa a ser duro, no una preferencia**. Por eso quedó un `_Static_assert`
+(`TKCTL_PERIOD_MS <= 15000U`) ⭐ **probado a propósito**: con 20000 el compilador falla con el
+mensaje. Un assert que nunca se vio disparar da falsa seguridad — es la lección del volcado de
+registros mal decodificado.
+
+##### ⭐⭐ El test de falso positivo se puede hacer SIN encender el perro
+
+Es el hallazgo de método de la etapa. El riesgo real no es que el perro no resetee: es que **resetee
+un equipo sano**. Y eso se mide sin correr ningún riesgo, porque **las tareas ya llaman a
+`wdg_registrar()` y `wdg_kick()` desde la tanda 1**: la tabla se llena igual y el comando `wdg`
+muestra el margen de cada una, con el IWDG detenido.
+
+```
+cmd>wdg
+WDG:: perro de hardware (IWDG): detenido
+      tkCmd      vigilada, le quedan 89875 ms
+      tkSys      vigilada, le quedan 82810 ms
+      tkWan      vigilada, le quedan 49888 ms      <- el mas apretado
+      tkCtlPres  vigilada, le quedan 57660 ms
+      tkFlow     sin registrar (no arranco todavia, o no se vigila)
+```
+
+⭐ **`tkFlow` sin registrar queda IGNORADA**, y eso no es suerte: `wdg_todas_sanas()` sólo juzga las
+que están en `wdgVIGILADA`, y la tabla es estática —arranca en `wdgSIN_REGISTRAR = 0`—. Si contara a
+todas las del enum, encender el perro con `ARRANCA_TKFLOW = 0` dejaría el equipo en ciclo de reset
+**en la primera vuelta**.
+
+⚠ **El caso más apretado es `tkWan`: trocea su espera en 60 s contra un plazo de 90**, así que el
+margen de diseño son **30 s**. Para vencerse, un `vTaskDelay( 60 s )` tendría que estirarse 30 s —
+improbable, porque **las seis tareas son de la misma prioridad** (`tskIDLE_PRIORITY + 1`) y ninguna
+puede dejar a otra sin CPU, pero es el número a vigilar.
+
+##### ✅ Los cuatro caminos de falso positivo, verificados uno por uno
+
+| | |
+|---|---|
+| `kill` desregistra | ✅ `wdg_stop_task()` **antes** del `vTaskSuspend()` en `tkWan`, `tkCtlPres` y `tkFlow`. Sin eso el perro resetearía el equipo **justo mientras el operador trabaja el módulo a mano** |
+| las esperas largas trocean y patean | ✅ `tkWan::prvEsperar()` corta en 60 s; `tkSys` y `tkCtlPres` patean en sus lazos |
+| los comandos que cambian el timeout de la consola | ✅ `sense` y `keys` lo devuelven a `TKCMD_MS_TIMEOUT_RX`, **no** a `portMAX_DELAY` |
+| ⚠ `lte bridge` | ✅ tiene `wdg_kick()` propio: es un lazo sin salida hasta un Ctrl-D, y es la herramienta que un técnico deja abierta mientras piensa |
+
+##### ⚠ Y se compilaron LAS DOS variantes del `#if`
+
+Con `ARRANCA_WDG` en 0 **y** en 1, y con los símbolos verificados en el binario
+(`drv_wdt_arrancar`, `drv_wdt_kick`, `wdg_todas_sanas`, `prvJuzgar`). **La variante que no se compila
+es justo la que esconde errores**, y acá el `#if` hace que la mitad del código no se mire.
+
+⏳ **Lo que falta es banco**: que el equipo NO se resetee en operación normal (el riesgo principal),
+que SÍ lo haga ante un cuelgue de verdad, y que la causa llegue al servidor como **`WDG=3`**
+(`wanRESET_IWDG`) — hoy informa `5`, que es `BOR`.
+
 ### El plan, en tres tandas
 
 El criterio no es ritual: **sólo hay dos formas de que el software mueva el reposo** —un candado

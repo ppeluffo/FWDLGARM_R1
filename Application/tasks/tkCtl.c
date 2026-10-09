@@ -5,11 +5,24 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * ⛔ `main.h` VA PRIMERO, y no es cosmético: de ahí sale `ARRANCA_WDG`, y los
+ * `#if` de este archivo lo consultan. Un `#if` sobre un `#define` que todavía no
+ * se vio se lee como **0 y compila el bloque equivocado sin decir nada** — ya
+ * pasó dos veces en este proyecto, una de ellas con un `#include`.
+ */
+#include "main.h"
+
 #include "tkCtl.h"
 #include "drv_term_sense.h"
 #include "drv_uart.h"
 #include "pwr_lock.h"
-#include "main.h"
+
+#if ( ARRANCA_WDG == 1 )
+#include "drv_wdt.h"
+#include "wdg.h"
+#include "frtos-io.h"
+#endif
 
 extern UART_HandleTypeDef huart1;
 
@@ -58,6 +71,30 @@ extern UART_HandleTypeDef huart1;
 #define TKCTL_PERIOD_MS     5000U
 #define TKCTL_LED_ON_MS       50U   /* 1 % de duty */
 
+#if ( ARRANCA_WDG == 1 )
+/*
+ * ⛔⛔ ESTE PERÍODO ES EL QUE PATEA EL IWDG, y su ventana son ~32,8 s.
+ *
+ * Verificado en esta placa con `-ob displ` (2026-10-09): **`IWDG_STOP = 1`**, o
+ * sea que el perro **sigue contando durante el Stop 2** — donde este firmware
+ * vive el 98 % del tiempo—. Así que no alcanza con que el equipo despierte: hay
+ * que **patear** dentro de la ventana, y el único que patea es esta vuelta.
+ *
+ * Con 5 s el margen es de **6,5×**. ⚠ Pero el pendiente del paso 9 propone subir
+ * este número justamente para ahorrar despertadas, y ahí deja de ser una
+ * preferencia: **el techo pasa a ser duro**. Por eso el assert — para que el día
+ * que alguien lo suba, lo diga el compilador y no el equipo reseteándose en
+ * campo.
+ */
+_Static_assert( TKCTL_PERIOD_MS <= 15000U,
+                "tkCtl patea el IWDG, cuya ventana son ~32,8 s: con un periodo "
+                "mayor el equipo se resetea solo. Ver drv_wdt.h antes de subirlo." );
+#endif
+
+#if ( ARRANCA_WDG == 1 )
+static void prvJuzgar( void );
+#endif
+
 TaskHandle_t xHandle_tkCtl;
 
 /* Memoria estática: la tarea no toca el heap. */
@@ -72,6 +109,23 @@ void tkCtl( void *pvParameters )
     /* Deja el candado sincronizado con el pin antes de la primera vuelta: si
        hay terminal enchufada al arrancar, no se duerme ni una vez. */
     drv_term_sense_init();
+
+#if ( ARRANCA_WDG == 1 )
+    /*
+     * ⭐ EL PERRO ARRANCA ACÁ Y NO EN `main()`.
+     *
+     * En `main()` contaría desde antes de que existiera ninguna tarea capaz de
+     * patearlo —que es justamente lo que obligaría a sacarlo de ahí si lo
+     * generara CubeMX, ver `drv_wdt.h`—. Acá el scheduler ya corre y la primera
+     * vuelta de este lazo patea enseguida.
+     *
+     * ⚠ No hace falta esperar a que las demás tareas se registren: una tarea sin
+     * registrar queda en `wdgSIN_REGISTRAR` y `wdg_todas_sanas()` **la ignora**.
+     * Eso es lo que hace que `tkFlow` —que hoy no arranca— no cuente como
+     * colgada, y lo mismo vale para el instante del arranque.
+     */
+    drv_wdt_arrancar();
+#endif
 
     for( ;; )
     {
@@ -129,7 +183,66 @@ void tkCtl( void *pvParameters )
         }
 #endif
 
+#if ( ARRANCA_WDG == 1 )
+        /*
+         * ⭐ El juicio va DESPUÉS del destello y del poleo, no antes: así el LED
+         * sigue latiendo mientras el equipo se está por resetear, y desde afuera
+         * se ve un reinicio limpio en vez de un LED que se queda quieto y
+         * después arranca. Es información para el que está mirando la placa.
+         */
+        prvJuzgar();
+#endif
+
         vTaskDelay( pdMS_TO_TICKS( TKCTL_PERIOD_MS - TKCTL_LED_ON_MS ) );
     }
 }
+//------------------------------------------------------------------------------
+#if ( ARRANCA_WDG == 1 )
+/*
+ * El veredicto del watchdog, una vez por vuelta.
+ *
+ * ⛔ **No hay ningún "resetear ahora" acá, y es a propósito**: cuando algo no
+ * cierra, esta función simplemente **deja de patear** y el IWDG resetea el micro
+ * por su cuenta. Un `NVIC_SystemReset()` explícito dependería de que esta misma
+ * tarea siga corriendo lo suficiente como para ejecutarlo — o sea, de
+ * exactamente lo que el watchdog no puede dar por supuesto.
+ *
+ * El otro motivo es de diagnóstico: el reset del IWDG deja su marca en
+ * `RCC_CSR.IWDGRSTF`, que **viaja al servidor en el campo `WDG`** del
+ * `CONF_BASE` (`wanRESET_IWDG`). Un reset por software se informaría como
+ * `SOFT`, indistinguible de un `reset` tipeado por un técnico en la consola — y
+ * en campo esa es toda la diferencia entre "se reinició solo" y "alguien lo
+ * reinició".
+ */
+static void prvJuzgar( void )
+{
+    /* Vueltas seguidas con alguna tarea vencida: para avisar UNA sola vez. */
+    static uint32_t ulVueltasEnFalta = 0UL;
+
+    const char *pcCulpable = NULL;
+
+    if( wdg_todas_sanas( &pcCulpable ) )
+    {
+        drv_wdt_kick();
+        ulVueltasEnFalta = 0UL;
+        return;
+    }
+
+    /*
+     * ⚠ El aviso sale UNA VEZ y después se cuenta, no se repite cada vuelta: son
+     * ~32 segundos de agonía, y a una línea por vuelta el primer mensaje —el
+     * único que dice QUIÉN fue— se iría de la pantalla empujado por los demás.
+     */
+    if( ulVueltasEnFalta == 0UL )
+    {
+        xprintf( "\r\n[X] WATCHDOG: '%s' se paso del plazo (%lu ms).\r\n",
+                 ( pcCulpable != NULL ) ? pcCulpable : "?",
+                 ( unsigned long ) WDG_PLAZO_MS );
+        xprintf( "    Dejo de patear el IWDG: el equipo se resetea en ~%lu s.\r\n",
+                 ( unsigned long ) ( drv_wdt_ventana_ms() / 1000UL ) );
+    }
+
+    ulVueltasEnFalta++;
+}
+#endif
 //------------------------------------------------------------------------------
