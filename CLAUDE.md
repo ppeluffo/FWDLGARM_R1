@@ -1066,11 +1066,21 @@ absoluta y no.
 riesgo —el problema conocido es la tensión **alta**—. Pero **un riel que se mueve 205 mV entre
 arranques hay que entenderlo antes de fabricar PCBs**, que es justo lo que Pablo preguntó.
 
-⏳ **El sospechoso con correlación temporal es la microSD**: las 12 lecturas de 3,17 fueron con
-`no hay tarjeta (SD_DET en alto)`, y las de 2,99 con una tarjeta puesta que **no inicializa**
-(`CMD0/ACMD41`) — la misma que causó el brownout del 2026-10-07. ⚠ No hay mecanismo obvio: el riel
-de la SD está **apagado** y `prvPinesBus()` deja sus pines en analógico. **El experimento es sacarla
-y volver a medir** — una variable por vez.
+✅ **RESUELTO, y era mecánico** (Pablo, 2026-10-09): *"El riel de 3V3 es ajustable. De manipular el
+PCB puede haberse corrido y por eso yo lo ajuste a 3.3V."* O sea que **no es un problema de diseño ni
+de deriva**: el pote se movió al trabajar sobre la placa. Reajustado, el equipo informa **3,306 V**.
+
+⛔⛔ **Pero deja un cambio para la revisión nueva de R001: el pote de 3V3 se reemplaza por una FIJA.**
+Es exactamente lo que ya está escrito para el riel de 3,8 V del modem —*"en producción el pote se
+reemplaza por una fija"*— y acá el episodio demuestra por qué:
+
+| | |
+|---|---|
+| ⛔ Un riel que se corre **sin que nadie lo note** | mandó a buscar una soldadura fría que no existía, y de paso puso en duda el ADC |
+| ⚠ Y la dirección importa | el problema conocido de esta placa es la tensión **ALTA**: a 3,45-3,59 V **falla el flasheo**, con el máximo absoluto en 3,6 V. Un pote que se corre hacia arriba llega ahí |
+
+⭐ **La lección de método**: el `bt3v3` que el equipo reporta **es el instrumento que lo detectó**, y
+coincidió con el tester al 0,1 %. Sin esa medida, un riel corrido sólo se nota cuando algo falla.
 
 ⭐ **Y la lección que deja**: el equipo **detectó un cambio real de hardware que nadie había notado**,
 y `bt3v3` lo está reportando al servidor. Para eso sirve medir el riel propio.
@@ -1930,6 +1940,7 @@ el watchdog enciende el **LSI**, ~200 nA.
 | ⛔ **`Y1` con sus condensadores de carga** | sin ellos, **+332 ppm = 28 s/día** en la hora de las muestras |
 | ✅ Pines 21/22 de la SIM al aire | ya corregido en el esquemático del 2026-09-30 |
 | ⏳ PA4 sin función | sacarlo del ruteo |
+| ⛔ **El pote del riel de 3V3 → una FIJA** | se corrió al manipular la placa el 2026-10-09 y nadie lo notó hasta que el ADC lo delató. ⚠ Hacia arriba llega a los 3,45-3,59 V que **hacen fallar el flasheo** |
 | ⏳ *opcional* | un **TVS (SMAJ18A)** en la entrada: el TPS22810 cuelga de la batería 24 h con el mismo máximo absoluto de 20 V que el chip que murió dos veces |
 
 ##### ⚠ La ÚNICA duda que puede obligar a un cambio después de fabricar

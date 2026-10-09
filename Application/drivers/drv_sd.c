@@ -421,14 +421,48 @@ bool drv_sd_presente( void )
     return ( HAL_GPIO_ReadPin( SD_DET_GPIO_Port, SD_DET_Pin ) == GPIO_PIN_RESET );
 }
 //------------------------------------------------------------------------------
+/*
+ * ⭐ DÓNDE SE CAYÓ EL ARRANQUE, para no diagnosticar a ciegas.
+ *
+ * Puesto el 2026-10-09, cuando DOS tarjetas distintas —una de ellas virgen— no
+ * inicializaron en esta placa y el comando sólo sabía decir *"la tarjeta no
+ * inicializo"*. Sin saber el paso, los sospechosos son todos a la vez; con el
+ * paso, cada falla acusa algo distinto:
+ *
+ *   CMD0    la tarjeta no contesta NADA  -> el SPI, el CS, el MISO, su riel
+ *   CMD8    contesta pero rechaza el rango de tension
+ *   ACMD41  contesta pero no sale de idle -> alimentacion marginal, tipicamente
+ *
+ * Y el `R1` crudo separa "no hay nadie" de "hay alguien que dice otra cosa":
+ * **`0xFF` es la línea en alto sin que nadie la maneje**, o sea silencio.
+ *
+ * Es el mismo criterio que el `lteESC_SIN_A` / `lteESC_SIN_OK` del modem y el
+ * `mb_result_t` de Modbus: buscar el dato que CIERRA el diagnóstico en vez de
+ * acumular síntomas.
+ */
+static const char *pcPasoFallo = "(no se intento)";
+static uint8_t     ucUltimoR1  = 0xFFU;
+
+const char *drv_sd_paso_fallo( void )
+{
+    return pcPasoFallo;
+}
+
+uint8_t drv_sd_ultimo_r1( void )
+{
+    return ucUltimoR1;
+}
+//------------------------------------------------------------------------------
 bool drv_sd_arrancar( void )
 {
     uint8_t  ucR1  = 0U;
     uint8_t  pucR7[ 4 ] = { 0 };
     bool     bOk   = false;
 
-    eTipo      = sdTIPO_NINGUNA;
-    bPorBloque = false;
+    eTipo       = sdTIPO_NINGUNA;
+    bPorBloque  = false;
+    pcPasoFallo = "riel apagado o sin tarjeta";
+    ucUltimoR1  = 0xFFU;
 
     if( ( bRielOn == false ) || ( drv_sd_presente() == false ) )
     {
@@ -462,10 +496,15 @@ bool drv_sd_arrancar( void )
         }
     }
 
+    ucUltimoR1 = ucR1;
+
     if( ucR1 != R1_IDLE )
     {
+        pcPasoFallo = "CMD0 (la tarjeta no contesta)";
         goto salir;
     }
+
+    pcPasoFallo = "CMD8";
 
     /*
      * CMD8: pregunta si soporta el rango de tensión y hace de discriminador de
@@ -483,8 +522,11 @@ bool drv_sd_arrancar( void )
 
         if( ( pucR7[ 2 ] != 0x01U ) || ( pucR7[ 3 ] != 0xAAU ) )
         {
+            pcPasoFallo = "CMD8 (eco del patron: no soporta la tension)";
             goto salir;                          /* no soporta la tensión */
         }
+
+        pcPasoFallo = "ACMD41 (contesta pero no sale de idle)";
 
         /* ACMD41 con HCS en 1: además de arrancar, pregunta si es de alta
            capacidad. Puede tardar cientos de ms. */
@@ -497,10 +539,14 @@ bool drv_sd_arrancar( void )
         } while( ( ucR1 != 0U ) &&
                  ( ( xTaskGetTickCount() - xInicio ) < pdMS_TO_TICKS( TOUT_ARRANQUE_MS ) ) );
 
+        ucUltimoR1 = ucR1;
+
         if( ucR1 != 0U )
         {
             goto salir;
         }
+
+        pcPasoFallo = "CMD58 (lectura del OCR)";
 
         /* CMD58 lee el OCR, y su bit 30 (CCS) dice si direcciona por bloque. */
         if( prvComando( CMD58_READ_OCR, 0UL ) != 0U )
@@ -519,7 +565,8 @@ bool drv_sd_arrancar( void )
         TickType_t xInicio = xTaskGetTickCount();
         uint8_t    ucCmd   = ACMD41_SD_SEND_OP_COND;
 
-        eTipo = sdTIPO_SDV1;
+        eTipo       = sdTIPO_SDV1;
+        pcPasoFallo = "ACMD41/CMD1 (v1 o MMC: no sale de idle)";
 
         if( ( prvComandoApp( ACMD41_SD_SEND_OP_COND, 0UL ) & R1_ILLEGAL_CMD ) != 0U )
         {
@@ -534,6 +581,8 @@ bool drv_sd_arrancar( void )
 
         } while( ( ucR1 != 0U ) &&
                  ( ( xTaskGetTickCount() - xInicio ) < pdMS_TO_TICKS( TOUT_ARRANQUE_MS ) ) );
+
+        ucUltimoR1 = ucR1;
 
         if( ucR1 != 0U )
         {
@@ -563,6 +612,7 @@ salir:
        400 kHz por norma. */
     if( bOk )
     {
+        pcPasoFallo = "(arranco OK)";
         prvVelocidad( DRV_SD_BR_RAPIDO );
     }
 

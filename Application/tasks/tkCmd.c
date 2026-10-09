@@ -2014,7 +2014,15 @@ static bool prvSdListo( void )
 
     if( drv_sd_arrancar() == false )
     {
+        /* ⭐ EL PASO, no sólo el fracaso: ver `drv_sd.h`. Cada uno acusa algo
+           distinto, y `R1 = 0xFF` es silencio en la línea, no una respuesta. */
         xprintf( "ERROR: la tarjeta no inicializo\r\n" );
+        xprintf( "  se cayo en : %s\r\n", drv_sd_paso_fallo() );
+        xprintf( "  ultimo R1  : 0x%02X%s\r\n",
+                 ( unsigned ) drv_sd_ultimo_r1(),
+                 ( drv_sd_ultimo_r1() == 0xFFU ) ?
+                 "  <- 0xFF = NADIE contesta (linea en alto): SPI, CS, MISO o el riel de la tarjeta"
+                 : "  <- contesta algo: el enlace SPI anda" );
         return false;
     }
 

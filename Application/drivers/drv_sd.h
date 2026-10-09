@@ -136,6 +136,19 @@ bool drv_sd_presente( void );
  *----------------------------------------------------------------------------*/
 bool drv_sd_arrancar( void );
 
+/*
+ * ⭐ Diagnóstico de `drv_sd_arrancar()`: EN QUÉ PASO se cayó, y el `R1` crudo que
+ * contestó la tarjeta.
+ *
+ * Puesto el 2026-10-09, cuando dos tarjetas distintas —una virgen— no
+ * inicializaron y el comando sólo sabía decir "no inicializo". Cada paso acusa
+ * algo distinto: `CMD0` que la tarjeta no contesta nada (SPI, CS, MISO o su
+ * riel), `ACMD41` que contesta pero no arranca. ⚠ Y `R1 = 0xFF` es **la línea en
+ * alto sin nadie que la maneje**, o sea silencio — no una respuesta.
+ */
+const char *drv_sd_paso_fallo( void );
+uint8_t     drv_sd_ultimo_r1( void );
+
 sd_tipo_t   drv_sd_tipo( void );
 const char *drv_sd_tipo_texto( void );
 
