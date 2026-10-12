@@ -3739,16 +3739,54 @@ static void cmdWdg( void )
          */
         if( ( strcmp( argv[ 1 ], "colgar" ) == 0 ) && ( ucArgs == 1U ) )
         {
-            static volatile uint32_t ulGirando = 0U;
+            /*
+             * ⛔ SIN EL PERRO CORRIENDO ESTO NO TIENE SALIDA.
+             *
+             * El lazo de abajo no vuelve nunca: lo único que saca al equipo de
+             * ahí es el reset del IWDG. Con `ARRANCA_WDG = 0` el equipo quedaría
+             * colgado hasta que alguien le corte la alimentación, y encima
+             * parecería que el firmware se rompió.
+             */
+            if( !drv_wdt_corriendo() )
+            {
+                xprintf( "\r\nEl IWDG esta DETENIDO (ARRANCA_WDG = 0 en main.h).\r\n" );
+                xprintf( "Colgarse ahora dejaria el equipo trabado sin salida:\r\n" );
+                xprintf( "habria que cortarle la alimentacion. No se hace.\r\n" );
+                return;
+            }
 
             xprintf( "\r\n⛔ COLGANDO tkCmd A PROPOSITO.\r\n" );
             xprintf( "   La consola deja de responder YA. En ~90 s tkCtl va a\r\n" );
             xprintf( "   avisar, y ~32 s despues el IWDG resetea el equipo.\r\n" );
-            xprintf( "   Al volver, 'status' tiene que decir: reset por IWDG\r\n\r\n" );
+            xprintf( "   Al volver, 'status' tiene que decir: reset por IWDG,\r\n" );
+            xprintf( "   y el servidor recibir WDG=3 en el proximo CONF_ALL.\r\n\r\n" );
 
+            /*
+             * ⭐⭐ EL LAZO CEDE LA CPU, Y ESO NO ES UN DETALLE: ES EL TEST.
+             *
+             * Lo que este watchdog vigila es el **progreso**, no la ejecución —
+             * una tarea puede estar vivita, cediendo el procesador en cada
+             * `vTaskDelay()`, y estar colgada igual: girando en un lazo que no
+             * avanza. Ése es el caso real, y es el que hay que reproducir.
+             *
+             * ⛔ **La versión anterior giraba con `ulGirando++`, sin ceder, y eso
+             * hacía que el test pudiera pasar por la razón equivocada.** Hoy
+             * funciona porque `configUSE_TIME_SLICING` queda en su default de 1 y
+             * las seis tareas comparten prioridad, así que el tick fuerza el
+             * cambio de contexto y `tkCtl` sigue juzgando. Pero el día que
+             * alguien ponga ese define en 0, un lazo que acapara **bloquearía a
+             * `tkCtl`**: el IWDG resetearía igual —porque el juez no corre— y el
+             * test seguiría "pasando" **sin haber ejercitado el mecanismo
+             * cooperativo**. Un test que pasa por otra razón es peor que no
+             * tenerlo: es la familia del volcado de registros mal decodificado.
+             *
+             * Cediendo, el único camino posible al reset es el que se vino a
+             * probar: `tkCmd` deja de reportar → `wdg_todas_sanas()` lo detecta →
+             * `prvJuzgar()` deja de patear → el IWDG muerde.
+             */
             for( ;; )
             {
-                ulGirando++;    /* ni reporta ni cede: es el cuelgue */
+                vTaskDelay( pdMS_TO_TICKS( 1000 ) );   /* cede, pero NO reporta */
             }
         }
 

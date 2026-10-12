@@ -18,6 +18,8 @@
 #include "drv_rtc79410.h"
 #include "frtos-io.h"
 #include "fatfs.h"
+#include "cfg_hash.h"    /* cfg_checksum() para el contador de lotes */
+#include <stddef.h>      /* offsetof */
 
 /*
  * El contador de lotes vive junto a la FAT en la SRAM del RTC. `fs_datos` ocupa
@@ -25,7 +27,42 @@
  */
 #define FS_SD_CONTADOR_SRAM_ADDR    ( DRV_RTC_SRAM_USUARIO + 16U )
 
-_Static_assert( ( FS_SD_CONTADOR_SRAM_ADDR + 4U ) <= DRV_RTC_SRAM_SIZE,
+/*
+ * ---------------------------------------------------------------------------
+ * ⭐⭐ EL CONTADOR DE LOTES LLEVA SU PROPIO CHECKSUM  (2026-10-12)
+ * ---------------------------------------------------------------------------
+ * Apareció en banco: tras un arranque en frío los lotes salían con nombres
+ * arbitrarios —se vieron **`LOTE9041`** el 2026-09-21 y **`LOTE3682`** el
+ * 2026-10-12—, porque la lectura sólo filtraba `0xFFFFFFFF` y una SRAM sin
+ * respaldo queda con **cualquier cosa**, no necesariamente con unos.
+ *
+ * ⭐ **Y era el ÚNICO dato de la SRAM del MCP79410 sin validar**, que es
+ * exactamente por lo que fue el único que se manifestó:
+ *
+ *   FAT (addr 5)              checksum + coherencia de punteros
+ *   marca de sync (addr 32)   checksum —"para no creerle a basura"—
+ *   ⛔ el contador (addr 21)   NADA
+ *
+ * ⚠ **Por qué un checksum propio y NO "reiniciarlo cuando la FAT no valida"**,
+ * que era la idea anotada: eso lo haría depender de que **las dos cosas fallen
+ * juntas** y de un módulo que no le corresponde conocer. El checksum lo resuelve
+ * solo, es el patrón que ya usan los otros dos, y no acopla nada.
+ *
+ * ⭐ Perder el contador es inofensivo: se arranca de cero y `prvNombreDeLote()`
+ * saltea los nombres que ya existan en la tarjeta. Lo que NO es inofensivo es
+ * un número inventado, porque los nombres dejan de decir nada sobre el orden.
+ */
+typedef struct {
+    uint32_t ulNro;
+    uint8_t  ucChecksum;   /* suma de lo anterior; ver `FS_SD_CONTADOR_BYTES_CKS` */
+} __attribute__( ( packed ) ) fs_sd_contador_t;
+
+/* ⚠ `offsetof` y NO `sizeof - 1`: es la misma trampa que hacía que la FAT se
+   declarara inválida en cada arranque (2026-09-09). Con `packed` hoy coinciden,
+   pero el día que alguien saque el `packed` dejarían de hacerlo. */
+#define FS_SD_CONTADOR_BYTES_CKS   ( offsetof( fs_sd_contador_t, ucChecksum ) )
+
+_Static_assert( ( FS_SD_CONTADOR_SRAM_ADDR + sizeof( fs_sd_contador_t ) ) <= DRV_RTC_SRAM_SIZE,
                 "el contador de lotes no entra en la SRAM del RTC" );
 
 static FATFS xFs;
@@ -241,21 +278,54 @@ static void prvProgresoTerminar( void )
 //------------------------------------------------------------------------------
 static uint32_t prvContadorLeer( void )
 {
-    uint32_t ulVal = 0U;
+    fs_sd_contador_t xC;
 
-    if( drv_rtc_sram_leer( FS_SD_CONTADOR_SRAM_ADDR, ( char * ) &ulVal, 4U ) != 4 )
+    if( drv_rtc_sram_leer( FS_SD_CONTADOR_SRAM_ADDR, ( char * ) &xC,
+                           ( uint8_t ) sizeof( xC ) ) != ( int16_t ) sizeof( xC ) )
     {
+        /* El RTC no contesta: no hay contador que leer. */
         return 0U;
     }
 
-    /* Sin respaldo la SRAM lee 0xFFFFFFFF. Empezar de cero es correcto: los
-       nombres que ya existan en la tarjeta se saltean al buscar uno libre. */
-    return ( ulVal == 0xFFFFFFFFUL ) ? 0U : ulVal;
+    if( xC.ucChecksum != cfg_checksum( ( const uint8_t * ) &xC,
+                                       FS_SD_CONTADOR_BYTES_CKS ) )
+    {
+        /*
+         * ⚠ Se avisa UNA VEZ por arranque y no en cada lote: que el contador se
+         * perdiera es información —dice que el respaldo por pila falló— pero
+         * repetirlo en cada volcado sólo taparía el resto del log.
+         */
+        static bool bAvisado = false;
+
+        if( !bAvisado )
+        {
+            bAvisado = true;
+            xprintf( "SD:: el contador de lotes no valida (se perdio el respaldo\r\n" );
+            xprintf( "     del RTC?): se arranca de cero, los nombres que existan\r\n" );
+            xprintf( "     en la tarjeta se saltean.\r\n" );
+        }
+
+        return 0U;
+    }
+
+    return xC.ulNro;
 }
 //------------------------------------------------------------------------------
 static void prvContadorGrabar( uint32_t ulVal )
 {
-    ( void ) drv_rtc_sram_escribir( FS_SD_CONTADOR_SRAM_ADDR, ( const char * ) &ulVal, 4U );
+    fs_sd_contador_t xC;
+
+    /* ⚠ `memset` antes de llenar: el checksum cubre `FS_SD_CONTADOR_BYTES_CKS`
+       bytes, y con `packed` no hay relleno hoy — pero si alguna vez lo hubiera,
+       un padding sin inicializar daría un checksum distinto al releer. Es el
+       mismo motivo por el que cada `cfg_*_defaults()` hace `memset()`. */
+    memset( &xC, 0, sizeof( xC ) );
+
+    xC.ulNro      = ulVal;
+    xC.ucChecksum = cfg_checksum( ( const uint8_t * ) &xC, FS_SD_CONTADOR_BYTES_CKS );
+
+    ( void ) drv_rtc_sram_escribir( FS_SD_CONTADOR_SRAM_ADDR, ( const char * ) &xC,
+                                    ( uint8_t ) sizeof( xC ) );
 }
 //------------------------------------------------------------------------------
 static void prvNombreDeLote( uint32_t ulNro, char *pcNombre, uint16_t usSize )
