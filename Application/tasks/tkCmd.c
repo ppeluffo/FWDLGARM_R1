@@ -758,7 +758,7 @@ static void cmdStatus( void )
      * los tags sin saber por qué. Mismo criterio que el `MODE` del INA3221 y el
      * `PUPDR` del contador — un estado que no se dice manda a dudar de la consola.
      */
-    xprintf( "modo tag     : %s\\r\\n", frtos_tag_activo() ? "ON (<rsp>/<log>/<end>)" : "off" );
+    xprintf( "modo tag     : %s\r\n", frtos_tag_activo() ? "ON (<rsp>/<log>/<end>)" : "off" );
     xprintf( "pwr locks    : 0x%08lX %s\r\n",
              ( unsigned long ) pwr_lock_estado(),
              pwr_deep_sleep_permitido() ? "(Stop 2 habilitado)" : "(solo Sleep)" );
