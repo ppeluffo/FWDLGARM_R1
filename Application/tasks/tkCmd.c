@@ -1923,6 +1923,7 @@ static void prvSdUso( void )
     xprintf( "uso:\r\n" );
     xprintf( "  sd                  estado: presencia, riel, tipo y capacidad\r\n" );
     xprintf( "  sd on|off           energia de la tarjeta (EN_PWR_SD, PB3)\r\n" );
+    xprintf( "  sd pin              ciclo de PB3: ODR (lo escrito) vs IDR (la pata)\r\n" );
     xprintf( "  sd init             prende e inicializa la tarjeta\r\n" );
     xprintf( "  sd info             CID y CSD crudos\r\n" );
     xprintf( "  sd read <sector>    vuelca un sector en hexa\r\n" );
@@ -2051,6 +2052,82 @@ static bool prvSdListo( void )
     return true;
 }
 
+/*
+ * ⭐⭐ EL CICLO DE `EN_PWR_SD` (PB3) CON LOS REGISTROS A LA VISTA.
+ *
+ * Puesto el 2026-10-12, porque Pablo midió que **el pin no se mueve** con
+ * `sd on` / `sd off` y la revisión del código no encontró nada: nadie
+ * reconfigura PB3 —ni `prvPinesBus()`, ni `drv_rs485`, ni los MspInit del ADC y
+ * del I2C2, ni el barrido de `PATRON_CONSUMO`, que está en 0— y
+ * `MX_GPIO_Init()` lo deja `OUTPUT_PP` arrancando en alto.
+ *
+ * Así que lo que falta es saber **dónde se corta la cadena**, y son tres cosas
+ * que desde afuera se ven iguales:
+ *
+ *   ODR no cambia               -> la escritura no entra (configuracion o clock)
+ *   ODR cambia, IDR NO lo sigue -> ⭐ algo EXTERNO sostiene el pin: un corto, o
+ *                                  el pin danado
+ *   ODR cambia, IDR lo sigue    -> ⭐ el micro cumple; lo que no llega al gate
+ *                                  del SI2301 es la PISTA
+ *
+ * ⚠ El `IDR` es el nivel REAL de la pata, incluso con el pin en modo salida —
+ * por eso vale como medición y no como eco de lo que escribimos.
+ *
+ * Es el mismo criterio que el volcado de `ADC_CR` en `vin`, el `CONFIG` del
+ * INA3221 y el `PUPDR` del contador: que el comando diga el estado que decide,
+ * sin que nadie tenga que pinchar la placa.
+ */
+static void prvSdPinVolcar( const char *pcCuando )
+{
+    GPIO_TypeDef *px     = EN_PWR_SD_GPIO_Port;
+    uint32_t      ulModo = ( px->MODER >> ( 3U * 2U ) ) & 0x3U;
+    uint32_t      ulPull = ( px->PUPDR >> ( 3U * 2U ) ) & 0x3U;
+    unsigned      uOdr   = ( unsigned ) ( ( px->ODR >> 3U ) & 1U );
+    unsigned      uIdr   = ( unsigned ) ( ( px->IDR >> 3U ) & 1U );
+
+    static const char *pcModos[] = { "entrada", "SALIDA ", "alternat", "analogico" };
+    static const char *pcPulls[] = { "sin pull", "pull-UP ", "pull-dwn", "reservado" };
+
+    xprintf( "  %-12s MODER=%s PUPDR=%s %s ODR=%u IDR=%u%s\r\n",
+             pcCuando, pcModos[ ulModo ], pcPulls[ ulPull ],
+             ( ( px->OTYPER >> 3U ) & 1U ) ? "open-drain" : "push-pull ",
+             uOdr, uIdr,
+             ( uOdr != uIdr ) ? "  <- [X] EL PIN NO SIGUE AL ODR" : "" );
+}
+//------------------------------------------------------------------------------
+static void prvSdPin( void )
+{
+    bool bEstaba = drv_sd_power_estado();
+
+    xprintf( "\r\nEN_PWR_SD = PB3  (SI2301 canal P: 0 PRENDE, 1 apaga)\r\n" );
+    xprintf( "  ODR = lo que el firmware ESCRIBE ; IDR = el nivel REAL de la pata\r\n\r\n" );
+
+    prvSdPinVolcar( "al entrar :" );
+
+    /* ⚠ A mano y por registros, NO con `drv_sd_power()`: ese camino además mueve
+       los pines del SPI y el candado de energía, y acá se quiere medir ESTE pin
+       solo. Una variable por vez. */
+    EN_PWR_SD_GPIO_Port->BSRR = ( uint32_t ) EN_PWR_SD_Pin;            /* a 1 */
+    vTaskDelay( pdMS_TO_TICKS( 5 ) );
+    prvSdPinVolcar( "escrito 1 :" );
+
+    EN_PWR_SD_GPIO_Port->BSRR = ( uint32_t ) EN_PWR_SD_Pin << 16U;     /* a 0 */
+    vTaskDelay( pdMS_TO_TICKS( 5 ) );
+    prvSdPinVolcar( "escrito 0 :" );
+
+    /* Y de vuelta como estaba: este comando MIDE, no cambia el estado del riel. */
+    EN_PWR_SD_GPIO_Port->BSRR = bEstaba
+                              ? ( ( uint32_t ) EN_PWR_SD_Pin << 16U )
+                              : ( ( uint32_t ) EN_PWR_SD_Pin );
+
+    xprintf( "\r\n  (el riel quedo como estaba: %s)\r\n",
+             bEstaba ? "ENCENDIDO" : "apagado" );
+    xprintf( "\r\n  ODR no cambia               -> la escritura no entra\r\n" );
+    xprintf( "  ODR cambia, IDR NO lo sigue -> algo EXTERNO sostiene el pin\r\n" );
+    xprintf( "  ODR cambia, IDR lo sigue    -> el micro cumple: mirar la PISTA\r\n" );
+    xprintf( "                                 de PB3 al gate del SI2301\r\n" );
+}
+//------------------------------------------------------------------------------
 static void cmdSd( void )
 {
     uint8_t ucArgs = FRTOS_CMD_makeArgv();
@@ -2065,6 +2142,12 @@ static void cmdSd( void )
     {
         drv_sd_power( true );
         xprintf( "riel de la microSD ENCENDIDO (sin inicializar: 'sd init')\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "pin" ) == 0 )
+    {
+        prvSdPin();
         return;
     }
 
