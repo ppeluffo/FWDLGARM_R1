@@ -6251,6 +6251,150 @@ lleno) y `MAX_INPUT_LENGTH` subió de 64 a **128**: la línea de configuración 
 | ⚠ **El kill en su peor caso** | las dos veces tkWan estaba en `APAGADO` y murió en 1 s. En `ONLINE_DATA` vaciando la ventana son minutos; el mecanismo está probado, el caso largo no |
 | `apn`/`url`/`ip` de a uno | se probó **`port`**, que es el que ejercita la lectura del complemento. Los otros tres comparten todo el código |
 
+### 🔨 El test de 48 h del contador de pulsos con la BeagleBone (2026-10-12)
+
+Pedido de Pablo: *"La BBB tiene un relé que cuando genera un pulso cierra, con lo que el pin de
+entrada del contador se cierra contra GND"*, y la BBB más el datalogger se conectan a **un tercer
+equipo Linux que loguea las 48 h**; después se analizan los dos logs.
+
+Las herramientas quedaron en **`Tools/`**, versionadas junto al firmware que prueban —el latido
+`CNT::` de abajo es su contrato—:
+
+| | |
+|---|---|
+| `generador_pulsos.py` | corre en la BBB: cierra el relé según un perfil y registra cada cierre |
+| `logger_serie.py` | corre en el tercer equipo: captura la consola con timestamp propio |
+| `analizar_test.py` | cruza los dos y contesta **¿se perdió algún pulso?** |
+
+#### ⭐ El criterio de aceptación es UNO, y todo lo demás se deriva
+
+```
+cierres emitidos por la BBB  ==  pulsos contados por el equipo
+```
+
+El caudal, el EMA y el frame son consecuencias. Por eso lo primero que hubo que resolver no fue el
+generador sino **de dónde sale el lado derecho de esa igualdad**.
+
+#### ⛔ Un logger PASIVO no podía verificar el conteo: de ahí el latido `CNT::`
+
+El total acumulado sólo salía al tipear `cnt`, así que una captura de 48 h —donde nadie manda
+comandos— no podía contestar la pregunta del test. Y **del caudal no se puede reconstruir**, porque es
+un EMA promediado. Ahora `tkSys_print()` lo emite en cada poleo:
+
+```
+CNT:: total=14402 pendientes=3 cortos=0 imposibles=0
+```
+
+Son 2.880 checkpoints en 48 h con `timerpoll` de 60 s. Es la lección #1 del rearranque aplicada al
+contador: *sin RX no hay diagnóstico, así que el TX tiene que hablar solo*.
+
+⭐⭐ **Y los dos contadores de descarte son la mitad del valor**: si al cruzar faltan 5 pulsos y la
+línea dice `cortos=5`, el caso está cerrado en el acto —el contacto rebotó y el antirrebote de 500 ms
+los descartó— en vez de mandar a buscar un bug en el firmware. Acusan a lugares **opuestos**:
+`cortos` al circuito de entrada, `imposibles` a la cadencia.
+
+⚠ **Va en su propia línea, no como un campo del registro**: si fuera un campo se leería como parte
+del frame, y **no viaja al servidor**. Con el modo tag encima queda envuelta aparte.
+
+⚠ Sólo sale si el contador está **habilitado** (`xCfgCounter.bEnabled`). Si el log no tiene ninguna
+línea `CNT::`, el analizador lo dice y nombra las dos causas posibles.
+
+#### ✅ El relé NO es la restricción, y está verificado contra su datasheet
+
+Panasonic **TX-S** (`Datasheets/Componentes/RELAIS/mech_eng_txs.pdf`):
+
+| | TX-S | Nuestro caso | Margen |
+|---|---|---|---|
+| **Vida mecánica** | **mín. 50 × 10⁶** ope. | ~33.000 en 48 h | ⭐ **1500×** |
+| **Carga mínima conmutable** | 10 µA / 10 mV DC | 4,9 mA / 12 V (el LED del opto) | ⭐ **490×** |
+| **Contacto** | **Ag+Au clad** | — | chapado en oro: el bueno para carga baja, sin película de óxido |
+| Operate / release | máx. **5 ms** c/u (sin rebote) | pulso de 50 ms | 10× |
+| Vida eléctrica | 200×10³ **@ 1 A** | 4,9 mA → sin arco apreciable | no aplica |
+
+⛔ **La primera estimación fue equivocada por dos órdenes de magnitud**: se razonó sobre "un relé
+mecánico típico" de 10⁵ ciclos y se propuso elegir el caudal para no gastarlo. El número real lo
+desmiente — se puede simular el caudal máximo sin tocar el 0,2 % de su vida. **Es la regla de siempre:
+el dato del datasheet, no el género del componente.**
+
+⭐ Y el relé **invierte la lógica**, lo que hace que la polaridad quede bien sola:
+
+```
+pin en BAJO -> rele suelto   -> contacto ABIERTO  (el reposo de campo: R40 no drena)
+pin en ALTO -> rele activado -> contacto CERRADO  (el pulso, que es lo que se cuenta)
+```
+
+Con 50 ms cada 12 s el ciclo de trabajo es del **0,4 %**, o sea ~1,3 µA de `R40` contra los 312 µA que
+costaría el contacto cerrado permanente.
+
+#### ⛔⛔ El ancho de 10 ms del simulador del AVR NO sirve acá
+
+`simulador_claude_R004.py` usa `PULSE_WIDTH_S = 0.010`. Con un operate time de hasta **5 ms**, el
+contacto quedaría cerrado apenas ~5 ms contra el umbral de **4,8 ms** del filtro RC de R001: **margen
+cero**, justo la zona donde el firmware cuenta o no cuenta de forma errática. Va en **50 ms**, que
+deja el cierre efectivo en 9× el umbral.
+
+#### ⛔⛔ Y los escenarios del AVR NO son comparables tal cual
+
+El algoritmo del ARM es **una simplificación deliberada** (decisión de Pablo, 2026-09-23). Donde el
+AVR clampea y el ARM no, los números difieren **por diseño**:
+
+| Escenario | ¿Comparable? | |
+|---|---|---|
+| **E2** régimen, **E5** decay | ✅ sí | mismos criterios |
+| **E6** anti-ruido | ✅ sí, **por una coincidencia** | el AVR descarta `dt < 1800 ms`; el ARM descarta `Q > 200 m³/h` — y con `magpp = 0,1`, **200 m³/h *es* 1800 ms** |
+| **E1** arranque | ⚠ no | AVR: `ALPHA_START` por 5 pulsos. ARM: `alpha=1` sólo en el primer intervalo |
+| **E3/E4** escalón | ⛔ no, y son **la medición de la mejora** | el ARM no tiene clamp: ~5 pulsos contra ~24 |
+| **E10** field replay | ⛔ divergen fuerte | con `magpp = 0,0086` el AVR descarta casi todo y el ARM los acepta |
+
+⚠ Correrlos esperando igualdad haría "encontrar" fallas que son el diseño.
+
+#### ⭐⭐ El analizador se escribió ANTES del test, y encontró un bug del generador
+
+Es el hallazgo de método de la etapa: **escribir el análisis antes de correr el test es cómo se
+verifica que el test va a poder contestar la pregunta.** Y de paso apareció esto:
+
+```
+seq 2  tramo pico_manana  dt 209.2 ms
+seq 6  tramo medio        dt  84.2 ms
+...                       22 de 46 pulsos con dT < 500 ms
+```
+
+Al cambiar de tramo el ritmo se reiniciaba y el primer pulso salía **justo después** del último del
+tramo anterior. ⛔ El equipo los descartaría por el antirrebote de 500 ms **con toda razón**, así que
+en 48 h el análisis habría reportado ~18 pulsos perdidos **sin que nada estuviera roto** — el
+instrumento generando el síntoma, la misma familia que el volcado de `ADC_CR` mal decodificado.
+
+⚠ **Y el primer arreglo no alcanzó**: calcular bien el instante del próximo pulso no sirve si el lazo
+**emite antes de esperarlo**. El `dormir_hasta()` estaba al final del cuerpo, así que el primer pulso
+del tramo salía igual. Hubo que invertir el orden. Verificado: **0 pulsos con dT < 500 ms** y el
+mínimo clavado en 1815 ms, que es el período de 200 m³/h.
+
+#### Lo que el analizador concluye, probado en tres casos
+
+⭐ **La resta no es el resultado, es el principio**: una resta constante es el desfase de arranque
+—el equipo ya tenía cuenta, o un log empezó antes— y es inofensiva. Una resta que **crece** son
+pulsos perdidos, y el checkpoint donde empieza a crecer dice dónde mirar.
+
+| Caso probado | Veredicto |
+|---|---|
+| sin pérdidas | `** NO SE PERDIO NI UN PULSO **` |
+| 4 perdidos con `cortos=4` | *"el caso está cerrado: acusa al CIRCUITO DE ENTRADA, no al firmware"* |
+| 4 perdidos con `cortos=0` | *"los descartes NO lo explican... el primer checkpoint donde la resta crece dice cuándo empezó"* |
+
+Más la sección de **estabilidad**, que es el soak: stacks mínimos por tarea, errores de UART,
+arranques e incidentes.
+
+⏳ **Lo que el analizador todavía NO hace**: el reproceso del EMA sobre los dT reales del CSV para
+compararlo contra el caudal que informó el equipo. Queda para cuando haya logs de verdad, que es
+donde se puede verificar.
+
+#### ⭐ Un test corto aparte que el relé ahora permite
+
+El techo de **~60 Hz** del filtro RC está documentado desde el bring-up y **nunca se verificó**.
+`generador_pulsos.py --barrido` hace 10, 20, 30, 45, 60 y 80 Hz de a 30 s y dice dónde empieza a
+perder. Son ~5.000 operaciones, nada para 50 millones. Va aparte: busca el **límite**, mientras el de
+48 h busca que no haya pérdidas.
+
 ### ⛔ Los buffers, los stacks y el heap NO se agrandan — y el motivo no es el espacio
 
 Pregunta de Pablo (**2026-10-12**): *"Creo que tenemos memoria ram de sobra de modo que si quieres

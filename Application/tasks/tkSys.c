@@ -522,6 +522,45 @@ void tkSys_print( const dataRcd_t *pxDr )
                  ( pxDr->usInvalidos & dataINVALIDO_BT3V3    ) ? " bt3v3"    : "",
                  ( pxDr->usInvalidos & dataINVALIDO_RTC      ) ? " rtc"      : "" );
     }
+
+    /*==========================================================================
+     * ⭐ EL LATIDO DEL CONTADOR: el acumulado de pulsos, por TX, sin que nadie
+     * tipee nada.
+     *========================================================================*/
+    /*
+     * Existe para que un log PASIVO pueda verificar el conteo. El total
+     * acumulado sólo salía al tipear `cnt`, así que una captura de 48 h —donde
+     * nadie manda comandos— no podía contestar la única pregunta que importa en
+     * un test de contador: **¿se perdió algún pulso?** Del caudal no se puede
+     * reconstruir, porque es un EMA promediado.
+     *
+     * Es la lección #1 del rearranque aplicada al contador: *sin RX no hay
+     * diagnóstico, así que el TX tiene que hablar solo*. Con `timerpoll` de 60 s
+     * son 2.880 checkpoints en 48 h y ~60 bytes cada uno.
+     *
+     * ⭐⭐ Y LOS DOS CONTADORES DE DESCARTE SON LA MITAD DEL VALOR. Si al cruzar
+     * contra el generador faltan 5 pulsos y esta línea dice `cortos=5`, el caso
+     * está cerrado en el acto —el contacto rebotó y el filtro los comió— en vez
+     * de mandar a buscar un bug en el firmware. Y acusan a lugares OPUESTOS:
+     * `cortos` al circuito de entrada, `imposibles` a la cadencia (ver
+     * `caudal.h`).
+     *
+     * ⚠ VA EN SU PROPIA LÍNEA, no como un campo más del registro. Si fuera un
+     * campo, se leería como parte del frame —y NO viaja al servidor—; con el
+     * modo tag encima queda envuelta aparte y sale trivial de parsear.
+     */
+    if( xCfgCounter.bEnabled )
+    {
+        caudal_t xC;
+
+        caudal_peek( &xC );
+
+        xprintf( "CNT:: total=%lu pendientes=%lu cortos=%lu imposibles=%lu\r\n",
+                 ( unsigned long ) drv_pulsos_total(),
+                 ( unsigned long ) drv_pulsos_pendientes(),
+                 ( unsigned long ) xC.ulCortos,
+                 ( unsigned long ) xC.ulImposibles );
+    }
 }
 //------------------------------------------------------------------------------
 const dataRcd_t *tkSys_ultimo( void )

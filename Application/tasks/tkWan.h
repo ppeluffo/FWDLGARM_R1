@@ -165,14 +165,14 @@ bool wan_matada( void );
  *
  * ⚠ **Que la IP sea PRIVADA no es un error**: el APN `SPYMOVIL.VPNANTEL` es una
  * APN de VPN, así que el equipo entra a la red privada donde vive el servidor y
- * `192.168.6.3` es alcanzable **sólo por ahí**. Conviene dejarlo escrito, porque
+ * `192.168.3.6` es alcanzable **sólo por ahí**. Conviene dejarlo escrito, porque
  * desde afuera una 192.168.x.x en un default de producción se lee como un valor
  * de banco olvidado — y "corregirla" por una pública sería el error.
  *
  * ⛔⛔ **HAY DOS SERVIDORES, Y ESTE DEFAULT ES EL DE PRODUCCIÓN** (Pablo,
  * 2026-10-12):
  *
- *     192.168.6.3    PRODUCCION   <- el default de acá
+ *     192.168.3.6    PRODUCCION   <- el default de acá
  *     192.168.0.20   la LAPTOP de Pablo, el servidor de TESTING
  *
  * O sea que **`lte grabar` sin argumentos EN EL BANCO manda los frames de
@@ -196,7 +196,7 @@ bool wan_matada( void );
  * valores, no un "listo".
  */
 #define WAN_DEF_APN         "SPYMOVIL.VPNANTEL"
-#define WAN_DEF_SERVER_IP   "192.168.6.3"
+#define WAN_DEF_SERVER_IP   "192.168.3.6"
 #define WAN_DEF_SERVER_PORT "5000"
 #define WAN_DEF_URL         "/apidlg?"
 
