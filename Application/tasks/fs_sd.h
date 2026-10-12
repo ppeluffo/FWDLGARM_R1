@@ -167,4 +167,18 @@ void fs_sd_ver( const char *pcNombre, uint16_t usLineas );
  *----------------------------------------------------------------------------*/
 bool fs_sd_volcar_pulsos( void );
 
+/*
+ * ⭐ Cuántas operaciones se postergaron SEGUIDAS por tener el filesystem ocupado.
+ *
+ * Cero es lo normal. **TRES tareas usan esta capa** —`tkSys` vuelca la ventana,
+ * `tkWan` transmite los lotes, `tkCmd` los comandos— y FatFs **no es
+ * reentrante** (`_FS_REENTRANT = 0`), así que hay un mutex con espera corta: el
+ * que no lo consigue reintenta en su propia cadencia en vez de bloquearse.
+ *
+ * ⚠ Un número que CRECE es el síntoma de que alguien retiene el filesystem mucho
+ * más de lo previsto, y sin esto sería **invisible hasta que la ventana dé la
+ * vuelta y empiece a pisar**. Mismo criterio que `ulPisados`.
+ */
+uint32_t fs_sd_postergadas( void );
+
 #endif /* APPLICATION_TASKS_FS_SD_H_ */

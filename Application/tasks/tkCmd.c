@@ -850,6 +850,18 @@ static void cmdStatus( void )
         xprintf( "  lotes en la microSD sin transmitir: %u\r\n",
                  ( unsigned ) xSd.usLotes );
     }
+
+    /*
+     * ⚠ Sólo si hay alguna: cero es lo normal y no vale una línea. Pero si el
+     * número crece, alguien retiene el filesystem más de lo previsto — y
+     * `prvAvisarOcupado()` manda a mirar ACÁ, así que tiene que estar. Es la
+     * regla del `help` que mentía sobre el parser.
+     */
+    if( fs_sd_postergadas() > 0UL )
+    {
+        xprintf( "  [!] operaciones de microSD postergadas seguidas: %lu\r\n",
+                 ( unsigned long ) fs_sd_postergadas() );
+    }
 }
 //------------------------------------------------------------------------------
 /*

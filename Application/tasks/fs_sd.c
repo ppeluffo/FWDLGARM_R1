@@ -6,6 +6,11 @@
 #include <string.h>
 
 #include "fs_sd.h"
+
+/* ⚠ `semphr.h` exige que `FreeRTOS.h` se vea ANTES: lo dice con un `#error`.
+   Van los dos acá, explícitos, para no depender de qué arrastre otro header. */
+#include "FreeRTOS.h"
+#include "semphr.h"
 #include "caudal_log.h"
 #include "fs_datos.h"
 #include "wan_frame.h"
@@ -46,6 +51,142 @@ static char pcBufSector[ _MAX_SS ];
  *----------------------------------------------------------------------------*/
 #define FS_SD_PROGRESO_CADA     32U
 
+/*
+ * ---------------------------------------------------------------------------
+ * ⭐⭐ EL MUTEX DEL FILESYSTEM  (2026-10-12)
+ * ---------------------------------------------------------------------------
+ * **TRES tareas usan esta capa** —`tkSys` vuelca la ventana, `tkWan` transmite
+ * los lotes y `tkCmd` los comandos `fs sd …`— y **FatFs NO es reentrante**:
+ * `_FS_REENTRANT` está en 0 y su propio `ffconf.h` lo dice.
+ *
+ * ⛔ Y no es un caso de laboratorio: `tkSys` y `tkWan` son **automáticas**. Si
+ * el volcado del 90 % cae en medio de una transmisión de lotes —que dura
+ * minutos— entran dos tareas a la vez. Apareció en banco el 2026-10-12 al correr
+ * `fs sd ver` mientras `tkWan` transmitía: `no se pudo borrar LOTE3682.DAT`.
+ *
+ * ⚠ **Es PEOR que el caso del RS485**, donde la exclusión también faltaba: allá
+ * los CRC descartaban las tramas intercaladas, así que no había datos falsos.
+ * Acá lo que se puede corromper es **la FAT** — justo lo que el diseño de
+ * ventana vino a evitar.
+ *
+ * ⭐ **Protege la SESIÓN, no la operación**, igual que el del RS485: la lectura
+ * de un lote son `lote_abrir` → N × `lote_leer` → `lote_cerrar`, hasta 1984
+ * líneas y varios minutos. Un mutex por función dejaría a otra tarea
+ * desmontando la tarjeta en medio de eso.
+ *
+ * ⭐ **Y la espera es CORTA a propósito: 5 s** (decidido con Pablo). Nadie se
+ * bloquea más que eso, y el que no lo consigue **reintenta en su propia
+ * cadencia**:
+ *
+ *   tkSys  la condición del volcado es `count >= umbral` evaluada en CADA
+ *          vuelta, así que vuelve a intentar en `timerpoll`. Con 198 registros
+ *          de aire sobre el umbral son ~198 oportunidades: más de 3 horas
+ *   tkWan  no enciende los lotes y los manda en la próxima sesión — ya tiene
+ *          esa forma para cuando la ventana no se pudo vaciar
+ *   tkCmd  avisa al operador
+ *
+ * ⛔ **Por qué NO se espera bloqueado, aunque haya 3 horas de margen**: `tkSys`
+ * es el poleo. Bloquearla 16 minutos (un lote de 1984 líneas a 500 ms por frame)
+ * perdería 16 muestras para salvar un volcado que no corre peligro — y, peor, su
+ * plazo de watchdog son **90 s**: sin patear, el perro **resetea el equipo**, y
+ * podría hacerlo justo mientras `tkWan` escribe en la FAT.
+ */
+#define FS_SD_MS_ESPERA   5000U
+
+static StaticSemaphore_t xFsMutexBuf;
+static SemaphoreHandle_t xFsMutex    = NULL;
+
+/*
+ * ⚠ Que ESTA sesión de lotes tiene el mutex. Hace que soltarlo sea **idempotente**:
+ * `fs_sd_lote_cerrar()` se llama por más de un camino —y mañana alguien puede
+ * agregar un `return` en el medio del lazo de `tkWan`—, y un mutex soltado dos
+ * veces, o nunca, deja la tarjeta inaccesible para todos **sin ningún síntoma**.
+ */
+static volatile bool bTengoMutex;
+
+/* Postergaciones SEGUIDAS por filesystem ocupado. Ver `prvAvisarOcupado()`. */
+#define FS_SD_POSTERGADAS_AVISO   30U
+static uint32_t ulPostergadas;
+
+static bool prvTomar( void )
+{
+    /*
+     * Creación perezosa y protegida: esta capa no tiene un `init()` al que
+     * engancharse, y dos tareas podrían llegar juntas a la primera llamada.
+     * `xSemaphoreCreateMutexStatic()` sólo inicializa memoria, no bloquea, así
+     * que dentro de la sección crítica es seguro.
+     */
+    if( xFsMutex == NULL )
+    {
+        taskENTER_CRITICAL();
+
+        if( xFsMutex == NULL )
+        {
+            xFsMutex = xSemaphoreCreateMutexStatic( &xFsMutexBuf );
+        }
+
+        taskEXIT_CRITICAL();
+    }
+
+    if( xSemaphoreTake( xFsMutex, pdMS_TO_TICKS( FS_SD_MS_ESPERA ) ) != pdTRUE )
+    {
+        return false;
+    }
+
+    ulPostergadas = 0UL;   /* se consiguió: la racha se corta */
+
+    return true;
+}
+
+static void prvSoltar( void )
+{
+    if( xFsMutex != NULL )
+    {
+        ( void ) xSemaphoreGive( xFsMutex );
+    }
+}
+
+/* El aviso, con el mismo texto en todos lados: que el log diga QUIÉN esperaba. */
+static void prvLoteCerrar( bool bBorrar );   /* definida mas abajo */
+
+/*
+ * ⭐ Y el CONTADOR de postergaciones seguidas.
+ *
+ * Que una operación se postergue es normal y se resuelve solo —cada tarea
+ * reintenta en su cadencia—, pero **que se postergue muchas veces seguidas no
+ * lo es**: querría decir que alguien retiene el filesystem mucho más de lo
+ * previsto. Sin contarlo eso sería **invisible hasta que la ventana dé la vuelta
+ * y empiece a pisar registros**, que es tarde.
+ *
+ * Es el criterio de `ulPisados` y de los descartes de `RTU`: **hacer visible lo
+ * que se postergó**.
+ *
+ * ⚠ El umbral son 30 seguidas: con el volcado reintentando en cada poleo
+ * (`timerpoll`, 60 s por omisión) es media hora, contra las ~3 horas de margen
+ * que da el umbral del 90 %. Avisa **con tiempo de sobra**, no cuando ya no hay
+ * nada que hacer.
+ */
+static void prvAvisarOcupado( const char *pcQuien )
+{
+    ulPostergadas++;
+
+    xprintf( "SD:: ocupada por otra tarea (%s espero %u ms): se reintenta\r\n",
+             pcQuien, ( unsigned ) FS_SD_MS_ESPERA );
+
+    if( ulPostergadas == FS_SD_POSTERGADAS_AVISO )
+    {
+        xprintf( "SD:: [!] %lu operaciones postergadas SEGUIDAS: alguien retiene el\r\n",
+                 ( unsigned long ) ulPostergadas );
+        xprintf( "     filesystem mucho mas de lo previsto. Mirar 'status'.\r\n" );
+    }
+}
+
+/* Cuántas van seguidas. Cero es lo normal; un número que crece es el síntoma. */
+uint32_t fs_sd_postergadas( void )
+{
+    return ulPostergadas;
+}
+//------------------------------------------------------------------------------
 static const char pcGiro[] = { '|', '/', '-', '\\' };
 
 static bool     bProgresoOn;
@@ -215,7 +356,7 @@ static void prvDesmontar( void )
     drv_sd_power( false );
 }
 //------------------------------------------------------------------------------
-bool fs_sd_volcar_ventana( void )
+static bool prvVolcarVentana( void )
 {
     fs_datos_stats_t xSt;
     dataRcd_t        xDr;
@@ -333,7 +474,25 @@ bool fs_sd_volcar_ventana( void )
     return true;
 }
 //------------------------------------------------------------------------------
-bool fs_sd_lote_mas_viejo( char *pcNombre, uint16_t usSize )
+/* Protegida por el mutex del filesystem — ver su comentario arriba. */
+bool fs_sd_volcar_ventana( void )
+{
+    bool bRet;
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "volcar_ventana" );
+        return false;
+    }
+
+    bRet = prvVolcarVentana(  );
+
+    prvSoltar();
+    return bRet;
+}
+//------------------------------------------------------------------------------
+/* El cuerpo, SIN mutex: lo usa `fs_sd_lote_abrir()`, que ya lo tiene tomado. */
+static bool prvLoteMasViejo( char *pcNombre, uint16_t usSize )
 {
     DIR     xDir;
     FILINFO xInfo;
@@ -387,7 +546,7 @@ bool fs_sd_lote_mas_viejo( char *pcNombre, uint16_t usSize )
     return bHay;
 }
 //------------------------------------------------------------------------------
-bool fs_sd_borrar_lote( const char *pcNombre )
+static bool prvBorrarLote( const char *pcNombre )
 {
     if( pcNombre == NULL )
     {
@@ -411,7 +570,24 @@ bool fs_sd_borrar_lote( const char *pcNombre )
     return bOk;
 }
 //------------------------------------------------------------------------------
-void fs_sd_stats( fs_sd_stats_t *pxStats )
+/* Protegida por el mutex del filesystem — ver su comentario arriba. */
+bool fs_sd_borrar_lote( const char *pcNombre )
+{
+    bool bRet;
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "borrar_lote" );
+        return false;
+    }
+
+    bRet = prvBorrarLote( pcNombre );
+
+    prvSoltar();
+    return bRet;
+}
+//------------------------------------------------------------------------------
+static void prvStats( fs_sd_stats_t *pxStats )
 {
     DIR     xDir;
     FILINFO xInfo;
@@ -456,7 +632,21 @@ void fs_sd_stats( fs_sd_stats_t *pxStats )
     prvDesmontar();
 }
 //------------------------------------------------------------------------------
-bool fs_sd_format( void )
+/* Protegida por el mutex del filesystem — ver su comentario arriba. */
+void fs_sd_stats( fs_sd_stats_t *pxStats )
+{
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "stats" );
+        return;
+    }
+
+    prvStats( pxStats );
+
+    prvSoltar();
+}
+//------------------------------------------------------------------------------
+static bool prvFormat( void )
 {
     if( !prvEncender() )
     {
@@ -543,7 +733,24 @@ bool fs_sd_format( void )
     return true;
 }
 //------------------------------------------------------------------------------
-void fs_sd_listar( void )
+/* Protegida por el mutex del filesystem — ver su comentario arriba. */
+bool fs_sd_format( void )
+{
+    bool bRet;
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "format" );
+        return false;
+    }
+
+    bRet = prvFormat(  );
+
+    prvSoltar();
+    return bRet;
+}
+//------------------------------------------------------------------------------
+static void prvListar( void )
 {
     DIR     xDir;
     FILINFO xInfo;
@@ -576,7 +783,21 @@ void fs_sd_listar( void )
     prvDesmontar();
 }
 //------------------------------------------------------------------------------
-void fs_sd_ver( const char *pcNombre, uint16_t usLineas )
+/* Protegida por el mutex del filesystem — ver su comentario arriba. */
+void fs_sd_listar( void )
+{
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "listar" );
+        return;
+    }
+
+    prvListar(  );
+
+    prvSoltar();
+}
+//------------------------------------------------------------------------------
+static void prvVer( const char *pcNombre, uint16_t usLineas )
 {
     FIL  xFile;
 
@@ -613,6 +834,20 @@ void fs_sd_ver( const char *pcNombre, uint16_t usLineas )
     prvDesmontar();
 }
 //------------------------------------------------------------------------------
+/* Protegida por el mutex del filesystem — ver su comentario arriba. */
+void fs_sd_ver( const char *pcNombre, uint16_t usLineas )
+{
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "ver" );
+        return;
+    }
+
+    prvVer( pcNombre, usLineas );
+
+    prvSoltar();
+}
+//------------------------------------------------------------------------------
 
 /*==============================================================================
  * LEER UN LOTE PARA TRANSMITIRLO (paso 5c, segunda mitad)
@@ -633,22 +868,68 @@ static bool bLoteAbierto;
 static char pcLoteNombre[ FS_SD_NOMBRE_LARGO ];
 
 //------------------------------------------------------------------------------
+/*
+ * La versión pública: una consulta suelta, así que toma y suelta.
+ *
+ * ⚠ Ojo que **esto no reserva nada**: entre esta llamada y un `lote_abrir()`
+ * otra tarea pudo borrar o agregar lotes. Hoy nadie la usa desde afuera por eso
+ * mismo —`lote_abrir()` resuelve el nombre por su cuenta, dentro de la sesión—.
+ */
+bool fs_sd_lote_mas_viejo( char *pcNombre, uint16_t usSize )
+{
+    bool bRet;
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "lote_mas_viejo" );
+        return false;
+    }
+
+    bRet = prvLoteMasViejo( pcNombre, usSize );
+
+    prvSoltar();
+
+    return bRet;
+}
+//------------------------------------------------------------------------------
+/*
+ * ⭐ ACÁ EMPIEZA LA SESIÓN: toma el mutex y **NO lo suelta** — lo libera
+ * `fs_sd_lote_cerrar()`. Ver el comentario del mutex, arriba: entre el abrir y
+ * el cerrar hay hasta 1984 líneas y varios minutos, y nadie más puede estar
+ * montando ni desmontando la tarjeta en el medio.
+ *
+ * ⚠ En TODOS los caminos de error suelta antes de volver, porque si no la
+ * tarjeta queda inaccesible para las otras dos tareas y no hay ningún síntoma.
+ */
 bool fs_sd_lote_abrir( char *pcNombre, uint16_t usSize )
 {
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "lote_abrir" );
+        return false;
+    }
+
+    bTengoMutex = true;
+
     if( bLoteAbierto )
     {
         /* Abrir dos veces sin cerrar dejaría el `FIL` anterior perdido y la
-           tarjeta encendida para siempre. */
-        fs_sd_lote_cerrar( false );
+           tarjeta encendida para siempre. ⚠ La interna, no la pública: ésta
+           soltaría el mutex que acabamos de tomar. */
+        prvLoteCerrar( false );
     }
 
-    if( !fs_sd_lote_mas_viejo( pcLoteNombre, sizeof( pcLoteNombre ) ) )
+    if( !prvLoteMasViejo( pcLoteNombre, sizeof( pcLoteNombre ) ) )
     {
+        bTengoMutex = false;
+        prvSoltar();
         return false;   /* no hay lotes, o no hay tarjeta */
     }
 
     if( !prvMontar() )
     {
+        bTengoMutex = false;
+        prvSoltar();
         return false;   /* prvMontar() ya explicó por qué */
     }
 
@@ -656,6 +937,8 @@ bool fs_sd_lote_abrir( char *pcNombre, uint16_t usSize )
     {
         xprintf( "SD:: no se pudo abrir %s\r\n", pcLoteNombre );
         prvDesmontar();
+        bTengoMutex = false;
+        prvSoltar();
         return false;
     }
 
@@ -698,7 +981,8 @@ bool fs_sd_lote_leer( char *pcLinea, uint16_t usSize )
     return ( usLargo > 0U );
 }
 //------------------------------------------------------------------------------
-void fs_sd_lote_cerrar( bool bBorrar )
+/* El cuerpo, SIN soltar el mutex: lo usa `fs_sd_lote_abrir()` por dentro. */
+static void prvLoteCerrar( bool bBorrar )
 {
     if( !bLoteAbierto )
     {
@@ -737,6 +1021,28 @@ void fs_sd_lote_cerrar( bool bBorrar )
     prvDesmontar();
 }
 //------------------------------------------------------------------------------
+/*
+ * ⭐ ACÁ TERMINA LA SESIÓN: hace el trabajo y **suelta el mutex** que tomó
+ * `fs_sd_lote_abrir()`.
+ *
+ * ⚠ La liberación es **idempotente** por `bTengoMutex`: esta función se llama
+ * por más de un camino en `tkWan` —el cierre normal y el del `RESET` del
+ * servidor— y soltar un mutex que no se tiene, o soltarlo dos veces, dejaría la
+ * tarjeta inaccesible para las otras dos tareas **sin ningún síntoma**. Es la
+ * misma regla que `drv_sd_presente()` devolviendo false con el riel apagado: no
+ * afirmar nada que no se pueda sostener.
+ */
+void fs_sd_lote_cerrar( bool bBorrar )
+{
+    prvLoteCerrar( bBorrar );
+
+    if( bTengoMutex )
+    {
+        bTengoMutex = false;
+        prvSoltar();
+    }
+}
+//------------------------------------------------------------------------------
 
 //------------------------------------------------------------------------------
 /*
@@ -756,7 +1062,7 @@ void fs_sd_lote_cerrar( bool bBorrar )
  * El nombre no lleva fecha: si el RTC arrancó frío, dos archivos colisionarían.
  * Se numera y listo — la hora de cada pulso va adentro.
  */
-bool fs_sd_volcar_pulsos( void )
+static bool prvVolcarPulsos( void )
 {
     caudal_log_reg_t xReg;
     char             pcNombre[ FS_SD_NOMBRE_LARGO ];
@@ -841,5 +1147,22 @@ bool fs_sd_volcar_pulsos( void )
              ( unsigned long ) ulN, pcNombre, bOk ? "" : " (ERROR al cerrar)" );
 
     return bOk;
+}
+//------------------------------------------------------------------------------
+/* Protegida por el mutex del filesystem — ver su comentario arriba. */
+bool fs_sd_volcar_pulsos( void )
+{
+    bool bRet;
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "volcar_pulsos" );
+        return false;
+    }
+
+    bRet = prvVolcarPulsos(  );
+
+    prvSoltar();
+    return bRet;
 }
 //------------------------------------------------------------------------------
