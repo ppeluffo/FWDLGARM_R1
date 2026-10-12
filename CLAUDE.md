@@ -6027,6 +6027,63 @@ a 5 s bajaría las despertadas de 7700 a ~2000 por hora, pero obliga a repasar e
 —hoy 90 s, con `tkCtl` pateando cada segundo, o sea con 30× de margen sobre la ventana del IWDG— y a
 aceptar que la terminal se detecte hasta 5 s más tarde.
 
+### ⛔ Los buffers, los stacks y el heap NO se agrandan — y el motivo no es el espacio
+
+Pregunta de Pablo (**2026-10-12**): *"Creo que tenemos memoria ram de sobra de modo que si quieres
+puedes aumentar el tamaño de los buffers de TX y RX, el stack de las tareas y el heap si te parece
+necesario."* La premisa es cierta —hay **194 KB libres de 256**— y la decisión fue **no tocar nada**.
+
+**Los números, con el equipo corriendo 30 minutos (sesiones, lotes y volcados incluidos):**
+
+| Tarea | Declarado | Mín libre | Usado | |
+|---|---|---|---|---|
+| `tkCmd` | 1024 | 707 | **317** | 31 % |
+| `tkCtlPres` | 512 | 388 | **124** | 24 % |
+| `tkSys` | 1024 | 802 | **222** | 22 % |
+| `tkWan` | 2048 | 1779 | **269** | 13 % |
+| `tkCtl` | 384 | 354 | **30** | 8 % |
+
+```
+heap    2992 libres de 3000  ->  se usaron 8 BYTES
+UART4   2 errores en 30 min de sesiones ; TERM y RS485 en 0
+```
+
+⭐ **Y no es un problema de espacio**: duplicar todos los stacks, subir el heap a 16 KB y duplicar los
+buffers serían **+35 KB sobre 194 libres**. Cabe de sobra. **El límite no es la RAM, es la
+evidencia.**
+
+**Las cinco razones, de la más concreta a la más de fondo:**
+
+1. **Ningún stack pasa del 31 %, y es el PEOR caso**: todo esto es Debug con `-O0`, que usa más stack
+   que `-Os`. En Release van a usar menos.
+2. ⭐ **Los buffers de RX ya traen su propio detector.** Si uno se desbordara se perderían bytes →
+   overrun → **el contador de errores de esa UART crece**. La UART4 del modem —115200, la más
+   exigente— lleva **2** en media hora de sesiones, y TERM y RS485 están en **0**. No hay señal.
+3. **El heap usó 8 bytes de 3000**: las tareas son estáticas y FatFs está con `_USE_LFN = 0`. Subirlo
+   es RAM muerta. ⚠ El único caso que lo pediría es habilitar nombres largos (~600 bytes por
+   operación del heap), y no está habilitado.
+4. ⭐⭐ **Un stack grande NO arregla un desborde: lo posterga y lo hace menos reproducible.** En
+   FreeRTOS un desborde **no da un error, corrompe la memoria de al lado**, y el síntoma aparece en
+   otro lugar y horas después. Más margen = ocurre más tarde y con menos relación con su causa.
+5. ⭐⭐⭐ **Y lo que se perdería: los *high water mark* son un INSTRUMENTO.** Si mañana una tarea
+   empieza a consumir el triple —porque alguien agregó una llamada profunda— con los márgenes de hoy
+   **se ve en `status`**. Con el doble de margen no se ve nada hasta que sea tarde. Es el mismo
+   criterio que `ulPisados`, el `CONFIG` del INA y el `PUPDR` del contador: **conservar la señal**.
+
+⚠ **PERO la decisión tiene una condición, y los high water mark sólo valen por los caminos que se
+ejercitaron.** Faltan tres, y son justamente los más profundos:
+
+| | |
+|---|---|
+| `tkCtlPres` ejecutando una **consigna real** | `prvEjecutar()` → `drv_cpres` → `drv_modbus`, su camino más hondo, nunca corrió |
+| `tkWan` con un lote **grande** | el de banco fueron 32 líneas; uno real son hasta **1984** |
+| `tkCmd` con `fs sd format` | el `f_mkfs` escribe las dos copias de la FAT sector por sector |
+
+⭐ **Por eso la decisión es "no aumentar AHORA", no "no aumentar nunca": hay que volver a mirar
+`status` después del soak de 96 h y sobre el binario Release**, que es cuando los números van a ser
+los que valen. Si ahí alguno baja del 50 % de margen, **ahí sí hay una razón concreta** — y se va a
+saber cuál y por qué, que es lo que hoy no se sabría.
+
 ### ⛔ La versión sube cuando algo QUEDA FUNCIONANDO, no en cada entrega
 
 **Regla corregida por Pablo el 2026-09-30**: *"No avances de version hasta que lo que hagamos este
