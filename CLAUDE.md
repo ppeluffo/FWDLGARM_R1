@@ -6166,6 +6166,136 @@ ejercitaron.** Faltan tres, y son justamente los más profundos:
 los que valen. Si ahí alguno baja del 50 % de margen, **ahí sí hay una razón concreta** — y se va a
 saber cuál y por qué, que es lo que hoy no se sabría.
 
+## ⏸ ACTUALIZAR EL FIRMWARE DESDE LA microSD — diseñado, DIFERIDO al post-soak (2026-10-12)
+
+Idea de Pablo: *"¿este micro es capaz de autoprogramarse? Sería posible que cuando arranque lea la
+microSD, si hay un firmware vea si la versión es superior a la instalada y se autoprograme?"*. Alcance
+acordado: **para que un técnico de campo actualice con una tarjeta**, no OTA.
+
+⏸ **Pablo decidió hacerlo DESPUÉS del soak de 96 h.** Lo que sigue es la discusión cerrada y los datos
+ya verificados, para no rehacerla.
+
+### ⭐ Lo que el micro da, verificado en el árbol (no supuesto)
+
+| | Dónde se verificó |
+|---|---|
+| `stm32l4xx_hal_flash.c`, `flash_ex.c`, `flash_ramfunc.c` | ⭐ **ya compilados y linkeados** — están en `Debug/objects.list` |
+| Página de borrado **2 KB** | `FLASH_PAGE_SIZE = 0x800` para `STM32L496xx` |
+| ⭐ **1 MB en DOS bancos de 512 KB** | `FLASH_BANK_SIZE = (FLASH_SIZE >> 1)`, con `STM32L496xx` en la lista |
+| `BFB2` (*Boot From Bank 2*) en `FLASH_OPTR` | `stm32l496xx.h:8554`, y `HAL_FLASHEx_OBProgram()` lo escribe |
+| La imagen Release | **160.516 B** (text+data) → entra en un banco con **3× de margen** |
+
+#### ⭐⭐ `DUALBANK = 1` en esta placa: el dato que destraba el diseño
+
+```
+FLASH_OPTR = 0xFFEFF8AA        (leido por SWD, mode=HOTPLUG, 2026-10-12)
+  bit 21  DUALBANK = 1   <- dual bank ACTIVO
+  bit 20  BFB2     = 0   <- arranca del banco 1
+```
+
+⭐ **La decodificación se validó contra tres valores que ya se conocían** —la lección del volcado de
+`ADC_CR` mal decodificado, que costó tres días—: `IWDG_SW = 1`, `BOR_LEV = 0` (~1,7 V) y `RDP = 0xAA`,
+los tres coinciden con lo documentado el 2026-10-09.
+
+ℓ Y **CubeProgrammer no lista `DUALBANK`** en su `-ob displ`, lo que es coherente con que en el L496
+de 1 MB no sea configurable sino fijo. Dos evidencias independientes al mismo lado.
+
+ℹ️ De paso: **el firmware sobrevivió a las tres lecturas SWD** — el poleo de `tkSys` siguió saliendo
+por la consola sin cortarse. La advertencia de que una lectura por SWD puede frenar el firmware vale
+igual, pero en `mode=HOTPLUG` con transacciones cortas no pasó.
+
+### ⛔ Dos cosas del planteo original que NO van
+
+1. ⛔ **El `.elf` no sirve: va un `.bin`.** El ELF es un contenedor con headers, secciones, símbolos y
+   debug —288 KB en Debug contra 160 KB de imagen real— y habría que parsear sus *program headers* y
+   copiar los segmentos `LOAD` a sus direcciones. El `.bin` es la imagen cruda: se copia tal cual.
+2. ⛔ **La versión no puede venir del nombre del archivo**: es manipulable y no verificable. Va un
+   **header prependido al `.bin`** por un script post-build —magic, versión, largo y **CRC32**—.
+   ⚠ El CRC no es opcional: sin él, una tarjeta con un archivo corrupto programa basura.
+
+### ⭐⭐ La arquitectura: dual bank + `BFB2`, SIN bootloader
+
+```
+banco 1 (512 KB)  <- corre el firmware actual
+banco 2 (512 KB)  <- se escribe el nuevo, MIENTRAS el otro corre
+commit = escribir UN option byte  ->  BFB2 cambia el banco de arranque
+```
+
+Cinco cosas que compra, y la cuarta es la que decide:
+
+1. ⭐ **El mismo binario sirve para los dos bancos**: el banco activo se remapea a `0x08000000`, así
+   que no hay que linkear dos veces ni hacer código relocatable.
+2. **No hay bootloader que mantener** — ni un segundo proyecto, ni reparticionar, ni la pregunta de
+   cómo se actualiza el que no se puede actualizar.
+3. **El L4 deja escribir un banco ejecutando del otro**: no hay que copiar el escritor a RAM.
+4. ⭐⭐ **Es ATÓMICO.** Con un solo banco hay una ventana de 10-20 s en que el equipo **no tiene
+   firmware válido**, y un corte de alimentación ahí lo deja muerto. Acá el commit es una escritura de
+   option byte: hasta ese instante arranca el viejo, después el nuevo. **El estado "a medio programar"
+   no existe** — y es justo el que mata equipos en campo.
+5. ⭐ **El rollback es el mismo bit al revés.**
+
+⚠ **Un cambio que sí hace falta en el `.ld`**: hoy dice `FLASH 1024K`, o sea los dos bancos. Hay que
+acotarlo a **512K** para que la aplicación no pueda cruzar al banco de respaldo. Con 160 KB no se
+cruza, pero el linker script no lo garantiza.
+
+### ⛔ El riesgo que esto NO resuelve: un firmware que ARRANCA y no FUNCIONA
+
+El mecanismo garantiza que el equipo arranque, no que sirva. Si el firmware nuevo arranca y se cuelga
+a los diez minutos, o no logra hablar con el servidor, el equipo queda igual de muerto y a 300 km.
+
+⭐ **Y el criterio de "funciona" ya existe en este equipo: una sesión que llega a `CONFIG=OK` y
+transmite.** Eso ejercita el modem, el I2C, la EEPROM, el RTC y el ADC de un saque — mejor que
+cualquier autotest que escribiéramos.
+
+```
+commit  ->  marca "EN PRUEBA" (SRAM del MCP79410, con checksum, como la FAT y el contador de lotes)
+            el nuevo completa una sesion  ->  CONFIRMADO
+            N resets sin confirmar        ->  BFB2 vuelve al banco anterior
+```
+
+⭐ El watchdog ya aporta la mitad: si el nuevo se cuelga, el IWDG resetea y el contador de intentos
+avanza solo.
+
+⚠ **Y el rollback vale aunque el técnico esté presente**: él cubre el caso fácil —volver a poner la
+tarjeta con el firmware viejo— pero **se va**, y si el fallo aparece a los tres días ya no hay nadie.
+
+### El momento: en el arranque, y hay una razón concreta
+
+⭐ **Con `IWDG_SW = 1` el perro NO corre hasta que el firmware lo arranca.** Si la actualización se
+hace **antes** de `drv_wdt_arrancar()`, no hay watchdog que patear durante los ~15 s de borrado y
+escritura. Es un argumento fuerte a favor de hacerlo al arrancar, que era la idea original.
+
+### Tres decisiones tomadas
+
+| | |
+|---|---|
+| **¿Sólo versión mayor?** | ⛔ **No: cualquier versión distinta.** Si sólo acepta mayores, volver atrás obliga a fabricar un número falso — y volver atrás es justo lo que se necesita cuando algo sale mal. Lo que evita reprogramar en loop no es la comparación, es lo de abajo |
+| **El archivo después de aplicarlo** | **renombrarlo** (`.OK`): visible para el técnico y no depende de la pila del RTC |
+| **Autenticidad** | ⚠ Cualquiera con una tarjeta puede meter firmware, pero con acceso físico el SWD ya está expuesto igual. El CRC cubre corrupción, no malicia. Una firma sería la respuesta; hoy no hace falta |
+
+### ⚠ Por qué va DESPUÉS del soak, y el argumento EN CONTRA que quedó sin responder
+
+Decisión de Pablo (2026-10-12). ⚠ Pero conviene dejar escrito el argumento contrario, porque **es
+fuerte y va a volver**:
+
+⛔ **Si el autoupdate entra después del soak, el binario que sale a campo NO es el que se soakeó**, y
+queda un cambio en el camino de arranque sin esas 96 h encima. Es la regla de siempre dada vuelta:
+*lo que se valida tiene que ser lo que se usa*.
+
+⭐ Lo que **mitiga** el problema: el autoupdate corre **sólo al arrancar** y, sin archivo en la
+tarjeta, es montar → buscar → no está → apagar. Durante las 96 h no se ejecuta ni una vez. O sea que
+lo que el soak no cubriría es **el arranque**, no la operación.
+
+⚠ **Lo que queda pendiente de decidir cuando se retome**: si hace falta un soak corto sobre el binario
+final, o alcanza con validar el arranque unas cuantas veces.
+
+⚠ **Y la primera prueba de `BFB2` se hace en el BANCO, con el ST-LINK a mano**: si algo sale mal el
+equipo arranca de un banco vacío, y el síntoma se parece a *"la placa no arranca"* cuando la causa es
+un option byte. Es el pozo del NRST trabado otra vez.
+
+⭐ **El día que se quiera OTA, el modem sólo tiene que dejar el archivo en la tarjeta** y el resto del
+mecanismo es idéntico: no se rediseña nada.
+
 ### ⛔ La versión sube cuando algo QUEDA FUNCIONANDO, no en cada entrega
 
 **Regla corregida por Pablo el 2026-09-30**: *"No avances de version hasta que lo que hagamos este
