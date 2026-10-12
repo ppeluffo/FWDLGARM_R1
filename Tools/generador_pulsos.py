@@ -101,6 +101,24 @@ PERFIL_DIA = [
     (5,      3000, "bajo_umbral"),       # por encima de 3 pero cerca
 ]
 
+# El perfil de la PRUEBA CORTA, para validar la cadena entera antes de largar
+# las 48 h: ~55 min y recorre los mismos caminos que el perfil largo.
+#
+# NO se usa --escala para esto: la escala divide TODO, incluidos los silencios, y
+# un silencio de 6 s no dispara el decay a cero (hace falta > dT_zero = 120 s).
+# O sea que una prueba escalada dejaria sin ejercitar justo el camino que mas
+# conviene ver antes de dejar el equipo 48 h solo.
+PERFIL_PRUEBA = [
+    (0,      150, "silencio_inicial"),   # > dT_zero: arranque limpio desde cero
+    (30,     600, "regimen"),            # ~50 pulsos: el EMA converge
+    (150,    480, "escalon_arriba"),     # ~200 pulsos: seguimiento sin clamp
+    (200,    300, "maximo"),             # ~166 pulsos: periodo 1,8 s
+    (0,      150, "silencio_decay"),     # decay a cero Y rearranque
+    (60,     600, "medio"),              # ~100 pulsos
+    (10,     480, "bajo"),               # ~13 pulsos: Q bajo, cerca del umbral
+    (80,     540, "final"),              # ~120 pulsos
+]
+
 # El barrido de frecuencia, que va APARTE del test de 48 h: busca el LIMITE del
 # filtro RC (techo documentado ~60 Hz, nunca verificado), no la ausencia de
 # perdidas. Son ~5.000 operaciones, nada para 50 M.
@@ -310,6 +328,9 @@ def main():
 
     ap = argparse.ArgumentParser(description="Generador de pulsos para el test del contador")
     ap.add_argument("--horas", type=float, default=48.0, help="duracion total (default 48)")
+    ap.add_argument("--prueba", action="store_true",
+                    help="perfil CORTO de ~55 min: valida la cadena entera "
+                         "(generador + logger + analizador) antes de largar las 48 h")
     ap.add_argument("--barrido", action="store_true",
                     help="barrido de frecuencia para buscar el techo del filtro")
     ap.add_argument("--laptop", action="store_true", help="sin GPIO (probar el script)")
@@ -379,8 +400,13 @@ def main():
             log(f"[!] ESCALA {args.escala}x: las duraciones se dividen. Esto NO es")
             log("    el test, es el ensayo del script.")
 
-        total_dia = sum(x[1] for x in PERFIL_DIA) / args.escala
-        log(f"Perfil de un dia: {total_dia/3600:.2f} h, {len(PERFIL_DIA)} tramos")
+        perfil = PERFIL_PRUEBA if args.prueba else PERFIL_DIA
+        if args.prueba:
+            log("PERFIL DE PRUEBA (~55 min): es el ensayo de la cadena completa,")
+            log("no el test. Recorre los mismos caminos que el perfil de 48 h.")
+
+        total_dia = sum(x[1] for x in perfil) / args.escala
+        log(f"Perfil: {total_dia/3600:.2f} h, {len(perfil)} tramos")
         log(f"Objetivo: {args.horas} h")
 
         fin_total = time.monotonic() + args.horas * 3600.0 / args.escala
@@ -390,7 +416,7 @@ def main():
         while time.monotonic() < fin_total:
             vuelta += 1
             log(f"--- vuelta {vuelta} del perfil ---")
-            for caudal, dur, etiqueta in PERFIL_DIA:
+            for caudal, dur, etiqueta in perfil:
                 if time.monotonic() >= fin_total:
                     break
                 # Recortar el ultimo tramo para no pasarse de las horas pedidas.
