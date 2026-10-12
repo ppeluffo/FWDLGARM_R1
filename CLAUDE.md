@@ -6388,6 +6388,38 @@ arranques e incidentes.
 compararlo contra el caudal que informó el equipo. Queda para cuando haya logs de verdad, que es
 donde se puede verificar.
 
+#### ✅ Primera corrida con el latido (2026-10-12): el contador CUENTA BIEN
+
+Pablo corrió el logger 8 minutos con la BBB generando, y el latido salió:
+
+```
+17:10:10  CNT:: total=357 pendientes=357 cortos=15 imposibles=198
+17:11:10  CNT:: total=362 ...
+17:14:10  CNT:: total=377 ...
+```
+
+⭐ **+5 pulsos por minuto exactos**, o sea un pulso cada 12 s — que es el período de **30 m³/h con
+`magpp = 0,1`**, el tramo de régimen del perfil. El equipo lo contó **sin perder uno**, y el latido
+quedó validado en banco con el `0.0.19`.
+
+ℹ️ Los `cortos=15` e `imposibles=198` **no crecen** entre checkpoints, así que son de pruebas
+manuales anteriores —puentear el borne a mano da pulsos mucho más rápidos que el caudal máximo—. Es
+exactamente lo que esos dos contadores vinieron a distinguir: `imposibles` acusa a la **cadencia**.
+
+##### ⛔ `pendientes` == `total` SIEMPRE, y corrige algo que estaba escrito acá
+
+Este archivo decía que `cnt tomar` *"es el camino que usará el registro de muestras, y el único que
+ejercita la sección crítica"*. **Es falso**, y la corrida lo demuestra: `pendientes` nunca baja.
+
+El caudal se calcula **en la ISR**, por `drv_pulsos_pulso_cb()` → `caudal_pulso_desde_isr()`
+(`caudal.c:275`), así que **nadie llama `drv_pulsos_tomar()`** en operación normal: lo usa sólo el
+comando `cnt tomar`, a mano. O sea que el contador de pendientes es un mecanismo **paralelo y sin
+consumidor**.
+
+⚠ No es un bug —el totalizador y el caudal son correctos— pero hay que saberlo para leer el latido:
+el campo `pendientes` no aporta nada mientras nadie lo consuma, y si algún día alguien lo ve **bajar**
+es porque se tipeó `cnt tomar`.
+
 #### ⭐ Un test corto aparte que el relé ahora permite
 
 El techo de **~60 Hz** del filtro RC está documentado desde el bring-up y **nunca se verificó**.
