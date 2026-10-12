@@ -169,6 +169,81 @@ def main():
               f"{em:9d} {total:9d} {resta:7d} {cortos:7d} {imp:8d}")
         ult = i
 
+    r_ini_, r_fin_ = filas[0][3], filas[-1][3]
+    deriva_conteo = r_fin_ - r_ini_
+
+    # ======================================================================
+    # LA DERIVA DE LOS RELOJES, MEDIDA CON LOS PROPIOS DATOS
+    # ======================================================================
+    # La BBB no siempre tiene NTP (por USB al laptop no sale a internet), asi que
+    # su reloj corre libre: 10-50 ppm son 1-4 s/dia, hasta ~8 s en 48 h. Y con
+    # pulsos cada 1,8-36 s, 8 s mueven varios pulsos de lado en el cruce -- lo
+    # que se leeria como una resta que CRECE, o sea perdidas que no existen.
+    #
+    # Se mide al reves: en vez de usar los relojes para verificar el conteo, se
+    # usa EL CONTEO para medir el desfase de los relojes. Para cada checkpoint,
+    # el equipo dice que conto N pulsos; el instante en que la BBB emitio SU
+    # pulso N es un punto de referencia comun. La diferencia entre ese instante y
+    # la hora del checkpoint es (latencia del poleo + desfase de relojes).
+    #
+    # El termino de latencia es ruidoso --el poleo cae en cualquier momento del
+    # periodo-- asi que se usa la MEDIANA de los primeros y de los ultimos
+    # checkpoints: el ruido se promedia y queda el desfase.
+    def desfases(sub):
+        out = []
+        for (t, total, _p, _c, _i) in sub:
+            if 1 <= total <= len(pulsos):
+                out.append((t - pulsos[total - 1][0]).total_seconds())
+        return sorted(out)
+
+    def mediana(v):
+        return v[len(v) // 2] if v else None
+
+    k = max(3, len(checkpoints) // 10)
+    d_ini = mediana(desfases(checkpoints[:k]))
+    d_fin = mediana(desfases(checkpoints[-k:]))
+    deriva_relojes = (d_fin - d_ini) if (d_ini is not None and d_fin is not None) else None
+
+    if deriva_relojes is not None:
+        print("\n" + "-" * 74)
+        print("RELOJES")
+        print("-" * 74)
+        print(f"  desfase mediano al empezar : {d_ini:+.1f} s")
+        print(f"  desfase mediano al terminar: {d_fin:+.1f} s")
+        print(f"  DERIVA entre los dos relojes: {deriva_relojes:+.1f} s")
+        # LAS DOS CAUSAS DE QUE ESE DESFASE CREZCA SON DISTINTAS, y se separan
+        # mirando la resta de CONTEOS:
+        #
+        #   conteos cuadran + desfase crece  -> son los RELOJES
+        #   conteos NO cuadran               -> el desfase crece COMO CONSECUENCIA
+        #                                       (el total apunta a un pulso
+        #                                       anterior al que corresponde)
+        #
+        # Sin esta distincion, una perdida de pulsos se informaba como "los
+        # relojes no estan sincronizados" -- acusando al instrumento equivocado,
+        # que es justo lo que este script existe para evitar.
+        if abs(deriva_conteo) > 2:
+            print("  -> OJO: este desfase NO mide los relojes. Los conteos no cuadran")
+            print(f"     (deriva {deriva_conteo:+d} pulsos), asi que el desfase crece")
+            print("     porque el total del equipo apunta a un pulso anterior.")
+            print("     La causa esta abajo, en el conteo.")
+        elif abs(deriva_relojes) > 3.0:
+            print("  -> los relojes NO estan sincronizados entre si.")
+            # El ppm solo tiene sentido sobre una corrida larga: con poco tiempo
+            # el ruido del poleo se come el resultado. Es el mismo criterio que
+            # wan_rtc_sincronizar(), que no calcula ppm con menos de una hora.
+            if dur > 3600:
+                ppm = deriva_relojes / dur * 1e6
+                print(f"     {ppm:+.1f} ppm sobre {dur/3600:.1f} h de corrida.")
+            else:
+                print("     (corrida demasiado corta para estimar ppm)")
+            print("     El conteo de abajo sigue siendo valido -- compara TOTALES,")
+            print("     que no dependen de la hora -- pero el 'cuando' de una")
+            print("     perdida tiene esa incertidumbre. Para la proxima: NTP en la")
+            print("     BBB, o 'ssh bbb \"sudo date -u -s ...\"' antes de arrancar.")
+        else:
+            print("  -> los dos relojes se mantuvieron juntos: el cruce es confiable")
+
     r_ini, r_fin = filas[0][3], filas[-1][3]
     deriva = r_fin - r_ini
     cortos_tot = filas[-1][4] - filas[0][4]
@@ -186,6 +261,18 @@ def main():
         print("\n  ** NO SE PERDIO NI UN PULSO en toda la corrida. **")
         print("  (una resta constante distinta de cero es solo el desfase de")
         print("   arranque: el equipo ya tenia cuenta, o un log empezo antes)")
+    elif abs(deriva) <= 2:
+        # Con relojes que corren libres, +/-1 pulso es el pulso que cae del lado
+        # equivocado del borde de un checkpoint. Llamarlo perdida mandaria a
+        # buscar un bug por un artefacto del cruce.
+        print(f"\n  ** NO SE PERDIERON PULSOS (deriva {deriva:+d}, dentro del ruido). **")
+        print("  Una deriva de +/-1 o 2 es el pulso que cae del lado equivocado del")
+        print("  borde de un checkpoint, sobre todo si los relojes derivaron.")
+        print("  LA VERIFICACION QUE NO DEPENDE DE LA HORA es la de los totales:")
+        if checkpoints:
+            print(f"    emitidos por la BBB      : {len(pulsos)}")
+            print(f"    ultimo total del equipo  : {checkpoints[-1][1]}")
+            print("    (difieren en los pulsos emitidos DESPUES del ultimo poleo)")
     elif deriva > 0:
         print(f"\n  [!] EL EQUIPO CONTO {deriva} PULSOS MENOS que los emitidos.")
         if cortos_tot >= deriva * 0.8:

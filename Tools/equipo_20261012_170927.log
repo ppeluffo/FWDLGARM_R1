@@ -1,0 +1,94 @@
+2026-10-12 17:09:27.724 ## ==================================================================
+2026-10-12 17:09:27.724 ## ARRANCA EL LOGGER -- hora local 2026-10-12 17:09:27.724
+2026-10-12 17:09:27.724 ## puerto /dev/ttyUSB0 9600 8N1 | objetivo 1.0 h | con checkpoints cada 15 min
+2026-10-12 17:09:27.724 ## VERIFICAR que el reloj de esta maquina y el de la BBB concuerden,
+2026-10-12 17:09:27.724 ## o el cruce de los dos logs miente.
+2026-10-12 17:09:27.724 ## ==================================================================
+2026-10-12 17:09:27.820 ## puerto ABIERTO (/dev/ttyUSB0)
+2026-10-12 17:09:32.928 ## --- CHECKPOINT t+0.00 h (0 lineas, 0 reconexiones, 0 arranques) ---
+2026-10-12 17:09:32.928 >> tag on
+2026-10-12 17:09:37.237 >> cnt
+2026-10-12 17:09:41.542 >> status
+2026-10-12 17:09:45.852 >> wdg
+2026-10-12 17:10:10.286 << tag on
+2026-10-12 17:10:10.286 << <rsp>modo tag: ON
+2026-10-12 17:10:10.287 << </rsp><end>tag</end>
+2026-10-12 17:10:10.287 << <rsp>cmd></rsp><log>
+2026-10-12 17:10:10.287 << tkWan:: ONLINE_DATA
+2026-10-12 17:10:10.287 << </log><log>vaciando la ventana: 1 registros
+2026-10-12 17:10:10.287 << </log><log>-> </log><log>ID=860909055244702&HW=SPQ_ARM_R1&TYPE=FWDLGARM&VER=0.0.19&CLASS=DATA&DATE=261012&TIME=170909&PA=-2.50&PB=-2.50&Q0=30.156&V0=0&bt3v3=3.297&bt12v=11.866</log><log>
+2026-10-12 17:10:10.287 << </log>cnt
+2026-10-12 17:10:10.287 << <rsp>  total      : 354 pulsos desde el arranque
+2026-10-12 17:10:10.287 << </rsp><rsp>  pendientes : 354 (los que se llevaria 'cnt tomar')
+2026-10-12 17:10:10.287 << </rsp><rsp>  pin PA12   : alto  ->  contacto abierto (reposo)
+2026-10-12 17:10:10.287 << </rsp><rsp>  config     : modo 0 (0=entrada), pull 0 (flotante, CORRECTO)
+2026-10-12 17:10:10.287 << </rsp><rsp>
+2026-10-12 17:10:10.287 <<   --- caudal ---
+2026-10-12 17:10:10.287 << </rsp><rsp>  magpp      : 0.100 m3/pulso  ->  dT a 200 m3/h = 1.8 s
+2026-10-12 17:10:10.287 << </rsp><rsp>  EMA vivo   : 30.268 m3/h   (alpha 0.50)
+2026-10-12 17:10:10.287 << </rsp><rsp>  en curso   : 2 muestras acumuladas -> reportaria 30.100
+2026-10-12 17:10:10.287 << </rsp><rsp>  validos    : 128 pulsos
+2026-10-12 17:10:10.287 << </rsp><rsp>  descartes  : 15 cortos (<500 ms)  +  198 imposibles (>200 m3/h)
+2026-10-12 17:10:10.287 << </rsp><rsp>               los CORTOS acusan al circuito de entrada
+2026-10-12 17:10:10.287 << </rsp><rsp>               los IMPOSIBLES: pulsos mas rapidos que 1.8 s
+2026-10-12 17:10:10.287 << </rsp><end>cnt</end>
+2026-10-12 17:10:10.287 << <log><- </log><log>"<html>CLASS=DATA&CLOCK=2610121709</html>"
+2026-10-12 17:10:10.287 << </log><log>
+2026-10-12 17:10:10.287 << </log><rsp>cmd></rsp><log>OK: 1 de 1 confirmados y borrados; quedan 0
+2026-10-12 17:10:10.287 << </log><log>
+2026-10-12 17:10:10.288 << transmitidos 1, quedan 0 en la ventana
+2026-10-12 17:10:10.288 << </log>status
+2026-10-12 17:10:10.288 << <rsp>version      : FWDLGARM_R1 0.0.19
+2026-10-12 17:10:10.288 << </rsp><rsp>identidad    : HW=SPQ_ARM_R1 TYPE=FWDLGARM VER=0.0.19
+2026-10-12 17:10:10.288 << </rsp><rsp>proximo poleo: en 27 s (timerpoll = 60 s)
+2026-10-12 17:10:10.288 << </rsp><rsp>compilado    : Oct 12 2026 16:57:59
+2026-10-12 17:10:10.288 << </rsp><rsp>tick        : 329235 (512 Hz)
+2026-10-12 17:10:10.288 << </rsp><rsp>clock        : 60000000 Hz
+2026-10-12 17:10:10.288 << </rsp><rsp>reset por    : SOFT PIN
+2026-10-12 17:10:10.288 << </rsp><rsp>terminal     : conectada
+2026-10-12 17:10:10.288 << </rsp><rsp>modo tag     : ON (<rsp>/<log>/<end>)
+2026-10-12 17:10:10.288 << </rsp><rsp>pwr locks    : 0x00000009 (solo Sleep)
+2026-10-12 17:10:10.288 << </rsp><rsp>heap libre   : 2992 bytes
+2026-10-12 17:10:10.288 << </rsp><rsp>watchdog     : IWDG corriendo (plazo 90 s por tarea)
+2026-10-12 17:10:10.288 << </rsp><rsp>tareas (stack libre minimo en palabras, y estado):
+2026-10-12 17:10:10.288 << </rsp><rsp>  tkCmd  :  776 de 1024  activa (soy yo)
+2026-10-12 17:10:10.288 << </rsp><rsp>  tkCtl  :  360 de 384   activa</rsp><rsp>
+2026-10-12 17:10:10.288 << </rsp><rsp>  tkSys  :  805 de 1024  activa</rsp><rsp>
+2026-10-12 17:10:10.288 << </rsp><rsp>  tkWan  : 1785 de 2048  activa</rsp><rsp> (ONLINE_DATA)</rsp><rsp>
+2026-10-12 17:10:10.288 << </rsp><rsp>  tkCPres:  388 de 512   activa</rsp><rsp>
+2026-10-12 17:10:10.288 << </rsp><rsp>  tkFlow : no arranca (su ARRANCA_TK* esta en 0)
+2026-10-12 17:10:10.288 << </rsp><rsp>memoria de registros (la ventana, en la EEPROM):
+2026-10-12 17:10:10.288 << </rsp><rsp>  ocupados : 0 de 1984</rsp><rsp>  (0%)</rsp><rsp>
+2026-10-12 17:10:10.288 <<   libres   : 1984
+2026-10-12 17:10:10.288 << </rsp><end>status</end>
+2026-10-12 17:10:10.288 << <rsp>cmd></rsp>wdg
+2026-10-12 17:10:10.289 << <rsp>WDG:: perro de hardware (IWDG): CORRIENDO</rsp><rsp>, ventana ~32768 ms</rsp><rsp>
+2026-10-12 17:10:10.289 <<       plazo por tarea: 90000 ms   (trozo de espera: 60 s)
+2026-10-12 17:10:10.289 << </rsp><rsp>      tkCmd      </rsp><rsp>vigilada, le quedan 89808 ms
+2026-10-12 17:10:10.289 << </rsp><rsp>      tkSys      </rsp><rsp>vigilada, le quedan 54160 ms
+2026-10-12 17:10:10.289 << </rsp><rsp>      tkWan      </rsp><rsp>vigilada, le quedan 80964 ms
+2026-10-12 17:10:10.289 << </rsp><rsp>      tkCtlPres  </rsp><rsp>vigilada, le quedan 57529 ms
+2026-10-12 17:10:10.289 << </rsp><rsp>      tkFlow     </rsp><rsp>sin registrar (no arranco todavia, o no se vigila)
+2026-10-12 17:10:10.289 << </rsp><end>wdg</end>
+2026-10-12 17:10:10.589 << <rsp>cmd></rsp><log>12/10/26 17:10:09;</log><log>PA=-2.50;</log><log>PB=-2.50;</log><log>Q0=30.040;</log><log>V0=0;</log><log>bt3v3=3.326;</log><log>bt12v=11.827;</log><log>
+2026-10-12 17:10:10.589 << </log><log>CNT:: total=357 pendientes=357 cortos=15 imposibles=198
+2026-10-12 17:10:38.530 << </log><log>
+2026-10-12 17:10:38.531 << tkWan:: ONLINE_DATA
+2026-10-12 17:10:38.531 << </log><log>vaciando la ventana: 1 registros
+2026-10-12 17:10:38.831 << </log><log>-> </log><log>ID=860909055244702&HW=SPQ_ARM_R1&TYPE=FWDLGARM&VER=0.0.19&CLASS=DATA&DATE=261012&TIME=171009&PA=-2.50&PB=-2.50&Q0=30.040&V0=0&bt3v3=3.326&bt12v=11.827</log><log>
+2026-10-12 17:10:40.033 << </log><log><- </log><log>"<html>CLASS=DATA&CLOCK=2610121710</html>"
+2026-10-12 17:10:40.033 << </log><log>
+2026-10-12 17:10:40.033 << </log><log>OK: 1 de 1 confirmados y borrados; quedan 0
+2026-10-12 17:10:40.033 << </log><log>
+2026-10-12 17:10:40.034 << transmitidos 1, quedan 0 en la ventana
+2026-10-12 17:11:10.380 << </log><log>12/10/26 17:11:09;</log><log>PA=-2.50;</log><log>PB=-2.50;</log><log>Q0=29.870;</log><log>V0=0;</log><log>bt3v3=3.321;</log><log>bt12v=11.794;</log><log>
+2026-10-12 17:11:10.380 << </log><log>CNT:: total=362 pendientes=362 cortos=15 imposibles=198
+2026-10-12 17:11:40.122 << </log><log>
+2026-10-12 17:11:40.122 << tkWan:: ONLINE_DATA
+2026-10-12 17:11:40.122 << </log><log>vaciando la ventana: 1 registros
+2026-10-12 17:11:40.423 << </log><log>-> </log><log>ID=860909055244702&HW=SPQ_ARM_R1&TYPE=FWDLGARM&VER=0.0.19&CLASS=DATA&DATE=261012&TIME=171109&PA=-2.50&PB=-2.50&Q0=29.870&V0=0&bt3v3=3.321&bt12v=11.794</log><log>
+2026-10-12 17:11:41.023 << </log><log><- </log><log>"<html>CLASS=DATA&CLOCK=2610121711</html>"
+2026-10-12 17:11:41.023 << </log><log>
+2026-10-12 17:11:41.023 << </log><log>OK: 1 de 1 confirmados y borrados; quedan 0
+2026-10-12 17:11:41.024 << </log><log>
+2026-10-12 17:11:41.024 << transmitidos 1, quedan 0 en la ventana
