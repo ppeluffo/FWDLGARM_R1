@@ -102,6 +102,25 @@ int16_t frtos_ioctl( file_descriptor_t fd, uint32_t ulRequest, void *pvValue );
  *----------------------------------------------------------------------------*/
 #define XPRINTF_BUFFER_SIZE     160
 
+/*
+ * ⭐ EL MODO TAG — ver el comentario largo en `frtos-io.c`.
+ *
+ * Con el modo activo, cada llamada a `xprintf()` sobre `fdTERM` sale envuelta
+ * según QUIÉN la escribió:
+ *
+ *   <rsp>…</rsp>   la escribió tkCmd: respuesta a un comando
+ *   <log>…</log>   la escribió otra tarea: mensaje no solicitado
+ *
+ * ⭐ **Default APAGADO**: con los tags el minicom y los scripts de banco dejarían
+ * de ser legibles. La app lo prende con `tag on` al conectarse.
+ *
+ * ⚠ Envuelve cada **llamada**, no cada línea: algunas llamadas emiten media
+ * línea, así que la app concatena los fragmentos consecutivos del mismo tipo.
+ */
+void frtos_tag_modo   ( bool bOn );
+bool frtos_tag_activo ( void );
+void frtos_tag_consola( TaskHandle_t xHandle );
+
 int  xprintf ( const char *fmt, ... );                          /* -> fdTERM */
 int  xfprintf( file_descriptor_t fd, const char *fmt, ... );
 void xputChar( char c );                                        /* -> fdTERM */

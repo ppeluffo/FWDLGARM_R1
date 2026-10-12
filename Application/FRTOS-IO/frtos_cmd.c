@@ -13,6 +13,10 @@ char  cmdLine_buffer[ MAX_INPUT_LENGTH ];
 
 static char cmdLine_History_buffer[ MAX_INPUT_LENGTH ];
 
+/* El nombre del comando en curso, para el `<end>` del modo tag. 16 alcanza: el
+   más largo de los 25 registrados es `status`. */
+static char cNombreCmd[ 16 ];
+
 /* Base de datos de comandos: dos listas paralelas, nombre y función. */
 static char               BDCMD_commandList[ CMDLINE_MAX_COMMANDS ][ CMDLINE_MAX_CMD_LENGTH ];
 static CmdlineFuncPtrType BDCMD_commandFuntions[ CMDLINE_MAX_COMMANDS ];
@@ -137,7 +141,52 @@ bool FRTOS_CMD_process( char cRxedChar )
             FRTOS_CMD_History( CMDLINE_HISTORY_SAVE );
             xputChar( '\r' );
             xputChar( '\n' );
+
+            /*
+             * ⭐ El nombre se copia ANTES de ejecutar, porque
+             * `FRTOS_CMD_makeArgv()` parte `cmdLine_buffer` poniéndole ceros en
+             * los espacios — y no todos los comandos la llaman, así que después
+             * de ejecutar el buffer queda en un estado que depende del comando.
+             */
+            if( frtos_tag_activo() )
+            {
+                uint8_t j = 0U;
+
+                while( ( j < ( uint8_t ) ( sizeof( cNombreCmd ) - 1U ) ) &&
+                       ( cmdLine_buffer[ j ] != '\0' ) &&
+                       ( cmdLine_buffer[ j ] != ' '  ) )
+                {
+                    cNombreCmd[ j ] = cmdLine_buffer[ j ];
+                    j++;
+                }
+
+                cNombreCmd[ j ] = '\0';
+            }
+
             pv_CMD_execute();
+
+            /*
+             * ⭐⭐ EL `<end>` SALE SIEMPRE, y no es simetría decorativa: si
+             * faltara ante un comando desconocido o una línea vacía, la app
+             * quedaría esperando el cierre **para siempre**. Un protocolo donde
+             * el fin de respuesta es opcional no es un protocolo.
+             *
+             * Va DESPUÉS de ejecutar y ANTES del prompt: todo lo que llegue
+             * detrás del `<end>` ya no pertenece a ese comando.
+             *
+             * ⚠ Y se escribe con `frtos_write()` directo, NO con `xprintf()`:
+             * pasar por ahí lo envolvería en `<rsp>…</rsp>` —lo emite tkCmd— y el
+             * marcador terminaría anidado dentro de la respuesta que viene a
+             * cerrar.
+             */
+            if( frtos_tag_activo() )
+            {
+                ( void ) frtos_write( fdTERM, "<end>", 5U );
+                ( void ) frtos_write( fdTERM, cNombreCmd,
+                                      ( uint16_t ) strlen( cNombreCmd ) );
+                ( void ) frtos_write( fdTERM, "</end>\r\n", 8U );
+            }
+
             ret = true;
             pv_CMD_init();
             pv_CMD_print_prompt();

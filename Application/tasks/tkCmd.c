@@ -346,6 +346,8 @@ static void cmdCls( void );
 static void cmdFs( void );
 static void prvFsUso( void );
 static void cmdKeys( void );
+static void cmdTag( void );
+static void prvTagUso( void );
 static void cmdReset( void );
 
 /* Ayudas detalladas de cada comando. Se definen junto a su comando, más abajo. */
@@ -437,6 +439,16 @@ void tkCmd( void *pvParameters )
      * después de un 'reboot', que no resetea nada, el bit quedaba puesto.
      */
     wdg_registrar( wdgTK_CMD );
+
+    /*
+     * ⭐ Se presenta ante la capa de IO: con el modo tag activo, `xprintf()`
+     * compara la tarea que escribe contra este handle para decidir si la línea
+     * es `<rsp>` (respuesta a un comando) o `<log>` (no solicitada).
+     *
+     * ⚠ Si esto faltara, TODO saldría como `<log>` — que es el default seguro:
+     * nunca una respuesta disfrazada de mensaje del equipo, al revés sería peor.
+     */
+    frtos_tag_consola( xTaskGetCurrentTaskHandle() );
 
     ulCausaReset = RCC->CSR;
     __HAL_RCC_CLEAR_RESET_FLAGS();
@@ -555,6 +567,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "fs",     cmdFs     );
     FRTOS_CMD_register( "keys",   cmdKeys   );
     FRTOS_CMD_register( "wdg",    cmdWdg    );
+    FRTOS_CMD_register( "tag",    cmdTag    );
     FRTOS_CMD_register( "reset",  cmdReset  );
 
     /* La versión y la fecha de compilación en el banner, no sólo en 'status':
@@ -660,6 +673,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "fs",     "memoria de registros: estado, lectura y formateo",     prvFsUso      },
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "wdg",    "estado del watchdog: el perro y el plazo de cada tarea", prvWdgUso     },
+    { "tag",    "<rsp>/<log>/<end> para una app (default OFF)",          prvTagUso     },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
 };
 
@@ -737,6 +751,14 @@ static void cmdStatus( void )
     xprintf( "clock        : %lu Hz\r\n", ( unsigned long ) SystemCoreClock );
     prvImprimirCausaReset();
     xprintf( "terminal     : %s\r\n", drv_term_sense_presente() ? "conectada" : "ausente" );
+    /*
+     * ⭐ Pedido de Pablo (2026-10-12). Se informa SIEMPRE, no sólo cuando está
+     * encendido: el modo cambia **el formato de todo lo que sale**, así que un
+     * operador que abra el minicom después de que una app lo dejó activo vería
+     * los tags sin saber por qué. Mismo criterio que el `MODE` del INA3221 y el
+     * `PUPDR` del contador — un estado que no se dice manda a dudar de la consola.
+     */
+    xprintf( "modo tag     : %s\\r\\n", frtos_tag_activo() ? "ON (<rsp>/<log>/<end>)" : "off" );
     xprintf( "pwr locks    : 0x%08lX %s\r\n",
              ( unsigned long ) pwr_lock_estado(),
              pwr_deep_sleep_permitido() ? "(Stop 2 habilitado)" : "(solo Sleep)" );
@@ -4481,6 +4503,63 @@ static void cmdKeys( void )
         xprintf( "ErrorCode HAL   : 0x%08lX\r\n",
                  ( unsigned long ) drv_uart_ultimo_error( drvUART_TERM ) );
     }
+}
+//------------------------------------------------------------------------------
+/*
+ * ⭐ El modo tag: ver el comentario largo en `frtos-io.c`.
+ *
+ * Existe para la app que se conecta por la terminal (pedido de Pablo,
+ * 2026-10-12): el equipo emite respuestas a comandos y mensajes no solicitados
+ * por el mismo canal, y sin tags no hay forma de separarlos ni de saber cuándo
+ * terminó una respuesta multilínea.
+ */
+static void cmdTag( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs >= 1U ) && ( argv[ 1 ] != NULL ) )
+    {
+        if( strcmp( argv[ 1 ], "on" ) == 0 )
+        {
+            frtos_tag_modo( true );
+            xprintf( "modo tag: ON\r\n" );
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "off" ) == 0 )
+        {
+            /*
+             * ⚠ A partir de esta línea ya no salen tags, así que **este comando
+             * no tiene `<end>`** y su confirmación llega en texto plano. No es un
+             * descuido: es la señal inequívoca de que el modo se apagó, y es lo
+             * único coherente — seguir emitiendo tags después de que alguien
+             * pidió que no haya sería peor.
+             */
+            frtos_tag_modo( false );
+            xprintf( "modo tag: OFF (este mensaje ya sale sin tags, y sin <end>)\r\n" );
+            return;
+        }
+
+        prvTagUso();
+        return;
+    }
+
+    xprintf( "modo tag: %s\r\n", frtos_tag_activo() ? "ON" : "OFF" );
+    prvTagUso();
+}
+//------------------------------------------------------------------------------
+static void prvTagUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  tag            el estado del modo\r\n" );
+    xprintf( "  tag on|off     envuelve lo que sale por la consola (default OFF)\r\n" );
+    xprintf( "\r\n  <rsp>..</rsp>  lo escribio tkCmd: respuesta a un comando\r\n" );
+    xprintf( "  <log>..</log>  lo escribio otra tarea: NO solicitado\r\n" );
+    xprintf( "  <end>cmd</end> termino de procesarse 'cmd'\r\n" );
+    xprintf( "\r\n  Envuelve cada LLAMADA, no cada linea: algunas emiten media\r\n" );
+    xprintf( "  linea, asi que hay que concatenar los fragmentos seguidos del\r\n" );
+    xprintf( "  mismo tipo. Y el <end> sale SIEMPRE, incluso si el comando no\r\n" );
+    xprintf( "  existe: si no, una app quedaria esperando el cierre.\r\n" );
 }
 //------------------------------------------------------------------------------
 static void cmdReset( void )

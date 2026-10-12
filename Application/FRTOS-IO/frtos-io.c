@@ -257,6 +257,72 @@ static char              cPrintfBuffer[ XPRINTF_BUFFER_SIZE ];
 static SemaphoreHandle_t xPrintfMutex = NULL;
 static StaticSemaphore_t xPrintfMutexCtrl;
 
+/*
+ * ---------------------------------------------------------------------------
+ * ⭐⭐ EL MODO TAG: para que una app pueda separar el log de las respuestas
+ * ---------------------------------------------------------------------------
+ * Pedido de Pablo (2026-10-12) para la app que se conecta por la terminal. El
+ * equipo emite DOS clases de mensaje por el mismo canal —respuestas a comandos y
+ * mensajes no solicitados (el poleo, las sesiones de `tkWan`)— y una app no tiene
+ * forma de separarlos ni de saber cuándo terminó una respuesta multilínea.
+ *
+ *   <rsp>…</rsp>   lo escribió tkCmd: es respuesta a un comando
+ *   <log>…</log>   lo escribió otra tarea: no solicitado
+ *   <end>cmd</end> terminó de procesarse el comando `cmd`
+ *
+ * ⭐ **Default APAGADO**, y no es un detalle: con el modo activo el minicom y los
+ * scripts de banco verían los tags y dejarían de ser legibles. La app lo prende
+ * al conectarse con `tag on`.
+ *
+ * ⛔ **POR LLAMADA Y NO POR BLOQUE, y ésa es la decisión de diseño.** Envolver la
+ * respuesta entera —`<rsp>` al empezar el comando y `</rsp>` al terminar— parece
+ * más prolijo y **está mal**: `xprintf()` es atómico por llamada, pero un bloque
+ * de 20 líneas no lo es, así que otra tarea mete su línea en el medio. Pasa de
+ * verdad y se ve en los logs de banco:
+ *
+ *     cmd>fs
+ *       guardados : 19 de 1984
+ *     cmd>-> ID=8609090…&CLASS=DATANR&…      <- tkWan metiendose
+ *
+ * Con la envoltura por bloque ese `<log>` caería **adentro** del `<rsp>` y la app
+ * recibiría tags cruzados. Por llamada, cada fragmento se autoidentifica y **el
+ * orden de llegada deja de importar**.
+ *
+ * ⚠ Y es por LLAMADA, no por línea: algunas llamadas emiten media línea —el
+ * prompt `cmd>`, o un `xprintf( "  V0: " )` seguido de otro con el valor—, así
+ * que la app tiene que **concatenar los fragmentos consecutivos del mismo tipo**.
+ * Envolver por línea de verdad exigiría reescribir las 896 llamadas del árbol.
+ *
+ * ⭐ **El tipo sale de QUÉ TAREA escribe**, no de un parámetro: con 896 llamadas,
+ * un argumento habría que acertarlo 896 veces y **una sola mal marcada confunde a
+ * la app en silencio**. Es el mismo criterio que `wdg_kick()` resolviendo por
+ * `xTaskGetCurrentTaskHandle()`: que la forma de usarlo mal no exista.
+ *
+ * ⭐ Y por eso funciona el caso que más costaría a mano: `wan_sesion_datos()`
+ * corre en `tkWan` cuando la llama la FSM y en `tkCmd` cuando la llama
+ * `lte data` — el criterio por tarea acierta en los dos **sin tocar esa función**.
+ */
+static volatile bool bModoTag;
+static TaskHandle_t  xHandleConsola;   /* lo registra tkCmd al arrancar */
+
+void frtos_tag_modo( bool bOn )
+{
+    bModoTag = bOn;
+}
+
+bool frtos_tag_activo( void )
+{
+    return bModoTag;
+}
+
+void frtos_tag_consola( TaskHandle_t xHandle )
+{
+    /* ⚠ La capa de IO no incluye `tkCmd.h`: la tarea se registra sola. Si no lo
+       hiciera, todo saldría como `<log>`, que es el default seguro — nunca una
+       respuesta disfrazada de mensaje del equipo. */
+    xHandleConsola = xHandle;
+}
+//------------------------------------------------------------------------------
 static int prvVfprintf( file_descriptor_t fd, const char *fmt, va_list ap )
 {
     /* Creación perezosa: xprintf() puede llamarse antes de frtos_open_all(). */
@@ -279,7 +345,30 @@ static int prvVfprintf( file_descriptor_t fd, const char *fmt, va_list ap )
         {
             iLen = ( int ) sizeof( cPrintfBuffer ) - 1;
         }
+
+        /*
+         * ⚠ Los tags se escriben APARTE del buffer, no concatenados: el buffer
+         * son 160 bytes y ya hay una trampa documentada por eso —el frame se
+         * truncaba en silencio al pasarlo por `xprintf`—. Metiendo el tag
+         * adentro, las líneas largas perderían 11 caracteres de contenido.
+         *
+         * Y van DENTRO del mutex, para que el tag y su contenido sigan siendo
+         * una sola unidad atómica frente a las otras tareas.
+         */
+        const bool bTag = ( bModoTag && ( fd == fdTERM ) );
+        const bool bRsp = ( xTaskGetCurrentTaskHandle() == xHandleConsola );
+
+        if( bTag )
+        {
+            ( void ) frtos_write( fd, bRsp ? "<rsp>" : "<log>", 5U );
+        }
+
         ( void ) frtos_write( fd, cPrintfBuffer, ( uint16_t ) iLen );
+
+        if( bTag )
+        {
+            ( void ) frtos_write( fd, bRsp ? "</rsp>" : "</log>", 6U );
+        }
     }
 
     ( void ) xSemaphoreGive( xPrintfMutex );
