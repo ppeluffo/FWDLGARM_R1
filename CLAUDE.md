@@ -6027,6 +6027,88 @@ a 5 s bajaría las despertadas de 7700 a ~2000 por hora, pero obliga a repasar e
 —hoy 90 s, con `tkCtl` pateando cada segundo, o sea con 30× de margen sobre la ventana del IWDG— y a
 aceptar que la terminal se detecte hasta 5 s más tarde.
 
+### ✅ EL WATCHDOG MUERDE: la cadena completa, del cuelgue al servidor (`0.0.18`, 2026-10-12)
+
+Faltaba desde el 2026-09-22, y era **la mitad del test**: hasta ahora sólo se había probado que el
+perro **no** muerde (15 ventanas sin falsos positivos). Que **sí** muerda, y que la causa llegue a
+donde tiene que llegar, nunca se había visto.
+
+```
+[   0.3s]  wdg colgar  ->  la consola muere
+[  95.2s]  [X] WATCHDOG: 'tkCmd' se paso del plazo (90000 ms).
+           Dejo de patear el IWDG: el equipo se resetea en ~32 s.
+[ 123.2s]  banner de arranque            <- SE RESETEO SOLO
+[ 123.5s]  reset por : IWDG PIN
+[ 144.2s]  ...&CSQ=55&WDG=3&BH=0x81...   <- LA CAUSA LLEGO AL SERVIDOR
+```
+
+| Criterio | Resultado |
+|---|---|
+| ⭐ El juez identifica al culpable | ✅ lo **nombra**: `'tkCmd' se paso del plazo` |
+| ⭐ Los tiempos cierran | ✅ 95,2 s = plazo de 90 + una vuelta de `tkCtl` (5 s); el reset 28 s después, coherente con una ventana de 32,8 s ya empezada |
+| ⭐⭐ La causa queda en el hardware | ✅ **`reset por: IWDG`** |
+| ⭐⭐⭐ **Y VIAJA al servidor** | ✅ **`WDG=3`** (`wanRESET_IWDG`) en el `CONF_ALL` |
+| El equipo se recupera solo | ✅ `PING` → `CONFIG=OK` → transmitió los registros pendientes |
+| La FAT y el ADC sobreviven | ✅ `FS:: 2 registros guardados`; `DEEPPWD=1 VREFEN=0` |
+
+⚠ **El `PIN` que acompaña al `IWDG` es correcto**, no un error: las banderas de `RCC_CSR` son
+**acumulativas**, y `wan_causa_reset()` informa **la más específica** — un reset por watchdog dice
+mucho más que el `PIN` que suele venir con él.
+
+#### ⛔⛔ Y el test PODÍA PASAR POR LA RAZÓN EQUIVOCADA
+
+`wdg colgar` existía desde el 2026-09-22 pero giraba con `ulGirando++`, **sin ceder la CPU**. Hoy eso
+funciona porque `configUSE_TIME_SLICING` **no está definido** en `FreeRTOSConfig.h` y queda en su
+default de **1**, así que con las seis tareas compartiendo prioridad el tick fuerza el cambio de
+contexto y `tkCtl` sigue juzgando.
+
+⛔ **Pero el día que alguien ponga ese define en 0, un lazo que acapara BLOQUEARÍA a `tkCtl`**: el
+IWDG resetearía igual —porque el juez no corre— y el test seguiría "pasando" **sin haber ejercitado
+el mecanismo cooperativo**. ⭐ Un test que pasa por otra razón es peor que no tenerlo: es la familia
+del volcado de registros mal decodificado.
+
+⭐ Ahora el lazo **cede con `vTaskDelay()` y no reporta**, que es exactamente lo que este watchdog
+vigila —**el progreso, no la ejecución**—, así que el único camino posible al reset es el que se vino
+a probar.
+
+⭐ Y el comando **se niega si el IWDG está detenido**: con `ARRANCA_WDG = 0` ese lazo no tiene salida
+y el equipo quedaría trabado hasta un corte de alimentación, pareciendo que el firmware se rompió.
+
+### ✅ El contador de lotes lleva su propio checksum (`0.0.18`, 2026-10-12)
+
+Era **el único dato de la SRAM del MCP79410 sin validar**, y por eso fue el único que se manifestó:
+**`LOTE9041`** el 2026-09-21 y **`LOTE3682`** el 2026-10-12. La lectura sólo filtraba `0xFFFFFFFF`, y
+una SRAM sin respaldo queda con **cualquier cosa**, no necesariamente con unos.
+
+| Dato | Dirección | Protección |
+|---|---|---|
+| FAT | 5 | checksum **+** coherencia de punteros |
+| marca de sync del RTC | 32 | checksum —*"para no creerle a basura"*— |
+| ⛔ el contador de lotes | 21 | **nada** |
+
+⚠ **Por qué un checksum propio y NO "reiniciarlo cuando la FAT no valide"**, que era la idea anotada:
+eso lo haría depender de que **las dos cosas fallen juntas** y de un módulo que no le corresponde
+conocer. El checksum lo resuelve solo, es el patrón que ya usan los otros dos, y no acopla nada.
+
+⭐ El rango va con **`offsetof`** — no con `sizeof - 1`, que es la trampa que hacía que la FAT se
+declarara inválida en cada arranque (2026-09-09).
+
+**Validado en los dos sentidos:**
+
+```
+primera corrida   SD:: el contador de lotes no valida (se perdio el respaldo del RTC?)
+                  SD:: 6 registros volcados a LOTE0001.DAT     <- arranca de cero
+tras el reset     SD:: 2 registros volcados a LOTE0002.DAT     <- persistio, sin avisar
+por WATCHDOG      LOTE0002.DAT  110 bytes  2026-10-12 11:01    <- y con fecha real
+```
+
+⭐ **Rechazó el `3683` que había grabado el firmware viejo sin checksum, y después sobrevivió a un
+reset por watchdog** — que es la prueba de persistencia más fuerte que se podía pedir.
+
+⭐ Perder el contador es **inofensivo**: se arranca de cero y `prvNombreDeLote()` saltea los nombres
+que ya existan en la tarjeta. Lo que **no** es inofensivo es un número inventado, porque entonces los
+nombres dejan de decir nada sobre el orden.
+
 ### ⛔ Los buffers, los stacks y el heap NO se agrandan — y el motivo no es el espacio
 
 Pregunta de Pablo (**2026-10-12**): *"Creo que tenemos memoria ram de sobra de modo que si quieres
@@ -6145,7 +6227,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **6b** | Modbus: el enganche al poleo de `tkSys` | ✅ **VALIDADO el 2026-09-21** |
 | **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | ✅ **VALIDADO el 2026-09-22** |
 | ~~7b~~ | ~~`tkFlow`/flowcontrol~~ | ⛔ **ELIMINADO el 2026-09-22**: no se usa. Quedan sólo las órdenes `VOPEN`/`VCLOSE` |
-| **8** | **Watchdog cooperativo + IWDG** | ⛔ **escrito y DESCONECTADO**: nadie llama `drv_wdt_arrancar()` ni juzga la tabla. Hoy es inerte |
+| **8** | **Watchdog cooperativo + IWDG** | ✅ **CERRADO el 2026-10-12**: la cadena completa, del cuelgue al `WDG=3` en el servidor |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo, **el período de `tkCtl`** | |
 
 ✅ Los modos `PWR_RTU` y `PWR_SILENT` **entraron el 2026-09-12** — ver la sección de los cinco modos.
