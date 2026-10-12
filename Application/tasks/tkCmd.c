@@ -2898,7 +2898,7 @@ static void prvLteSet( const char *pcCmd )
         return;
     }
 
-    ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+    ( void ) xwrite_term( pcRta, ( uint16_t ) sRet );
 
     /*
      * Se busca el OK en vez de dar por bueno cualquier respuesta: el módulo
@@ -2937,7 +2937,7 @@ static void prvLteGrabar( void )
 
     if( sRet > 0 )
     {
-        ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+        ( void ) xwrite_term( pcRta, ( uint16_t ) sRet );
     }
 
     xprintf( "\r\nel modulo quedo REINICIADO y en modo TRANSPARENTE.\r\n" );
@@ -3168,7 +3168,7 @@ static void prvLteInfo( void )
         /* La respuesta trae el eco del comando y los CR/LF del módulo, así que
            sale tal cual en vez de intentar recortarla: cualquier parseo acá
            sería una suposición sobre un formato que todavía no está fijado. */
-        ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+        ( void ) xwrite_term( pcRta, ( uint16_t ) sRet );
 
         /*
          * El IMEI se aprovecha de paso: es el `ID` con el que el servidor
@@ -3348,6 +3348,12 @@ static void prvLteBridge( void )
 
         if( sN > 0 )
         {
+            /*
+             * ⚠ Éste es el único texto de la consola que NO lleva tag, y es a
+             * propósito: el puente es TRANSPARENTE byte a byte, y envolver cada
+             * ráfaga de 20 ms rompería justo lo que el comando viene a dar. Es
+             * herramienta de banco, se usa con el minicom y no con la app.
+             */
             ( void ) frtos_write( fdTERM, pcBuf, ( uint16_t ) sN );
         }
 
@@ -4124,7 +4130,7 @@ static void cmdFrame( void )
      *
      * El frame ya es una cadena terminada: no necesita formateo, sólo salir.
      */
-    ( void ) frtos_write( fdTERM, pcFrame, usLargo );
+    ( void ) xwrite_term( pcFrame, usLargo );
 
     xprintf( "\r\n  (%u bytes de %u)\r\n",
              ( unsigned ) usLargo, ( unsigned ) sizeof( pcFrame ) );
@@ -4398,7 +4404,7 @@ static void cmdFs( void )
 
         if( usLargo > 0U )
         {
-            ( void ) frtos_write( fdTERM, pcFrame, usLargo );
+            ( void ) xwrite_term( pcFrame, usLargo );
             xprintf( "\r\n  (%u bytes)\r\n", ( unsigned ) usLargo );
         }
         return;

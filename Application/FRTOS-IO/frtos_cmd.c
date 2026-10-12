@@ -147,8 +147,15 @@ bool FRTOS_CMD_process( char cRxedChar )
              * `FRTOS_CMD_makeArgv()` parte `cmdLine_buffer` poniéndole ceros en
              * los espacios — y no todos los comandos la llaman, así que después
              * de ejecutar el buffer queda en un estado que depende del comando.
+             *
+             * ⛔ Y se copia SIEMPRE, sin preguntar si el modo tag está activo.
+             * Condicionarlo parecía el ahorro obvio y estaba MAL: el comando que
+             * ENCIENDE el modo se ejecuta con el modo todavía apagado, así que al
+             * llegar al `</end>` el nombre estaba vacío y `tag on` —justo el
+             * primero que la app manda— cerraba con `<end></end>`. Copiar 16
+             * bytes por línea tipeada no se mide; un caso de borde en el primer
+             * comando del protocolo, sí.
              */
-            if( frtos_tag_activo() )
             {
                 uint8_t j = 0U;
 

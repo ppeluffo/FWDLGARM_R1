@@ -323,6 +323,31 @@ void frtos_tag_consola( TaskHandle_t xHandle )
     xHandleConsola = xHandle;
 }
 //------------------------------------------------------------------------------
+/*
+ * Escribe con su tag, si el modo está activo y el destino es la consola.
+ *
+ * ⚠ Hay que llamarla con el mutex de impresión TOMADO: el tag, el contenido y el
+ * cierre tienen que salir juntos o otra tarea los parte al medio.
+ */
+static void prvEscribirConTag( file_descriptor_t fd, const char *pcTexto,
+                               uint16_t usLargo )
+{
+    const bool bTag = ( bModoTag && ( fd == fdTERM ) );
+    const bool bRsp = ( xTaskGetCurrentTaskHandle() == xHandleConsola );
+
+    if( bTag )
+    {
+        ( void ) frtos_write( fd, bRsp ? "<rsp>" : "<log>", 5U );
+    }
+
+    ( void ) frtos_write( fd, pcTexto, usLargo );
+
+    if( bTag )
+    {
+        ( void ) frtos_write( fd, bRsp ? "</rsp>" : "</log>", 6U );
+    }
+}
+//------------------------------------------------------------------------------
 static int prvVfprintf( file_descriptor_t fd, const char *fmt, va_list ap )
 {
     /* Creación perezosa: xprintf() puede llamarse antes de frtos_open_all(). */
@@ -355,25 +380,50 @@ static int prvVfprintf( file_descriptor_t fd, const char *fmt, va_list ap )
          * Y van DENTRO del mutex, para que el tag y su contenido sigan siendo
          * una sola unidad atómica frente a las otras tareas.
          */
-        const bool bTag = ( bModoTag && ( fd == fdTERM ) );
-        const bool bRsp = ( xTaskGetCurrentTaskHandle() == xHandleConsola );
-
-        if( bTag )
-        {
-            ( void ) frtos_write( fd, bRsp ? "<rsp>" : "<log>", 5U );
-        }
-
-        ( void ) frtos_write( fd, cPrintfBuffer, ( uint16_t ) iLen );
-
-        if( bTag )
-        {
-            ( void ) frtos_write( fd, bRsp ? "</rsp>" : "</log>", 6U );
-        }
+        prvEscribirConTag( fd, cPrintfBuffer, ( uint16_t ) iLen );
     }
 
     ( void ) xSemaphoreGive( xPrintfMutex );
 
     return iLen;
+}
+//------------------------------------------------------------------------------
+/*
+ * ⭐ Texto que NO puede pasar por `xprintf()`, con su tag igual.
+ *
+ * Existe porque hay cosas que **no se pueden formatear**: el frame del servidor
+ * llega a ~350 bytes contra los 160 de `cPrintfBuffer`, y pasarlo por `xprintf`
+ * lo **truncaba en silencio** —la trampa documentada del 2026-09-08—. Esas 13
+ * llamadas usaban `frtos_write( fdTERM, … )` directo, y con el modo tag eso
+ * dejaba **texto suelto entre tags**: la app vería un frame sin envolver y no
+ * sabría de qué clase es.
+ *
+ * ⚠ Toma el MISMO mutex que `xprintf()`, así que el tag, el texto y el cierre son
+ * una unidad atómica frente a las otras tareas — y además no se intercala con un
+ * `xprintf()` concurrente.
+ */
+int xwrite_term( const char *pcTexto, uint16_t usLargo )
+{
+    if( ( pcTexto == NULL ) || ( usLargo == 0U ) )
+    {
+        return 0;
+    }
+
+    if( xPrintfMutex == NULL )
+    {
+        xPrintfMutex = xSemaphoreCreateMutexStatic( &xPrintfMutexCtrl );
+    }
+
+    if( xSemaphoreTake( xPrintfMutex, portMAX_DELAY ) != pdTRUE )
+    {
+        return -1;
+    }
+
+    prvEscribirConTag( fdTERM, pcTexto, usLargo );
+
+    ( void ) xSemaphoreGive( xPrintfMutex );
+
+    return ( int ) usLargo;
 }
 //------------------------------------------------------------------------------
 int xprintf( const char *fmt, ... )

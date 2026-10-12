@@ -121,6 +121,16 @@ void frtos_tag_modo   ( bool bOn );
 bool frtos_tag_activo ( void );
 void frtos_tag_consola( TaskHandle_t xHandle );
 
+/*
+ * ⭐ Texto a la consola que NO puede pasar por `xprintf()` — el frame llega a
+ * ~350 bytes contra los 160 de su buffer, y ahí se truncaría en silencio.
+ *
+ * Usala en vez de `frtos_write( fdTERM, … )`: hace lo mismo pero **sale con su
+ * tag** cuando el modo está activo, así que la app no recibe texto suelto entre
+ * tags. Toma el mismo mutex que `xprintf()`, así que es atómica frente al resto.
+ */
+int xwrite_term( const char *pcTexto, uint16_t usLargo );
+
 int  xprintf ( const char *fmt, ... );                          /* -> fdTERM */
 int  xfprintf( file_descriptor_t fd, const char *fmt, ... );
 void xputChar( char c );                                        /* -> fdTERM */

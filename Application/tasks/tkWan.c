@@ -176,7 +176,7 @@ static bool prvLteTxRx( const char *pcFrame, uint16_t usLargo,
                         char *pcRta, uint16_t usRtaSize )
 {
     xprintf( "-> " );
-    ( void ) frtos_write( fdTERM, pcFrame, usLargo );
+    ( void ) xwrite_term( pcFrame, usLargo );
     xprintf( "\r\n" );
 
     drv_lte_flush();
@@ -199,7 +199,7 @@ static bool prvLteTxRx( const char *pcFrame, uint16_t usLargo,
     pcRta[ sRet ] = '\0';
 
     xprintf( "<- " );
-    ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+    ( void ) xwrite_term( pcRta, ( uint16_t ) sRet );
     xprintf( "\r\n" );
 
     return true;
@@ -807,7 +807,7 @@ bool wan_sesion_datos( void )
         }
 
         xprintf( "-> " );
-        ( void ) frtos_write( fdTERM, pcFrame, usLargo );
+        ( void ) xwrite_term( pcFrame, usLargo );
         xprintf( "\r\n" );
 
         if( bConfirmar )
@@ -857,7 +857,7 @@ bool wan_sesion_datos( void )
         }
 
         xprintf( "<- " );
-        ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) strlen( pcRta ) );
+        ( void ) xwrite_term( pcRta, ( uint16_t ) strlen( pcRta ) );
         xprintf( "\r\n" );
 
         wan_data_ordenes_t xOrdenes;
@@ -980,7 +980,7 @@ void wan_sesion_ping( void )
     }
 
     xprintf( "-> " );
-    ( void ) frtos_write( fdTERM, pcFrame, usLargo );
+    ( void ) xwrite_term( pcFrame, usLargo );
     xprintf( "\r\n" );
 
     drv_lte_flush();
@@ -1009,7 +1009,7 @@ void wan_sesion_ping( void )
     pcRta[ sRet ] = '\0';
 
     xprintf( "<- " );
-    ( void ) frtos_write( fdTERM, pcRta, ( uint16_t ) sRet );
+    ( void ) xwrite_term( pcRta, ( uint16_t ) sRet );
     xprintf( "\r\n" );
 
     /*

@@ -897,7 +897,7 @@ static void prvVer( const char *pcNombre, uint16_t usLineas )
 
         /* Sin xprintf: la línea es un frame y puede pasar los 160 bytes de su
            buffer. Ver wan_frame. */
-        ( void ) frtos_write( fdTERM, pcBufSector, ( uint16_t ) strlen( pcBufSector ) );
+        ( void ) xwrite_term( pcBufSector, ( uint16_t ) strlen( pcBufSector ) );
     }
 
     ( void ) f_close( &xFile );
