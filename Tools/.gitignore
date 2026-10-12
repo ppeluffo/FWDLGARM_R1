@@ -1,0 +1,6 @@
+# Salidas de las corridas del test del contador: son DATOS, no herramientas.
+# Se me colaron al repo con un `git add -A` en el commit 415fd5c.
+equipo_*.log
+pulsos_*.csv
+generador_*.log
+PULSOS*.CSV
