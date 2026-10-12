@@ -32,6 +32,10 @@
 
 /* USER CODE BEGIN DECL */
 
+#include "drv_sd.h"
+#include "fs_sd.h"
+
+
 /* Includes ------------------------------------------------------------------*/
 #include <string.h>
 #include "ff_gen_drv.h"
@@ -81,7 +85,19 @@ DSTATUS USER_initialize (
 )
 {
   /* USER CODE BEGIN INIT */
-    Stat = STA_NOINIT;
+    /*
+     * ⚠ Acá NO se enciende la tarjeta ni se la arranca: eso lo hace la capa de
+     * arriba (`fs_sd`) con drv_sd_power() + drv_sd_arrancar(), porque es ella la
+     * que sabe cuándo vale la pena pagar el encendido y cuándo hay que apagar.
+     * Este diskio sólo informa si la tarjeta está lista AHORA.
+     *
+     * Si se encendiera desde acá, FatFs prendería la SD sola en cada f_mount y
+     * nadie sabría cuándo apagarla — que es justo el control que el diseño de
+     * ventana quiere conservar.
+     */
+    ( void ) pdrv;
+
+    Stat = drv_sd_power_estado() ? 0 : STA_NOINIT;
     return Stat;
   /* USER CODE END INIT */
 }
@@ -96,7 +112,9 @@ DSTATUS USER_status (
 )
 {
   /* USER CODE BEGIN STATUS */
-    Stat = STA_NOINIT;
+    ( void ) pdrv;
+
+    Stat = drv_sd_power_estado() ? 0 : STA_NOINIT;
     return Stat;
   /* USER CODE END STATUS */
 }
@@ -117,6 +135,24 @@ DRESULT USER_read (
 )
 {
   /* USER CODE BEGIN READ */
+    ( void ) pdrv;
+
+    if( !drv_sd_power_estado() )
+    {
+        return RES_NOTRDY;
+    }
+
+    /* De a un sector: `drv_sd` no expone lectura múltiple (CMD18). Con archivos
+       chicos y volcados espaciados no compensa agregarla; el día que un volcado
+       sea lento, ése es el lugar donde mirar. */
+    for( UINT i = 0U; i < count; i++ )
+    {
+        if( !drv_sd_leer_sector( sector + i, &buff[ i * _MAX_SS ] ) )
+        {
+            return RES_ERROR;
+        }
+    }
+
     return RES_OK;
   /* USER CODE END READ */
 }
@@ -138,7 +174,32 @@ DRESULT USER_write (
 )
 {
   /* USER CODE BEGIN WRITE */
-  /* USER CODE HERE */
+    ( void ) pdrv;
+
+    if( !drv_sd_power_estado() )
+    {
+        return RES_NOTRDY;
+    }
+
+    for( UINT i = 0U; i < count; i++ )
+    {
+        if( !drv_sd_escribir_sector( sector + i, &buff[ i * _MAX_SS ] ) )
+        {
+            return RES_ERROR;
+        }
+
+        /*
+         * Indicador de actividad. Éste es el ÚNICO punto que sabe que una
+         * operación larga —un `f_mkfs()`, un volcado grande— está avanzando:
+         * desde afuera esas llamadas son un bloque opaco de varios segundos.
+         *
+         * El diskio sólo avisa; qué mostrar lo decide `fs_sd`, así que esta capa
+         * no sabe nada de la consola. Fuera de una operación larga la función
+         * vuelve en una comparación.
+         */
+        fs_sd_progreso();
+    }
+
     return RES_OK;
   /* USER CODE END WRITE */
 }
@@ -159,8 +220,48 @@ DRESULT USER_ioctl (
 )
 {
   /* USER CODE BEGIN IOCTL */
-    DRESULT res = RES_ERROR;
-    return res;
+    ( void ) pdrv;
+
+    if( !drv_sd_power_estado() )
+    {
+        return RES_NOTRDY;
+    }
+
+    switch( cmd )
+    {
+        case CTRL_SYNC:
+            /* `drv_sd_escribir_sector()` no vuelve hasta que la tarjeta terminó
+               su ciclo interno, así que no hay nada pendiente que forzar. */
+            return RES_OK;
+
+        case GET_SECTOR_COUNT:
+            /* Sólo lo usa f_mkfs. Sale de la CSD, que `drv_sd_arrancar()` ya
+               leyó al inicializar. */
+            *( DWORD * ) buff = ( DWORD ) drv_sd_sectores();
+            return RES_OK;
+
+        case GET_SECTOR_SIZE:
+            *( WORD * ) buff = _MAX_SS;
+            return RES_OK;
+
+        case GET_BLOCK_SIZE:
+            /*
+             * El tamaño del bloque de borrado, en sectores, y **1 no es la
+             * verdad**: una SD borra de a bloques de decenas de KB. Se declara 1
+             * porque el valor real sale del campo `ERASE_BLK_LEN` de la CSD, que
+             * este driver no expone, y **1 es el valor seguro**: hace que f_mkfs
+             * alinee de forma conservadora en vez de asumir una alineación que
+             * la tarjeta no tiene.
+             *
+             * Sólo afecta al formateo, que en este equipo casi no se usa: las
+             * tarjetas vienen formateadas de fábrica.
+             */
+            *( DWORD * ) buff = 1U;
+            return RES_OK;
+
+        default:
+            return RES_PARERR;
+    }
   /* USER CODE END IOCTL */
 }
 #endif /* _USE_IOCTL == 1 */
