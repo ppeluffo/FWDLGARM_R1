@@ -6109,6 +6109,148 @@ reset por watchdog** — que es la prueba de persistencia más fuerte que se pod
 que ya existan en la tarjeta. Lo que **no** es inofensivo es un número inventado, porque entonces los
 nombres dejan de decir nada sobre el orden.
 
+### ✅ `lte leer` y `lte grabar`: configurar el módem desde la app (`0.0.19`, 2026-10-12)
+
+Pedido de Pablo: *"Sería bueno para la app que estamos haciendo tener un comando que mate la tkWan,
+prenda el modem y lea su configuración. Otro que lo ponga en modo AT, lo configure, salve."*
+
+Los comandos de antes —`esc`, `info`, `set`, `save`, `exit`— son **las piezas**, y asumen que el que
+las usa maneja el estado del módulo porque lo puso él (criterio del 2026-09-09). Eso sirve para un
+técnico en el banco y es inservible para una aplicación: son seis comandos en el orden correcto, y
+cualquier olvido falla de una forma que no se parece a su causa. Los dos nuevos hacen la secuencia
+entera y **las piezas siguen intactas**.
+
+```
+lte leer                                mata tkWan, prende, entra en AT y lee los 12 parametros
+lte grabar                              los 4 con los defaults compilados  <- el boton de un click
+lte grabar apn|ip|port|url <valor>      UNO solo
+lte grabar <apn> <ip> <puerto> <url>    los 4 tipeados
+```
+
+⭐ **La forma "de a uno" la propuso Pablo y es mejor que los cuatro siempre**, por tres razones: la
+línea queda corta —así el largo del renglón deja de ser un problema—, es la misma forma del `lte set
+<que> <valor>` que el técnico ya conoce, y **permite corregir un valor sin volver a tipear los otros
+tres**, que es lo que uno hace en campo cuando se equivocó en el puerto. Las dos formas son **la
+misma secuencia** con un bitmask (`LTE_CFG_*`), no dos caminos parecidos: si fueran dos, el de a uno
+sería el que no se prueba.
+
+⚠ **La IP y el puerto viajan en UN comando AT** (`AT+HTPSV=ip,puerto`), así que `lte grabar ip X`
+borraría el puerto. El que no se tipea **se lee del módulo** — que además de necesario es lo
+correcto, porque el módulo es la fuente de verdad.
+
+#### ⭐⭐ Se RELEE para verificar, y es lo único que prueba que quedó grabado
+
+`AT+S` **graba y REINICIA el módulo**. El `OK` de cada `set` dice que el módulo *aceptó el comando*,
+no que haya quedado grabado: el reinicio viene después. Así que el comando espera el arranque,
+vuelve a entrar en modo AT y **relee cada parámetro**, comparando contra lo que se pidió.
+
+⚠ **Los valores se buscan como SUBSTRINGS, por separado.** El formato exacto —comillas, espacios, el
+orden de los campos del APN— no está fijado en el manual, y suponerlo haría fallar la verificación
+por una razón que no es la que se vino a buscar.
+
+⭐ **Y la verificación NO es tautológica, probado en banco**: se grabó el puerto **5001**, se verificó,
+y se volvió a 5000. Si siempre leyera lo mismo, el valor nuevo la habría delatado.
+
+#### ⛔⛔ HAY DOS SERVIDORES, y el default es el de PRODUCCIÓN
+
+Dato de Pablo (2026-10-12), y es el que define el procedimiento de banco:
+
+| | |
+|---|---|
+| **`192.168.6.3`** | **PRODUCCIÓN** — el default compilado (`WAN_DEF_SERVER_IP`) |
+| `192.168.0.20` | **la laptop de Pablo**, el servidor de TESTING |
+
+⛔ O sea que **`lte grabar` pelado EN EL BANCO manda los frames de prueba a producción**. Y el IMEI es
+real, así que no los rechazaría: entrarían en la base como datos legítimos de un equipo que existe.
+Es el episodio del IMEI falso (2026-09-21) dado vuelta y peor — aquella vez llegó un equipo
+inexistente, acá llegarían datos inventados de uno real. **En banco se usa el override.**
+
+⚠ **Que la IP sea privada no es un error**: `SPYMOVIL.VPNANTEL` es una APN de VPN, así que el equipo
+entra a la red privada donde vive el servidor. Conviene saberlo porque una `192.168.x.x` en un default
+de producción se lee como un valor de banco olvidado, y "corregirla" por una pública sería el error.
+
+El firmware no puede distinguir banco de campo, así que no hay nada que proteger automáticamente: la
+red es que el comando **imprime los valores antes de escribirlos y los relee después**. Por eso esa
+impresión no es decorativa.
+
+✅ **`HTPTP` se verifica pero NO se escribe**: `GET` es el default del módulo (Pablo), así que
+escribirlo no compra nada y el comando de escritura no está confirmado contra este módulo. Pero si
+alguien lo movió a POST el servidor no entiende los frames y nada lo diría, así que se mira y se avisa
+con el comando a mano.
+
+#### ⛔⛔ LOS DOS BUGS QUE ESTO COSTÓ, Y LOS DOS ESTABAN YA DOCUMENTADOS
+
+Es lo más instructivo de la etapa, y las dos advertencias estaban escritas en los archivos que se
+estaban editando.
+
+**1. La espera del kill miraba la BANDERA, no la suspensión real.** `wan_matada()` devuelve la bandera
+de *pedido*, que la levanta `wan_pedir_kill()` sin que la tarea se haya enterado. O sea que la espera
+**no esperaba nada**: pedía el kill, veía en true la bandera que acababa de poner y seguía.
+
+```
+lte leer   -> "tkWan MATADA tras 0 s. El modem es nuestro."
+lte grabar -> tkWan MATADA. El modem queda como esta...        <- UN MINUTO DESPUES
+```
+
+⭐ tkWan imprimió su mensaje de muerte **en medio del comando siguiente**: estuvo viva y dueña del
+modem todo ese rato, que es exactamente lo que la espera existe para evitar. ⚠ Y `prvEstadoTarea()`,
+en el mismo archivo, lo advertía: *"`eTaskGetState()` dice si ya se suspendió, y la bandera dice si
+está pedido pero todavía no ocurrió. **Confundirlos haría creer que se puede tocar el periférico
+cuando la tarea todavía lo está usando**."* Ahora se espera `eTaskGetState() == eSuspended`, y el
+tiempo se informa **en ms** — "0 s" escondía justo lo que ese renglón venía a mostrar.
+
+**2. Se reintrodujo el bug del `+++` del 2026-09-09.** El comando mandaba la secuencia de escape
+siempre, aunque el módulo ya estuviera en modo AT. Y como `lte leer` lo deja en modo AT a propósito,
+**la secuencia natural `lte leer` → `lte grabar` fallaba SIEMPRE**, con los tres intentos quemados. Es
+de la peor clase: **el comando anterior creaba el estado que rompía al siguiente**. Ahora se pregunta
+con un `AT` antes de mandar la contraseña.
+
+⚠ **El orden quedó AL REVÉS QUE EN LA FSM, a propósito.** `prvEstadoOffline()` hace el escape primero
+porque ella **siempre** arranca con el módulo recién energizado —transparente garantizado—, y ahí un
+`AT` se iría a la red como datos. Un comando de consola no tiene esa garantía: puede llamarse en
+cualquier estado. **La asimetría decide**: con el orden de la FSM, equivocarse cuesta romper un modo
+AT bueno; con este, un frame de basura a la red.
+
+⭐ El riesgo del cambio de orden está cubierto por el driver: `drv_lte_escape()` hace **guarda de
+silencio y dos flushes de RX** antes del `+++`, justamente porque la contraseña se reconoce por llegar
+aislada.
+
+#### ⛔ Y de paso: el ECO de la consola MENTÍA al llenarse la línea
+
+```c
+xputChar( cRxedChar );                     /* el eco salia SIEMPRE */
+if( cmdLine_ptr < MAX_INPUT_LENGTH - 1 )   /* y el caracter se descartaba aca */
+```
+
+**La pantalla mostraba el comando entero y el buffer tenía otro** — exactamente lo que el comentario
+de `CMDLINE_HISTORY_PREV` describe unas líneas más abajo: *"el comando que se ejecutaba no era el que
+se leía"*. Con una URL larga eso habría grabado un valor truncado en el módulo con toda naturalidad.
+
+El eco pasó **adentro** del `if` (la pantalla deja de avanzar, que es lo que hace cualquier campo
+lleno) y `MAX_INPUT_LENGTH` subió de 64 a **128**: la línea de configuración son 55 caracteres, o sea
+9 de margen, y un APN o una URL un poco más largos la cortaban.
+
+#### ✅ Validado en banco (`0.0.19`, 2026-10-12)
+
+| Criterio | Resultado |
+|---|---|
+| `lte leer` | ✅ los 12 parámetros, en 13,4 s |
+| ⭐ **La espera del kill** | ✅ `tkWan MATADA` (la tarea) **antes** de `SUSPENDIDA tras 1000 ms` (el comando) — ese orden es la prueba |
+| ⭐ **`lte leer` → `lte grabar`** | ✅ `ya estaba en MODO COMANDO (contesto el AT): no se manda '+++'` |
+| ⭐ **Las dos ramas del escape, en una corrida** | ✅ la 1.ª detectó el modo AT; la 2.ª usó el `+++`, porque `AT+S` había dejado el módulo en transparente |
+| Los cuatro parámetros | ✅ escritos, grabados y releídos tras el reinicio |
+| ⭐ **`lte grabar port`, de a uno** | ✅ `(el puerto se cambia; la IP se conserva: 192.168.0.20)` |
+| La línea de 55 caracteres | ✅ entera |
+| ⭐⭐ **El ciclo cerrado** | ✅ `reset` → `PING`/`PONG` → **`CONFIG=OK`** → `6 de 6 confirmados` |
+
+⏳ **Lo que NO se ejercitó:**
+
+| | |
+|---|---|
+| ⛔ **`lte grabar` pelado** | no se puede probar en banco: apuntaría a producción. Es la misma línea de código con otro bitmask, así que lo único sin ejercitar es **que los cuatro valores de producción sean correctos** |
+| ⚠ **El kill en su peor caso** | las dos veces tkWan estaba en `APAGADO` y murió en 1 s. En `ONLINE_DATA` vaciando la ventana son minutos; el mecanismo está probado, el caso largo no |
+| `apn`/`url`/`ip` de a uno | se probó **`port`**, que es el que ejercita la lectura del complemento. Los otros tres comparten todo el código |
+
 ### ⛔ Los buffers, los stacks y el heap NO se agrandan — y el motivo no es el espacio
 
 Pregunta de Pablo (**2026-10-12**): *"Creo que tenemos memoria ram de sobra de modo que si quieres

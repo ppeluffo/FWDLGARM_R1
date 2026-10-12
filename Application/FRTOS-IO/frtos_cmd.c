@@ -214,12 +214,32 @@ bool FRTOS_CMD_process( char cRxedChar )
         default:
             if( ( cRxedChar >= 0x20 ) && ( cRxedChar < 0x7F ) )
             {
-                /* Echo local */
-                xputChar( cRxedChar );
-
-                /* < y no <=: hay que dejar lugar para el NUL terminador. */
+                /*
+                 * ⛔ EL ECO VA ADENTRO DEL `if`, Y NO ES UN DETALLE.
+                 *
+                 * Estaba afuera, así que al llenarse la línea el carácter **se
+                 * descartaba en silencio pero se ecoaba igual**: la pantalla
+                 * mostraba un comando y el buffer tenía otro — exactamente el
+                 * problema que el comentario de `CMDLINE_HISTORY_PREV` describe
+                 * unas líneas más abajo, *"el comando que se ejecutaba no era el
+                 * que se leía"*.
+                 *
+                 * Con el eco adentro, al llegar al tope la pantalla deja de
+                 * avanzar y eso se ve en el acto, que es el comportamiento de
+                 * cualquier campo lleno. No hace falta ningún aviso: lo que no
+                 * se puede es mentir sobre lo que se va a ejecutar.
+                 *
+                 * ⚠ Mordía con los comandos largos de configuración del módulo:
+                 * `lte grabar <apn> <ip> <puerto> <url>` pasa cómodo de 64
+                 * caracteres, y el truncamiento habría dejado una URL cortada
+                 * grabada en el módulo **con toda naturalidad**.
+                 *
+                 * `<` y no `<=`: hay que dejar lugar para el NUL terminador.
+                 */
                 if( cmdLine_ptr < ( MAX_INPUT_LENGTH - 1 ) )
                 {
+                    xputChar( cRxedChar );   /* eco local */
+
                     cmdLine_buffer[ cmdLine_ptr ] = cRxedChar;
                     cmdLine_ptr++;
                 }

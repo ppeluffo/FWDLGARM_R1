@@ -25,6 +25,7 @@
 #include "drv_lte.h"
 #include "cfg_nvm.h"
 #include "cfg_hash.h"
+#include "cfg_utils.h"   /* cfg_strlcpy: newlib no trae strlcpy */
 #include "tkCtl.h"
 #include "tkSys.h"
 #include "wan_frame.h"
@@ -664,7 +665,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "vin",    "tension de los rieles: 12 V y VDDA (3V3)",              prvVinUso     },
     { "cnt",    "contador de pulsos CNT0 (PA12): cuenta y estado",       prvCntUso     },
     { "ev",     "electrovalvula TOYI: abrir, cerrar y estado",           prvEvUso      },
-    { "lte",    "modem LTE, etapa 1: la energia y el PWRKEY",            prvLteUso     },
+    { "lte",    "modem LTE: energia, modo AT y 'lte leer'/'lte grabar'", prvLteUso     },
     { "config", "configuracion del datalogger (EEPROM)",                 prvConfigUso  },
     { "kill",   "mata una tarea para trabajar su periferico a mano",     prvKillUso    },
     { "poll",   "fuerza un poleo de todos los canales y lo imprime",    NULL          },
@@ -2858,7 +2859,8 @@ static void prvLteUso( void )
     xprintf( "  C1 (470 uF) con JP1: cortar y reponer enseguida NO resetea nada.\r\n" );
     xprintf( "\r\n" );
     xprintf( "  CONFIGURACION del modulo (la IP y el puerto viven en EL, no aca):\r\n" );
-    xprintf( "    lte set server <ip> <puerto>    ej: lte set server 192.168.0.20 5000\r\n" );
+    xprintf( "    lte set server <ip> <puerto>    ej: lte set server %s %s\r\n",
+             WAN_DEF_SERVER_IP, WAN_DEF_SERVER_PORT );
     xprintf( "    lte set apn <apn>               ej: lte set apn SPYMOVIL.VPNANTEL\r\n" );
     xprintf( "    lte set url <url>               ej: lte set url /apidlg?\r\n" );
     xprintf( "    lte set httpd                   modo de trabajo HTTPD\r\n" );
@@ -2867,6 +2869,21 @@ static void prvLteUso( void )
     xprintf( "  ⚠ 'set', 'info' y 'save' ASUMEN el modo comando: NO entran solos.\r\n" );
     xprintf( "    La secuencia es:  lte esc  ->  configurar  ->  lte save\r\n" );
     xprintf( "  Y NADA queda grabado hasta 'lte save'.\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "  ⭐ LOS DOS COMPUESTOS, que hacen la secuencia COMPLETA solos:\r\n" );
+    xprintf( "    lte leer      mata tkWan, prende el modem, entra en AT y lee todo\r\n" );
+    xprintf( "    lte grabar    idem + configura, graba y RELEE para verificar\r\n" );
+    xprintf( "    lte grabar apn|ip|port|url <valor>      UN parametro\r\n" );
+    xprintf( "    lte grabar <apn> <ip> <puerto> <url>    los cuatro\r\n" );
+    xprintf( "\r\n" );
+    xprintf( "    'lte grabar' SOLO usa los valores de fabrica:\r\n" );
+    xprintf( "      apn %s / server %s:%s / url %s\r\n",
+             WAN_DEF_APN, WAN_DEF_SERVER_IP, WAN_DEF_SERVER_PORT, WAN_DEF_URL );
+    xprintf( "\r\n" );
+    xprintf( "    La diferencia con las piezas: estos NO asumen nada del estado,\r\n" );
+    xprintf( "    lo dejan dicho al terminar, y ESPERAN a que tkWan muera de\r\n" );
+    xprintf( "    verdad antes de tocar el modem (el kill es cooperativo).\r\n" );
+    xprintf( "    Al terminar, el modem queda en MODO AT: hace falta 'reset'.\r\n" );
 }
 //------------------------------------------------------------------------------
 /*
@@ -3369,6 +3386,650 @@ static void prvLteBridge( void )
     }
 }
 
+/*==============================================================================
+ * `lte leer` y `lte grabar`: la SECUENCIA COMPLETA, para la app de la terminal
+ *============================================================================*/
+/*
+ * Los comandos de abajo —`esc`, `info`, `set`, `save`, `exit`— son las PIEZAS, y
+ * asumen que el que las usa maneja el estado del módulo porque lo puso él
+ * (criterio de Pablo, 2026-09-09). Eso está bien para un técnico en el banco y
+ * es inservible para una aplicación: son seis comandos en el orden correcto, y
+ * cualquier olvido falla de una forma que no se parece a su causa.
+ *
+ * `lte leer` y `lte grabar` hacen la secuencia entera —matar la tarea, encender,
+ * entrar en AT, trabajar, verificar— y dejan dicho en qué estado quedó todo.
+ * **No reemplazan a las piezas**: las usan, y las piezas siguen ahí intactas.
+ */
+
+/* Cuánto se le da a tkWan para morirse. Es generoso a propósito: el peor caso
+   real es que esté en `ONLINE_DATA` vaciando la ventana —hasta 1984 registros
+   en bloques de 10, con esperas de respuesta—, y eso son minutos. */
+#define LTE_MS_ESPERA_KILL      180000U
+
+/*
+ * ⛔⛔ EL KILL ES COOPERATIVO: HAY QUE ESPERAR A QUE LA TAREA MUERA DE VERDAD.
+ *
+ * `wan_pedir_kill()` sólo levanta una bandera; quien se suspende es la propia
+ * tkWan, en su siguiente vuelta. Y la bandera se mira **después** del
+ * `vTaskDelay` de cada trozo de espera, así que en `APAGADO` tarda hasta los
+ * 60 s del trozo, y en medio de un vaciado, minutos.
+ *
+ * ⭐ Si el comando no esperara, **dos tareas le hablarían al modem a la vez**:
+ * tkWan en medio de un `drv_lte_at()` y nosotros mandando otro. Las respuestas
+ * se cruzan, y ese patrón ya costó dos diagnósticos en este proyecto —los acuses
+ * rezagados de los `DATANR` (2026-09-21) y el byte de ruido del DE en Modbus
+ * (2026-09-22)—. El síntoma sería *"a veces el modem contesta cualquier cosa"*,
+ * que es de los peores: intermitente y dependiente del momento.
+ *
+ * Devuelve false si no murió, y entonces **no hay que tocar el modem**.
+ */
+static bool prvLteEsperarWanMuerta( void )
+{
+    if( xHandle_tkWan == NULL )
+    {
+        /* `ARRANCA_TKWAN = 0`: no hay nadie usando el modem. */
+        return true;
+    }
+
+    /*
+     * ⛔⛔ SE ESPERA LA SUSPENSIÓN REAL, **NO** `wan_matada()`.
+     *
+     * `wan_matada()` devuelve la BANDERA DE PEDIDO, que la levanta
+     * `wan_pedir_kill()` sin que la tarea se haya enterado. La primera versión
+     * de esta espera la miraba, así que **no esperaba nada**: pedía el kill,
+     * veía en true la bandera que acababa de poner y seguía adelante.
+     *
+     * ⭐ Quedó demostrado en banco el 2026-10-12: el comando informó *"MATADA
+     * tras 0 s. El modem es nuestro"* y **tkWan imprimió su mensaje de muerte un
+     * minuto después, en medio del comando siguiente** — o sea que estuvo viva y
+     * dueña del modem todo ese rato, que es exactamente lo que esta espera
+     * existe para evitar.
+     *
+     * ⚠ Y la advertencia ya estaba escrita en este mismo archivo, en
+     * `prvEstadoTarea()`: *"se informan los dos estados por separado:
+     * `eTaskGetState()` dice si ya se suspendió, y la bandera dice si está
+     * pedido pero todavía no ocurrió. Confundirlos haría creer que se puede
+     * tocar el periférico cuando la tarea todavía lo está usando."*
+     */
+    if( eTaskGetState( xHandle_tkWan ) == eSuspended )
+    {
+        return true;
+    }
+
+    if( !wan_matada() )
+    {
+        xprintf( "tkWan esta en %s: pidiendo el kill y ESPERANDO a que muera...\r\n",
+                 wan_estado_str() );
+        xprintf( "(puede tardar minutos si esta vaciando la ventana)\r\n" );
+
+        wan_pedir_kill();
+    }
+    else
+    {
+        /* El kill ya estaba pedido y la tarea todavía no llegó a suspenderse:
+           hay que esperarla igual. */
+        xprintf( "el kill de tkWan ya estaba pedido pero NO se suspendio aun:\r\n" );
+        xprintf( "esperandola (sigue en %s)...\r\n", wan_estado_str() );
+    }
+
+    for( uint32_t ulMs = 0U; ulMs < LTE_MS_ESPERA_KILL; ulMs += 250U )
+    {
+        vTaskDelay( pdMS_TO_TICKS( 250U ) );
+
+        /* El lazo ESTÁ avanzando —espera una condición con tope— así que el kick
+           es legítimo, igual que en `lte bridge`. Sin esto el watchdog resetearía
+           el equipo a los 90 s de una espera que es normal. */
+        wdg_kick();
+
+        if( eTaskGetState( xHandle_tkWan ) == eSuspended )
+        {
+            /* En ms y no en segundos: con el entero de segundos una espera de
+               250 ms se informaba como "0 s", que se lee como "no esperó" y
+               esconde justo lo que este renglón vino a mostrar. */
+            xprintf( "tkWan SUSPENDIDA tras %lu ms. El modem es nuestro.\r\n",
+                     ( unsigned long ) ( ulMs + 250U ) );
+            return true;
+        }
+    }
+
+    xprintf( "\r\n[!] ABORTADO: tkWan NO se suspendio en %lu s (sigue en %s).\r\n",
+             ( unsigned long ) ( LTE_MS_ESPERA_KILL / 1000U ), wan_estado_str() );
+    xprintf( "    NO se toca el modem: con las dos tareas hablandole a la vez las\r\n" );
+    xprintf( "    respuestas se cruzan y lo que se lea no es confiable.\r\n" );
+    xprintf( "    Reintentar, o 'reset' y volver a correr el comando.\r\n" );
+    return false;
+}
+//------------------------------------------------------------------------------
+/*
+ * Deja el módulo encendido y en MODO COMANDO, listo para que le hablen.
+ *
+ * Los tres tiempos son los que la FSM ya usa y tiene validados en banco
+ * (`tkWan.h`): no se inventa ninguno acá.
+ */
+static bool prvLteEntrarEnModoAt( void )
+{
+    static char pcRta[ 64 ];
+
+    /*
+     * ⛔⛔ PRIMERO SE PREGUNTA SI YA ESTÁ EN MODO AT, Y NO ES UN ATAJO.
+     *
+     * Sin esto, `lte grabar` después de `lte leer` **falla siempre**: `leer`
+     * deja el módulo en modo AT a propósito, y mandarle `+++` ahí es el bug
+     * documentado del 2026-09-09 —el `+++` va SIN CR, es una contraseña, así que
+     * queda colgado en el buffer del módulo y el `AT` siguiente se le concatena:
+     * lee `+++AT`, contesta ERROR, y desde afuera se ve como *"no se pudo entrar
+     * en modo comando"* **estando adentro**—.
+     *
+     * ⭐ Pasó en banco el 2026-10-12, con los tres intentos quemados, y es de la
+     * peor clase: **el comando anterior creaba el estado que rompía al
+     * siguiente**, así que la secuencia natural era justo la que no funcionaba.
+     *
+     * ⚠ EL ORDEN ES AL REVÉS QUE EN LA FSM, a propósito. `prvEstadoOffline()`
+     * hace el escape primero porque ella **siempre** arranca con el módulo
+     * recién energizado, o sea en transparente garantizado, y ahí un `AT` se
+     * iría a la red como datos (inocuo pero ensucia). Un comando de consola no
+     * tiene esa garantía: puede llamarse en cualquier estado. Con el orden de la
+     * FSM el costo de equivocarse es romper un modo AT bueno; con este, un frame
+     * de basura a la red. La asimetría decide.
+     */
+    if( ( drv_lte_at( "AT", pcRta, sizeof( pcRta ), 1000U ) > 0 ) &&
+        ( strstr( pcRta, "OK" ) != NULL ) )
+    {
+        xprintf( "  ya estaba en MODO COMANDO (contesto el AT): no se manda '+++'\r\n" );
+        return true;
+    }
+
+    for( uint32_t i = 0U; i < WAN_INTENTOS_AT; i++ )
+    {
+        if( i > 0U )
+        {
+            xprintf( "  reintentando el escape (%lu de %u)...\r\n",
+                     ( unsigned long ) ( i + 1U ), WAN_INTENTOS_AT );
+            wdg_kick_largo( WAN_MS_ENTRE_INTENTOS + 30000U );
+            vTaskDelay( pdMS_TO_TICKS( WAN_MS_ENTRE_INTENTOS ) );
+            wdg_kick();
+        }
+
+        if( drv_lte_escape() == lteESC_OK )
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+//------------------------------------------------------------------------------
+static bool prvLtePrepararModulo( void )
+{
+    if( !prvLteEsperarWanMuerta() )
+    {
+        return false;
+    }
+
+    if( !drv_lte_power_estado() )
+    {
+        xprintf( "encendiendo el modem y esperando %u s a que arranque...\r\n",
+                 ( unsigned ) ( WAN_MS_ARRANQUE_MODEM / 1000U ) );
+
+        drv_lte_power( true );
+
+        wdg_kick_largo( WAN_MS_ARRANQUE_MODEM + 30000U );
+        vTaskDelay( pdMS_TO_TICKS( WAN_MS_ARRANQUE_MODEM ) );
+        wdg_kick();
+    }
+
+    xprintf( "entrando en modo comando (+++ / a / a / +ok)...\r\n" );
+
+    if( !prvLteEntrarEnModoAt() )
+    {
+        xprintf( "\r\n[!] NO se pudo entrar en MODO COMANDO en %u intentos.\r\n",
+                 ( unsigned ) WAN_INTENTOS_AT );
+        xprintf( "    El modulo quedo ENCENDIDO y en un estado desconocido.\r\n" );
+        xprintf( "    Probar 'lte off', 'lte on' y repetir; si sigue, revisar la UART4.\r\n" );
+        return false;
+    }
+
+    return true;
+}
+//------------------------------------------------------------------------------
+/*
+ * Manda un AT de configuración y **exige el OK**.
+ *
+ * El módulo contesta igual ante un parámetro mal formado, así que sin mirar el
+ * OK un "listo" podría estar sobre una configuración que no entró — que es peor
+ * que un error, porque nadie lo va a revisar.
+ */
+static bool prvLteEscribirOk( const char *pcEtiqueta, const char *pcCmd )
+{
+    static char pcRta[ 128 ];
+
+    int16_t sRet = drv_lte_at( pcCmd, pcRta, sizeof( pcRta ), 2000U );
+
+    if( sRet <= 0 )
+    {
+        xprintf( "  %-8s SIN RESPUESTA a '%s'\r\n", pcEtiqueta, pcCmd );
+        return false;
+    }
+
+    if( strstr( pcRta, "OK" ) == NULL )
+    {
+        xprintf( "  %-8s el modulo NO contesto OK a '%s'\r\n", pcEtiqueta, pcCmd );
+        return false;
+    }
+
+    xprintf( "  %-8s OK   (%s)\r\n", pcEtiqueta, pcCmd );
+    return true;
+}
+//------------------------------------------------------------------------------
+/*
+ * ⭐⭐ RELEE UN PARÁMETRO Y LO COMPARA CONTRA LO QUE SE PIDIÓ.
+ *
+ * Es la verificación que hace que este comando signifique algo, y la razón es
+ * concreta: **`AT+S` graba y REINICIA el módulo**. El `OK` de cada `set` dice
+ * que el módulo *aceptó el comando*, no que haya quedado grabado — el reinicio
+ * viene después. Si el módulo arranca mal, todos esos OK no valen nada y el
+ * comando diría "configurado" sobre algo que no está.
+ *
+ * Es el mismo criterio por el que `fs sd format borrar` monta la tarjeta al
+ * terminar: formatear y no comprobarlo deja al equipo diciendo "listo" sobre
+ * algo que va a fallar en el primer uso, y eso se descubre horas después.
+ *
+ * ⚠ **Se buscan los valores como SUBSTRINGS, por separado.** No se parsea la
+ * respuesta: el formato exacto —comillas, espacios, el orden de los campos del
+ * APN— no está fijado en el manual, y suponerlo haría fallar la verificación por
+ * una razón que no es la que se vino a buscar. Buscar la IP y el puerto cada uno
+ * por su lado tolera cualquier envoltorio.
+ */
+static bool prvLteVerificar( const char *pcEtiqueta, const char *pcConsulta,
+                             const char *pcEsp1, const char *pcEsp2 )
+{
+    static char pcRta[ 128 ];
+
+    int16_t sRet = drv_lte_at( pcConsulta, pcRta, sizeof( pcRta ), 1000U );
+
+    if( sRet <= 0 )
+    {
+        xprintf( "  %-8s SIN RESPUESTA a '%s' -> NO SE PUDO VERIFICAR\r\n",
+                 pcEtiqueta, pcConsulta );
+        return false;
+    }
+
+    bool bOk = ( strstr( pcRta, pcEsp1 ) != NULL );
+
+    if( bOk && ( pcEsp2 != NULL ) )
+    {
+        bOk = ( strstr( pcRta, pcEsp2 ) != NULL );
+    }
+
+    if( bOk )
+    {
+        xprintf( "  %-8s GRABADO: %s%s%s\r\n", pcEtiqueta, pcEsp1,
+                 ( pcEsp2 != NULL ) ? "," : "",
+                 ( pcEsp2 != NULL ) ? pcEsp2 : "" );
+        return true;
+    }
+
+    xprintf( "  %-8s [!] NO COINCIDE. Se pidio '%s%s%s' y el modulo contesta:\r\n",
+             pcEtiqueta, pcEsp1,
+             ( pcEsp2 != NULL ) ? "," : "",
+             ( pcEsp2 != NULL ) ? pcEsp2 : "" );
+    ( void ) xwrite_term( pcRta, ( uint16_t ) sRet );
+    return false;
+}
+//------------------------------------------------------------------------------
+/*
+ * `lte leer`: mata tkWan, enciende el modem, entra en AT y lee TODO.
+ */
+static void prvLteLeer( void )
+{
+    if( !prvLtePrepararModulo() )
+    {
+        return;
+    }
+
+    xprintf( "\r\n--- configuracion del MODULO ---\r\n" );
+
+    prvLteInfo();
+
+    /*
+     * ⚠ EN QUÉ ESTADO QUEDÓ TODO, dicho explícitamente.
+     *
+     * El modem queda ENCENDIDO y en MODO AT a propósito: lo normal después de
+     * leer es grabar, y apagarlo obligaría a repetir los 8 s de arranque y el
+     * escape. Pero eso **no puede quedar implícito**: un módulo en modo AT no
+     * transmite nada, así que si alguien se va sin resetear el equipo se queda
+     * mudo sin ningún otro síntoma.
+     */
+    xprintf( "\r\n--- en que estado quedo todo ---\r\n" );
+    xprintf( "  modem  : ENCENDIDO, en MODO AT (NO transmite en este estado)\r\n" );
+    xprintf( "  tkWan  : %s\r\n", ( xHandle_tkWan == NULL ) ? "no existe (ARRANCA_TKWAN = 0)"
+                                                            : "MATADA, no vuelve sola" );
+    xprintf( "  ahora  : 'lte grabar' para configurar, o 'reset' para operar\r\n" );
+}
+//------------------------------------------------------------------------------
+/*
+ * ⭐ QUÉ PARÁMETROS TOCA UNA CORRIDA DE `lte grabar`.
+ *
+ * Existe porque Pablo propuso (2026-10-12) poder grabar **de a uno**
+ * —`lte grabar apn ...`, `lte grabar ip ...`— en vez de los cuatro siempre, y
+ * tenía razón por tres motivos: la línea queda corta —así el largo del renglón
+ * deja de ser un problema en vez de quedar apretado—, es la misma forma que el
+ * `lte set <que> <valor>` que el técnico ya conoce, y **permite corregir UN
+ * valor sin volver a tipear los otros tres**, que es lo que uno hace en campo
+ * cuando se equivocó en el puerto.
+ *
+ * Con un bitmask las dos formas son la MISMA secuencia —preparar, escribir,
+ * `AT+S`, esperar el reinicio, releer— y no dos caminos que se parecen. Si
+ * fueran dos, el de a uno sería el que no se prueba.
+ */
+#define LTE_CFG_WKMOD   0x01U
+#define LTE_CFG_APN     0x02U
+#define LTE_CFG_SERVER  0x04U   /* ⚠ la IP y el puerto son UN comando AT */
+#define LTE_CFG_URL     0x08U
+#define LTE_CFG_TODO    0x0FU
+
+/*
+ * Lee `AT+HTPSV?` y parte la respuesta en IP y puerto.
+ *
+ * ⚠ Hace falta porque **`AT+HTPSV=` lleva los dos juntos**, así que
+ * `lte grabar ip X` tiene que conocer el puerto actual o lo borraría. Y el
+ * único lugar donde ese valor existe es el módulo —la IP y el puerto no se
+ * guardan en el datalogger (criterio de Pablo, 2026-09-09)—, así que se
+ * pregunta. Es el mismo motivo por el que `lte leer` no muestra una copia local.
+ */
+static bool prvLteLeerServer( char *pcIp, size_t xTamIp,
+                              char *pcPuerto, size_t xTamPuerto )
+{
+    static char pcRta[ 128 ];
+
+    if( drv_lte_at( "AT+HTPSV?", pcRta, sizeof( pcRta ), 1000U ) <= 0 )
+    {
+        return false;
+    }
+
+    char *pcVal = strstr( pcRta, "+HTPSV:" );
+
+    if( pcVal == NULL )
+    {
+        return false;
+    }
+
+    pcVal += 7;
+
+    /* El separador es la coma; el final, cualquier control (el CR/LF del
+       módulo). No se supone nada más sobre el formato: ver `prvLteVerificar()`. */
+    size_t i = 0U;
+
+    while( ( pcVal[ i ] != ',' ) && ( pcVal[ i ] > 0x1F ) && ( i < ( xTamIp - 1U ) ) )
+    {
+        pcIp[ i ] = pcVal[ i ];
+        i++;
+    }
+
+    pcIp[ i ] = '\0';
+
+    if( pcVal[ i ] != ',' )
+    {
+        return false;       /* sin coma no hay puerto que leer */
+    }
+
+    pcVal += ( i + 1U );
+    i = 0U;
+
+    while( ( pcVal[ i ] > 0x1F ) && ( i < ( xTamPuerto - 1U ) ) )
+    {
+        pcPuerto[ i ] = pcVal[ i ];
+        i++;
+    }
+
+    pcPuerto[ i ] = '\0';
+
+    return ( ( pcIp[ 0 ] != '\0' ) && ( pcPuerto[ 0 ] != '\0' ) );
+}
+//------------------------------------------------------------------------------
+/*
+ * `lte grabar`: escribe lo que se le pida, lo GRABA y lo RELEE para verificar.
+ *
+ * Sin argumentos usa los defaults compilados de `tkWan.h`, que es el botón de un
+ * click para la app; con argumentos, los que le pasen. `ucQue` dice cuáles de
+ * los cuatro se tocan.
+ *
+ * ⚠ `pcIp`/`pcPuerto` pueden venir en NULL con `LTE_CFG_SERVER` pedido: el que
+ * falte **se lee del módulo**, porque los dos viajan en un solo comando AT.
+ */
+static void prvLteGrabarTodo( const char *pcApn, const char *pcIp,
+                              const char *pcPuerto, const char *pcUrl,
+                              uint8_t ucQue, bool bDefaults )
+{
+    static char pcIpUsada[ 48 ];
+    static char pcPuertoUsado[ 12 ];
+    static char pcCmd[ 96 ];
+
+    if( ( ucQue & LTE_CFG_SERVER ) != 0U )
+    {
+        cfg_strlcpy( pcIpUsada, ( pcIp != NULL ) ? pcIp : "", sizeof( pcIpUsada ) );
+        cfg_strlcpy( pcPuertoUsado, ( pcPuerto != NULL ) ? pcPuerto : "",
+                    sizeof( pcPuertoUsado ) );
+    }
+
+    if( !prvLtePrepararModulo() )
+    {
+        return;
+    }
+
+    /*
+     * Completar el complemento del server, ya en modo AT. Va DESPUÉS de preparar
+     * porque leerlo exige el modo comando.
+     */
+    if( ( ( ucQue & LTE_CFG_SERVER ) != 0U ) &&
+        ( ( pcIpUsada[ 0 ] == '\0' ) || ( pcPuertoUsado[ 0 ] == '\0' ) ) )
+    {
+        char pcIpAct[ 48 ];
+        char pcPuertoAct[ 12 ];
+
+        if( !prvLteLeerServer( pcIpAct, sizeof( pcIpAct ),
+                               pcPuertoAct, sizeof( pcPuertoAct ) ) )
+        {
+            xprintf( "\r\n[!] no se pudo leer el server actual del modulo, y hace\r\n" );
+            xprintf( "    falta: la IP y el puerto van en UN solo comando AT, asi\r\n" );
+            xprintf( "    que cambiar uno sin saber el otro lo borraria.\r\n" );
+            xprintf( "    Usar 'lte grabar <apn> <ip> <puerto> <url>' con los cuatro.\r\n" );
+            return;
+        }
+
+        if( pcIpUsada[ 0 ] == '\0' )
+        {
+            cfg_strlcpy( pcIpUsada, pcIpAct, sizeof( pcIpUsada ) );
+            xprintf( "  (el puerto se cambia; la IP se conserva: %s)\r\n", pcIpUsada );
+        }
+        else
+        {
+            cfg_strlcpy( pcPuertoUsado, pcPuertoAct, sizeof( pcPuertoUsado ) );
+            xprintf( "  (la IP se cambia; el puerto se conserva: %s)\r\n", pcPuertoUsado );
+        }
+    }
+
+    /*
+     * ⭐ SE IMPRIME LO QUE SE VA A ESCRIBIR, ANTES DE ESCRIBIRLO.
+     *
+     * Con los defaults compilados el que corre el comando no tipeó ningún valor,
+     * así que si no se los muestra **no tiene forma de saber contra qué servidor
+     * quedó apuntando el equipo**. Y los defaults son los de PRODUCCIÓN: ver la
+     * advertencia de `tkWan.h`, que explica por qué en el banco se usa el
+     * override.
+     */
+    xprintf( "\r\nconfiguracion a grabar (%s):\r\n",
+             bDefaults ? "DEFAULTS compilados" : "los valores tipeados" );
+
+    if( ( ucQue & LTE_CFG_WKMOD ) != 0U )
+    {
+        xprintf( "  wkmod    HTTPD\r\n" );
+    }
+
+    if( ( ucQue & LTE_CFG_APN ) != 0U )
+    {
+        xprintf( "  apn      %s\r\n", pcApn );
+    }
+
+    if( ( ucQue & LTE_CFG_SERVER ) != 0U )
+    {
+        xprintf( "  server   %s : %s\r\n", pcIpUsada, pcPuertoUsado );
+    }
+
+    if( ( ucQue & LTE_CFG_URL ) != 0U )
+    {
+        xprintf( "  url      %s\r\n", pcUrl );
+    }
+
+    bool bTodoOk = true;
+
+    xprintf( "\r\n--- escribiendo ---\r\n" );
+
+    /* ⚠ `WKMOD` va PRIMERO: es el modo de trabajo del que dependen los otros
+       tres. Si fuera al final, un fallo a mitad de camino dejaría los parámetros
+       de HTTPD escritos sobre un módulo que no está en HTTPD. */
+    if( ( ucQue & LTE_CFG_WKMOD ) != 0U )
+    {
+        bTodoOk &= prvLteEscribirOk( "wkmod", "AT+WKMOD=HTTPD" );
+    }
+
+    if( ( ucQue & LTE_CFG_APN ) != 0U )
+    {
+        /* Los tres campos vacíos y el 0 final son los del AVR
+           (`modem_atcmd_write_apn`): usuario, clave y tipo de autenticación. */
+        snprintf( pcCmd, sizeof( pcCmd ), "AT+APN=%s,,,0", pcApn );
+        bTodoOk &= prvLteEscribirOk( "apn", pcCmd );
+    }
+
+    if( ( ucQue & LTE_CFG_SERVER ) != 0U )
+    {
+        snprintf( pcCmd, sizeof( pcCmd ), "AT+HTPSV=%s,%s", pcIpUsada, pcPuertoUsado );
+        bTodoOk &= prvLteEscribirOk( "server", pcCmd );
+    }
+
+    if( ( ucQue & LTE_CFG_URL ) != 0U )
+    {
+        snprintf( pcCmd, sizeof( pcCmd ), "AT+HTPURL=%s", pcUrl );
+        bTodoOk &= prvLteEscribirOk( "url", pcCmd );
+    }
+
+    if( !bTodoOk )
+    {
+        xprintf( "\r\n[!] algun parametro NO entro: NO se graba (sin 'AT+S' nada\r\n" );
+        xprintf( "    queda escrito, asi que el modulo sigue con lo que tenia).\r\n" );
+        xprintf( "    El modem quedo ENCENDIDO y en MODO AT.\r\n" );
+        return;
+    }
+
+    /*
+     * `AT+S` graba **y reinicia el módulo**, que es lo que obliga a todo lo que
+     * viene abajo: hay que esperar el arranque y volver a entrar en modo AT para
+     * poder releer.
+     */
+    xprintf( "\r\n--- grabando (AT+S: el modulo se REINICIA) ---\r\n" );
+
+    prvLteGrabar();
+
+    xprintf( "\r\nesperando %u s el arranque del modulo...\r\n",
+             ( unsigned ) ( WAN_MS_ARRANQUE_MODEM / 1000U ) );
+
+    wdg_kick_largo( WAN_MS_ARRANQUE_MODEM + 30000U );
+    vTaskDelay( pdMS_TO_TICKS( WAN_MS_ARRANQUE_MODEM ) );
+    wdg_kick();
+
+    if( !prvLteEntrarEnModoAt() )
+    {
+        xprintf( "\r\n[!] se GRABO pero NO SE PUDO VERIFICAR: el modulo no volvio al\r\n" );
+        xprintf( "    modo comando tras el reinicio. Correr 'lte leer' para ver que\r\n" );
+        xprintf( "    quedo adentro; hasta entonces la configuracion NO esta confirmada.\r\n" );
+        return;
+    }
+
+    /*
+     * ⭐⭐ LA RELECTURA: lo único que prueba que la configuración QUEDÓ.
+     */
+    xprintf( "\r\n--- verificando (releido del modulo DESPUES del reinicio) ---\r\n" );
+
+    bool bVerif = true;
+
+    if( ( ucQue & LTE_CFG_WKMOD ) != 0U )
+    {
+        bVerif &= prvLteVerificar( "wkmod", "AT+WKMOD?", "HTTPD", NULL );
+    }
+
+    if( ( ucQue & LTE_CFG_APN ) != 0U )
+    {
+        bVerif &= prvLteVerificar( "apn", "AT+APN?", pcApn, NULL );
+    }
+
+    if( ( ucQue & LTE_CFG_SERVER ) != 0U )
+    {
+        bVerif &= prvLteVerificar( "server", "AT+HTPSV?", pcIpUsada, pcPuertoUsado );
+    }
+
+    if( ( ucQue & LTE_CFG_URL ) != 0U )
+    {
+        bVerif &= prvLteVerificar( "url", "AT+HTPURL?", pcUrl, NULL );
+    }
+
+    /*
+     * ⚠ `HTPTP` (GET o POST) se VERIFICA pero NO SE ESCRIBE.
+     *
+     * ✅ **`GET` es el default del módulo** (Pablo, 2026-10-12), y de ahí sale
+     * el criterio: si ya viene bien de fábrica, escribirlo no compra nada y
+     * **el comando de escritura no está confirmado contra este módulo** —
+     * mandarlo a ciegas podría dejar el transporte roto justo en el comando que
+     * vino a arreglarlo.
+     *
+     * Pero callarlo sería peor: si alguien lo movió a POST, el servidor no
+     * entiende los frames y **nada en el equipo lo diría**. Así que se mira y se
+     * avisa con el comando a mano, sin tocarlo. En un módulo virgen esta línea
+     * nunca va a saltar; si salta, dice que alguien estuvo ahí antes.
+     *
+     * Se mira sólo cuando se configuró el transporte entero: en un
+     * `lte grabar port 5001` no aporta nada.
+     */
+    if( ucQue == LTE_CFG_TODO )
+    {
+        static char pcRta[ 128 ];
+        int16_t sRet = drv_lte_at( "AT+HTPTP?", pcRta, sizeof( pcRta ), 1000U );
+
+        if( ( sRet > 0 ) && ( strstr( pcRta, "GET" ) != NULL ) )
+        {
+            xprintf( "  htptp    GET  (no se escribe: es el default del modulo)\r\n" );
+        }
+        else
+        {
+            xprintf( "  htptp    [!] NO dice GET, y este comando NO lo escribe:\r\n" );
+
+            if( sRet > 0 )
+            {
+                ( void ) xwrite_term( pcRta, ( uint16_t ) sRet );
+            }
+
+            xprintf( "\r\n           corregir a mano: 'lte at AT+HTPTP=GET' y 'lte save'.\r\n" );
+        }
+    }
+
+    xprintf( "\r\n--- resultado ---\r\n" );
+
+    if( bVerif )
+    {
+        xprintf( "  ⭐ CONFIGURADO Y VERIFICADO: quedo grabado en el modulo.\r\n" );
+    }
+    else
+    {
+        xprintf( "  [!] SE GRABO PERO ALGO NO COINCIDE (ver arriba). La configuracion\r\n" );
+        xprintf( "      del modulo NO es la que se pidio: revisar antes de dejar el equipo.\r\n" );
+    }
+
+    xprintf( "\r\n--- en que estado quedo todo ---\r\n" );
+    xprintf( "  modem  : ENCENDIDO, en MODO AT (NO transmite en este estado)\r\n" );
+    xprintf( "  tkWan  : %s\r\n", ( xHandle_tkWan == NULL ) ? "no existe (ARRANCA_TKWAN = 0)"
+                                                            : "MATADA, no vuelve sola" );
+    xprintf( "  ahora  : 'reset' -- es LO QUE FALTA para que el equipo opere.\r\n" );
+}
+//------------------------------------------------------------------------------
 static void cmdLte( void )
 {
     uint8_t ucArgs = FRTOS_CMD_makeArgv();
@@ -3491,6 +4152,93 @@ static void cmdLte( void )
             }
 
             prvLteSet( pcCmd );
+            return;
+        }
+
+        /*
+         * ⭐ Los DOS COMPUESTOS, para la app de la terminal. Hacen la secuencia
+         * entera; los de abajo son las piezas. Ver el bloque de arriba.
+         */
+        if( strcmp( argv[ 1 ], "leer" ) == 0 )
+        {
+            prvLteLeer();
+            return;
+        }
+
+        if( strcmp( argv[ 1 ], "grabar" ) == 0 )
+        {
+            /* Sin nada más: los defaults compilados, el botón de un click. */
+            if( ( ucArgs < 2U ) || ( argv[ 2 ] == NULL ) )
+            {
+                prvLteGrabarTodo( WAN_DEF_APN, WAN_DEF_SERVER_IP,
+                                  WAN_DEF_SERVER_PORT, WAN_DEF_URL,
+                                  LTE_CFG_TODO, true );
+                return;
+            }
+
+            /*
+             * ⭐ `lte grabar <que> <valor>`: UN parámetro, a pedido de Pablo
+             * (2026-10-12). La línea queda corta y se puede corregir un valor
+             * sin volver a tipear los otros tres.
+             *
+             * ⚠ `wkmod` NO tiene forma de a uno: no lleva valor, y en una
+             * configuración nueva va junto con el resto o no va. Para tocarlo
+             * solo está la pieza de siempre, `lte set httpd`.
+             */
+            if( ( ucArgs >= 3U ) && ( argv[ 3 ] != NULL ) &&
+                ( ( ucArgs < 4U ) || ( argv[ 4 ] == NULL ) ) )
+            {
+                if( strcmp( argv[ 2 ], "apn" ) == 0 )
+                {
+                    prvLteGrabarTodo( argv[ 3 ], NULL, NULL, NULL,
+                                      LTE_CFG_APN, false );
+                    return;
+                }
+
+                if( strcmp( argv[ 2 ], "url" ) == 0 )
+                {
+                    prvLteGrabarTodo( NULL, NULL, NULL, argv[ 3 ],
+                                      LTE_CFG_URL, false );
+                    return;
+                }
+
+                /* ⚠ La IP y el puerto van en UN comando AT, así que el que no se
+                   tipea se LEE del módulo: ver `prvLteLeerServer()`. */
+                if( strcmp( argv[ 2 ], "ip" ) == 0 )
+                {
+                    prvLteGrabarTodo( NULL, argv[ 3 ], NULL, NULL,
+                                      LTE_CFG_SERVER, false );
+                    return;
+                }
+
+                if( ( strcmp( argv[ 2 ], "port" ) == 0 ) ||
+                    ( strcmp( argv[ 2 ], "puerto" ) == 0 ) )
+                {
+                    prvLteGrabarTodo( NULL, NULL, argv[ 3 ], NULL,
+                                      LTE_CFG_SERVER, false );
+                    return;
+                }
+            }
+
+            /* `lte grabar <apn> <ip> <puerto> <url>`: los cuatro de una. */
+            if( ( ucArgs >= 5U ) && ( argv[ 3 ] != NULL ) &&
+                ( argv[ 4 ] != NULL ) && ( argv[ 5 ] != NULL ) )
+            {
+                prvLteGrabarTodo( argv[ 2 ], argv[ 3 ], argv[ 4 ], argv[ 5 ],
+                                  LTE_CFG_TODO, false );
+                return;
+            }
+
+            xprintf( "uso:\r\n" );
+            xprintf( "  lte grabar                   los valores de fabrica:\r\n" );
+            xprintf( "       apn %s / server %s:%s / url %s\r\n",
+                     WAN_DEF_APN, WAN_DEF_SERVER_IP,
+                     WAN_DEF_SERVER_PORT, WAN_DEF_URL );
+            xprintf( "  lte grabar apn <apn>         uno solo\r\n" );
+            xprintf( "  lte grabar ip <ip>           (el puerto se conserva)\r\n" );
+            xprintf( "  lte grabar port <puerto>     (la IP se conserva)\r\n" );
+            xprintf( "  lte grabar url <url>\r\n" );
+            xprintf( "  lte grabar <apn> <ip> <puerto> <url>   los cuatro\r\n" );
             return;
         }
 

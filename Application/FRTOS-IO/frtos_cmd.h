@@ -43,7 +43,19 @@
  * sea otra vez al borde.
  */
 #define CMDLINE_MAX_COMMANDS    32
-#define MAX_INPUT_LENGTH        64
+/*
+ * ⚠ 64 QUEDABA JUSTO, y la línea más larga del firmware es de configuración:
+ *
+ *   lte grabar SPYMOVIL.VPNANTEL 192.168.0.20 5000 /apidlg?   -> 55 caracteres
+ *
+ * O sea 9 de margen: un APN o una URL un poco más largos y la línea se cortaba.
+ * Y hasta el 2026-10-12 se cortaba **en silencio y con el eco saliendo igual**
+ * (ver el `default:` de `FRTOS_CMD_process`), así que la pantalla mostraba el
+ * comando entero y el módulo quedaba configurado con una URL truncada.
+ *
+ * 128 son 128 bytes más de RAM —hay 194 KB libres de 256— y eliminan el caso.
+ */
+#define MAX_INPUT_LENGTH        128
 #define CMDLINE_MAX_ARGS        16
 
 #define ASCII_BEL               0x07

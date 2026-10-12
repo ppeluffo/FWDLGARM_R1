@@ -40,9 +40,11 @@ static bool bDiscarYa = true;
  *----------------------------------------------------------------------------*/
 #define WAN_MS_ESPERA_ARRANQUE   10000U  /* antes de la 1.ª sesión: que el resto
                                             del equipo termine de arrancar     */
-#define WAN_MS_ARRANQUE_MODEM     8000U  /* de dar energía a que conteste AT   */
-#define WAN_INTENTOS_AT               3U
-#define WAN_MS_ENTRE_INTENTOS     5000U
+/* ⚠ `WAN_MS_ARRANQUE_MODEM`, `WAN_INTENTOS_AT` y `WAN_MS_ENTRE_INTENTOS` se
+   mudaron a `tkWan.h`: los usan DOS unidades de compilación desde que `lte
+   leer` / `lte grabar` hacen la misma secuencia de encendido que la FSM. Que
+   un comando de consola reinventara esos tiempos sería tener dos verdades
+   sobre cuánto tarda el módulo en arrancar, y una de las dos envejecería. */
 
 /* ⚠ Los reintentos de CSQ/CIP **son** el poll de registro a la red: no es que
    el comando falle, es que el módulo todavía no se registró. Ver el comentario

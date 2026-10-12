@@ -97,6 +97,21 @@ bool wan_hay_enlace( void );
 uint32_t wan_segundos_apagado( void );
 
 /*------------------------------------------------------------------------------
+ * LOS TIEMPOS DEL ARRANQUE DEL MÓDULO.
+ *
+ * Están acá y no en el `.c` porque los usan la FSM **y** los comandos `lte
+ * leer` / `lte grabar`, que hacen exactamente la misma secuencia de encendido.
+ * Duplicarlos sería tener dos verdades sobre cuánto tarda el módulo, y la del
+ * comando envejecería en silencio.
+ *
+ * ⏳ Ninguno está en el manual del módulo: son los del AVR o puntos de partida
+ * generosos, ya ejercitados en banco por la FSM.
+ *----------------------------------------------------------------------------*/
+#define WAN_MS_ARRANQUE_MODEM     8000U  /* de dar energía a que conteste AT   */
+#define WAN_INTENTOS_AT               3U
+#define WAN_MS_ENTRE_INTENTOS     5000U
+
+/*------------------------------------------------------------------------------
  * LAS PIEZAS DE LA SESIÓN, que usan la FSM y los comandos de consola.
  *
  * ⚠ Las tres **asumen modo TRANSPARENTE** y que el modem está encendido, igual
@@ -129,5 +144,60 @@ bool wan_sesion_datos( void );
  *----------------------------------------------------------------------------*/
 void wan_pedir_kill( void );
 bool wan_matada( void );
+
+/*==============================================================================
+ * LA CONFIGURACIÓN DEL MÓDULO LTE: los valores de FÁBRICA de Spymovil
+ *============================================================================*/
+/*
+ * ⭐ Son los que escribe `lte grabar` SIN ARGUMENTOS, y existen para que la app
+ * de la terminal tenga **un botón de un solo click**: el caso normal —y es el
+ * 100 % de las instalaciones— es que todos los equipos hablen con el mismo
+ * servidor por el mismo APN.
+ *
+ * ⚠ **LA FUENTE DE VERDAD SIGUE SIENDO EL MÓDULO, no esto.** Acá no hay una
+ * copia de lo que el módulo tiene: hay valores para *escribirle*. `lte leer`
+ * pregunta siempre, porque lo que importa es lo que de verdad se va a usar
+ * (criterio de Pablo, 2026-09-09: *"la IP y el puerto viven en el módulo, no en
+ * el datalogger"*). Por eso tampoco van a la EEPROM: duplicar la fuente de
+ * verdad es exactamente lo que ese criterio evita.
+ *
+ * ✅ **Los cuatro los confirmó Pablo el 2026-10-12.**
+ *
+ * ⚠ **Que la IP sea PRIVADA no es un error**: el APN `SPYMOVIL.VPNANTEL` es una
+ * APN de VPN, así que el equipo entra a la red privada donde vive el servidor y
+ * `192.168.6.3` es alcanzable **sólo por ahí**. Conviene dejarlo escrito, porque
+ * desde afuera una 192.168.x.x en un default de producción se lee como un valor
+ * de banco olvidado — y "corregirla" por una pública sería el error.
+ *
+ * ⛔⛔ **HAY DOS SERVIDORES, Y ESTE DEFAULT ES EL DE PRODUCCIÓN** (Pablo,
+ * 2026-10-12):
+ *
+ *     192.168.6.3    PRODUCCION   <- el default de acá
+ *     192.168.0.20   la LAPTOP de Pablo, el servidor de TESTING
+ *
+ * O sea que **`lte grabar` sin argumentos EN EL BANCO manda los frames de
+ * prueba a producción**. Y el IMEI es real, así que no los rechazaría: entrarían
+ * en la base como datos legítimos de un equipo que existe. Es el episodio del
+ * IMEI falso (2026-09-21) dado vuelta y peor — aquella vez llegó un equipo
+ * inexistente, acá llegarían datos inventados de uno real.
+ *
+ * ⭐ **En banco se usa el override**, que para eso está:
+ *
+ *     lte grabar SPYMOVIL.VPNANTEL 192.168.0.20 5000 /apidlg?
+ *
+ * El firmware no puede distinguir banco de campo, así que no hay nada que
+ * proteger automáticamente: la red es que `lte grabar` **imprime la IP antes de
+ * escribirla y la relee después**, así que el que lo corre ve contra qué
+ * servidor quedó el equipo. Por eso esa impresión no es decorativa.
+ *
+ * ⛔ Un default equivocado es peor que ninguno, porque el comando de un click
+ * configura mal con toda naturalidad. Por eso `lte grabar` **imprime lo que va
+ * a escribir y después lo RELEE del módulo**: el que lo corre ve los cuatro
+ * valores, no un "listo".
+ */
+#define WAN_DEF_APN         "SPYMOVIL.VPNANTEL"
+#define WAN_DEF_SERVER_IP   "192.168.6.3"
+#define WAN_DEF_SERVER_PORT "5000"
+#define WAN_DEF_URL         "/apidlg?"
 
 #endif /* APPLICATION_TASKS_TKWAN_H_ */
