@@ -6452,6 +6452,44 @@ como nodo independiente. El conversor lo trataba como una f-string más y lo ree
 Se arregla con un visitor que **no descienda** al encontrar un `JoinedStr`: el `ast.unparse()` del
 externo ya incluye lo de adentro.
 
+##### ⛔⛔ Y FUERON TRES construcciones distintas, no sólo las f-strings
+
+Cada arreglo por síntoma destapó la siguiente, y las tres son de la **misma causa** —código escrito
+para 3.6+— pero ninguna se parece a las otras:
+
+| | Qué es | Desde |
+|---|---|---|
+| `f"...{x}"` | f-strings | 3.6 |
+| `open( Path(...) )` | ⛔ **`open()` no acepta un `Path`** (PEP 519). `pathlib` existe desde 3.4, pero la interoperabilidad con las funciones que toman rutas llegó después | 3.6 |
+| `50_000_000` | separador de millares en literales (PEP 515) | 3.6 |
+
+⭐ **La del medio se arregló sacando `pathlib` de raíz**, no envolviendo cada `open()` con `str()`: así
+la clase de problema no puede volver por un `open()` nuevo que alguien agregue. Rutas con
+`os.path.join()` y `os.makedirs(exist_ok=True)`, que son de 3.2.
+
+##### ⭐⭐ La lección: con el INTÉRPRETE REAL aparecen todas de un saque
+
+Las dos primeras se arreglaron a ciegas y cada una tardó una vuelta entera. La tercera apareció en el
+primer segundo de correr los scripts en un **Python 3.5.10 de verdad**, en Docker:
+
+```bash
+docker run --rm -v "$PWD:/w:ro" python:3.5 python3 -c 'import ast; ast.parse(open("/w/x.py").read())'
+```
+
+⭐ Es la regla que este proyecto ya tiene escrita para el hardware —*parar de proponer y agregar el
+instrumento*— aplicada a una incompatibilidad de versión. ⚠ Y acá el instrumento **no se puede
+sustituir por razonamiento**: yo no habría pensado nunca en el `50_000_000`.
+
+##### ⭐ `Tools/verificar_py35.sh`, y probado a propósito que DETECTA
+
+Queda el verificador en el repo, porque el próximo que edite un script no va a tener el contenedor
+armado. Corre los tres en `python:3.5` —compila y ejecuta— con un **stub de pyserial** que permite
+ejercitar el logger sin hardware ni acceso a PyPI.
+
+⭐ Y se verificó **que falla cuando tiene que fallar**: con una f-string metida a propósito informa
+`logger_serie.py SyntaxError linea 249` y sale con 1. Es la misma regla del `_Static_assert` del
+watchdog —*un test que nunca se vio disparar da falsa seguridad*—.
+
 ##### ⭐ Cómo se verificó, porque compilar no alcanza
 
 Un `.format()` mal convertido **compila igual** y falla al correr o imprime otra cosa. Y
@@ -6464,6 +6502,7 @@ Lo que se usó:
 |---|---|
 | `grep -nE 'f"\|f'"'"'` | cero, salvo el `%f` de los formatos de fecha (falso positivo) |
 | ⭐⭐ **La salida del analizador, antes y después** | **idéntica en los 4 casos** de prueba — es lo único que detecta un `.format()` con los argumentos cambiados de orden |
+| ⭐⭐⭐ **Y la salida en 3.5 contra la de 3.12** | **idéntica byte a byte**, los 4 casos. No sólo compila y corre: produce exactamente lo mismo en los dos intérpretes |
 | El generador y el logger corridos | el logger contra un puerto inexistente ejercita banner, error, reintento y cierre |
 
 ⭐ La advertencia quedó **en el docstring de los tres**, con los dos comandos de verificación: una

@@ -72,7 +72,6 @@ import signal
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
 
 # ==================== CONFIG ==============================================
 # Los dos pines que manejan los dos reles. Mismos que el simulador del AVR
@@ -90,7 +89,7 @@ PULSE_WIDTH_S = 0.050           # 50 ms: ver la cabecera. NO bajar de ~20 ms.
 MAGPP_M3      = 0.1             # m3 por pulso. Mismo que los escenarios del AVR.
 JITTER_PCT    = 2.0            # +/- % del periodo, no acumulativo
 
-RELE_VIDA_MECANICA = 50_000_000  # del datasheet TX-S
+RELE_VIDA_MECANICA = 50000000  # del datasheet TX-S
 
 # El perfil de UN DIA, que se repite. (caudal_m3h, segundos, etiqueta)
 # caudal 0 = silencio.
@@ -354,11 +353,12 @@ def main():
     args = ap.parse_args()
 
     _laptop = args.laptop
-    d = Path(args.dir)
-    d.mkdir(parents=True, exist_ok=True)
+    # ⛔ Rutas como STRINGS, sin pathlib: en Python 3.5 open() NO acepta un
+    # objeto Path (eso llego con PEP 519, en 3.6). Ver la nota de arriba.
+    os.makedirs(args.dir, exist_ok=True)
     marca = datetime.now().strftime("%Y%m%d_%H%M%S")
-    pcsv = d / 'pulsos_{}.csv'.format(marca)
-    plog = d / 'generador_{}.log'.format(marca)
+    pcsv = os.path.join(args.dir, 'pulsos_{}.csv'.format(marca))
+    plog = os.path.join(args.dir, 'generador_{}.log'.format(marca))
 
     _flog = open(plog, "a", encoding="utf-8")
     _t0_wall = time.time()

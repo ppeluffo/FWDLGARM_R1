@@ -55,7 +55,6 @@ import os
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
 
 try:
     import serial
@@ -76,7 +75,7 @@ class Log:
     las 40 h no puede llevarse las ultimas horas en un buffer."""
 
     def __init__(self, base):
-        self.base = Path(base)
+        self.base = str(base)
         self.n = 0
         self.f = None
         self._abrir()
@@ -85,7 +84,7 @@ class Log:
         if self.f:
             self.f.close()
         suf = "" if self.n == 0 else '.{}'.format(self.n)
-        self.ruta = Path(str(self.base) + suf)
+        self.ruta = self.base + suf
         self.f = open(self.ruta, "a", encoding="utf-8", errors="replace")
         print('[{}] log -> {}'.format(ts(), self.ruta), flush=True)
 
@@ -129,10 +128,11 @@ def main():
                          "siendo valido: el latido CNT:: del firmware alcanza")
     args = ap.parse_args()
 
-    d = Path(args.dir)
-    d.mkdir(parents=True, exist_ok=True)
+    # ⛔ Rutas como STRINGS, sin pathlib: en Python 3.5 open() NO acepta un
+    # objeto Path (eso llego con PEP 519, en 3.6). Ver la nota de arriba.
+    os.makedirs(args.dir, exist_ok=True)
     marca = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log = Log(d / 'equipo_{}.log'.format(marca))
+    log = Log(os.path.join(args.dir, 'equipo_{}.log'.format(marca)))
 
     log.linea("=" * 66, "##")
     log.linea('ARRANCA EL LOGGER -- hora local {}'.format(ts()), "##")
