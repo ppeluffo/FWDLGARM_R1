@@ -6420,6 +6420,55 @@ consumidor**.
 el campo `pendientes` no aporta nada mientras nadie lo consuma, y si algún día alguien lo ve **bajar**
 es porque se tipeó `cnt tomar`.
 
+#### ⛔ Las herramientas van en PYTHON 3.5: el tercer equipo no tiene f-strings
+
+`ulises-sat`, la máquina que va a loguear las 48 h, corre **Python 3.5.2** (Ubuntu 16.04). Los tres
+scripts se escribieron con f-strings —3.6 en adelante— y el logger murió en el arranque:
+
+```
+  File "logger_serie.py", line 77
+    suf = "" if self.n == 0 else f".{self.n}"
+SyntaxError
+```
+
+⚠ **Y un chequeo de versión adentro del script no habría servido**: el `SyntaxError` de una f-string
+se detecta al **parsear el archivo**, así que falla antes de ejecutar la primera línea. La única
+salida es no usarlas.
+
+Convertidas las **66** a `.format()`. Lo demás que usan ya es de 3.5 o anterior: `pathlib`,
+`mkdir(exist_ok=)`, `os.fsync`, `time.monotonic`.
+
+##### ⚠ `ast.walk()` es PLANO, y el `format_spec` es otro `JoinedStr`
+
+La conversión se hizo con el AST y no con regex —una f-string puede tener comillas y llaves adentro, y
+las adyacentes se concatenan en **un** nodo— pero el primer conversor rompió dos líneas:
+
+```
+print('  duracion : {:.2f} h'.format(dur / 3600)")     <- un '"' colgado
+```
+
+⛔ La causa: en `f"{dur/3600:.2f}"` el **`.2f` es a su vez un `JoinedStr`**, y `ast.walk()` lo devuelve
+como nodo independiente. El conversor lo trataba como una f-string más y lo reemplazaba por su `repr`.
+Se arregla con un visitor que **no descienda** al encontrar un `JoinedStr`: el `ast.unparse()` del
+externo ya incluye lo de adentro.
+
+##### ⭐ Cómo se verificó, porque compilar no alcanza
+
+Un `.format()` mal convertido **compila igual** y falla al correr o imprime otra cosa. Y
+⚠ **`ast.parse(..., feature_version=(3,5))` NO rechaza f-strings** —se probó—, así que tampoco sirve
+de verificador.
+
+Lo que se usó:
+
+| | |
+|---|---|
+| `grep -nE 'f"\|f'"'"'` | cero, salvo el `%f` de los formatos de fecha (falso positivo) |
+| ⭐⭐ **La salida del analizador, antes y después** | **idéntica en los 4 casos** de prueba — es lo único que detecta un `.format()` con los argumentos cambiados de orden |
+| El generador y el logger corridos | el logger contra un puerto inexistente ejercita banner, error, reintento y cierre |
+
+⭐ La advertencia quedó **en el docstring de los tres**, con los dos comandos de verificación: una
+f-string nueva rompería esto otra vez, y el que la escriba no va a tener ese equipo al lado.
+
 #### ⭐ Un test corto aparte que el relé ahora permite
 
 El techo de **~60 Hz** del filtro RC está documentado desde el bring-up y **nunca se verificó**.

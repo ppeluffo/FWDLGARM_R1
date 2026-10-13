@@ -51,6 +51,16 @@ Al analizar hay que usar SIEMPRE q_real --derivado del dt_real MEDIDO-- y no
 q_teorico: son iguales salvo en las transiciones y cuando el jitter pega.
 
 REQUISITOS:  apt install python3-libgpiod gpiod
+
+⛔ COMPATIBLE CON PYTHON 3.5 -- NO USAR f-STRINGS.
+   El tercer equipo (ulises-sat) corre Python 3.5.2 (Ubuntu 16.04), y las
+   f-strings son 3.6+. Un SyntaxError de f-string se detecta al PARSEAR el
+   archivo, asi que falla ANTES de ejecutar una sola linea -- un chequeo de
+   version adentro del script no se veria nunca. Formatear con .format().
+
+   Verificar antes de copiarlo:  python3 -c "import ast;ast.parse(open('X').read())"
+   Buscar f-strings:             grep -nE "f\"|f'" X
+   (el `%f` de los formatos de fecha da falso positivo)
 """
 
 import argparse
@@ -139,7 +149,7 @@ def ts():
 
 
 def log(msg):
-    linea = f"[{ts()}] {msg}"
+    linea = '[{}] {}'.format(ts(), msg)
     print(linea, flush=True)
     if _flog:
         _flog.write(linea + "\n")
@@ -165,7 +175,7 @@ def gpio_init():
             default_vals=[0],         # reposo BAJO = rele suelto = contacto ABIERTO
         )
         _gpio_lines.append(line)
-        log(f"GPIO salida: {chip_name} linea {line_off} (reposo BAJO = contacto abierto)")
+        log('GPIO salida: {} linea {} (reposo BAJO = contacto abierto)'.format(chip_name, line_off))
     atexit.register(gpio_cleanup)
 
 
@@ -224,20 +234,22 @@ def tren(w, etiqueta, caudal_m3h, duracion_s, jitter_pct=JITTER_PCT):
     global _seq, _t_ult_mono
 
     if caudal_m3h <= 0:
-        log(f"  {etiqueta}: SILENCIO {duracion_s:.0f} s"
-            f"{' (> dT_zero = 120 s: dispara el decay a cero)' if duracion_s > 120 else ''}")
+        log('  {}: SILENCIO {:.0f} s{}'.format(
+            etiqueta, duracion_s,
+            ' (> dT_zero = 120 s: dispara el decay a cero)'
+            if duracion_s > 120 else ''))
         time.sleep(duracion_s)
         return 0
 
     periodo = 3600.0 * MAGPP_M3 / caudal_m3h
     if periodo <= PULSE_WIDTH_S * 1.5:
-        log(f"  [!] {etiqueta}: periodo {periodo*1000:.0f} ms demasiado corto "
-            f"para un pulso de {PULSE_WIDTH_S*1000:.0f} ms. SALTEADO.")
+        log('  [!] {}: periodo {:.0f} ms demasiado corto para un pulso '
+            'de {:.0f} ms. SALTEADO.'.format(
+                etiqueta, periodo * 1000, PULSE_WIDTH_S * 1000))
         return 0
 
     n_est = int(duracion_s / periodo)
-    log(f"  {etiqueta}: Q={caudal_m3h} m3/h, periodo {periodo:.3f} s, "
-        f"{duracion_s/3600:.2f} h, ~{n_est} pulsos")
+    log('  {}: Q={} m3/h, periodo {:.3f} s, {:.2f} h, ~{} pulsos'.format(etiqueta, caudal_m3h, periodo, duracion_s / 3600, n_est))
 
     fin = time.monotonic() + duracion_s
 
@@ -285,8 +297,8 @@ def tren(w, etiqueta, caudal_m3h, duracion_s, jitter_pct=JITTER_PCT):
 
         w.writerow([
             datetime.fromtimestamp(t_wall).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-            _seq, etiqueta, f"{caudal_m3h:.3f}", f"{dt_ms:.1f}", f"{q_real:.3f}",
-            f"{PULSE_WIDTH_S*1000:.0f}",
+            _seq, etiqueta, '{:.3f}'.format(caudal_m3h), '{:.1f}'.format(dt_ms), '{:.3f}'.format(q_real),
+            '{:.0f}'.format(PULSE_WIDTH_S * 1000),
         ])
         w_flush()
 
@@ -317,9 +329,9 @@ def w_flush():
 def resumen(etapa=""):
     dur = time.time() - _t0_wall
     pct = 100.0 * _relay_ops / RELE_VIDA_MECANICA
-    log(f"RESUMEN{(' ' + etapa) if etapa else ''}: "
-        f"corrida {dur/3600:.2f} h | emitidos {_seq} | "
-        f"operaciones del rele {_relay_ops} ({pct:.4f} % de su vida mecanica)")
+    log('RESUMEN{}: corrida {:.2f} h | emitidos {} | operaciones del rele '
+        '{} ({:.4f} % de su vida mecanica)'.format(
+            ' ' + etapa if etapa else '', dur / 3600, _seq, _relay_ops, pct))
 
 
 # ==================== main ================================================
@@ -345,8 +357,8 @@ def main():
     d = Path(args.dir)
     d.mkdir(parents=True, exist_ok=True)
     marca = datetime.now().strftime("%Y%m%d_%H%M%S")
-    pcsv = d / f"pulsos_{marca}.csv"
-    plog = d / f"generador_{marca}.log"
+    pcsv = d / 'pulsos_{}.csv'.format(marca)
+    plog = d / 'generador_{}.log'.format(marca)
 
     _flog = open(plog, "a", encoding="utf-8")
     _t0_wall = time.time()
@@ -354,10 +366,9 @@ def main():
     # La linea de alineacion: los dos logs tienen que arrancar con la hora, o
     # cruzarlos despues es adivinar.
     log("=" * 70)
-    log(f"ARRANCA EL GENERADOR DE PULSOS -- hora local {ts()}")
-    log(f"  magpp = {MAGPP_M3} m3/pulso | ancho del cierre = {PULSE_WIDTH_S*1000:.0f} ms"
-        f" | jitter +/-{JITTER_PCT} %")
-    log(f"  CSV: {pcsv}")
+    log('ARRANCA EL GENERADOR DE PULSOS -- hora local {}'.format(ts()))
+    log('  magpp = {} m3/pulso | ancho del cierre = {:.0f} ms | jitter +/-{} %'.format(MAGPP_M3, PULSE_WIDTH_S * 1000, JITTER_PCT))
+    log('  CSV: {}'.format(pcsv))
     log("  VERIFICAR que el reloj de ESTA maquina y el del logger concuerden,")
     log("  o el cruce de los dos logs miente.")
     log("=" * 70)
@@ -379,8 +390,9 @@ def main():
                 periodo = 1.0 / hz
                 if periodo <= PULSE_WIDTH_S * 1.5:
                     ancho = max(0.004, periodo / 3.0)
-                    log(f"  {hz} Hz: periodo {periodo*1000:.1f} ms -> ancho reducido "
-                        f"a {ancho*1000:.1f} ms (el de 50 ms no entra)")
+                    log('  {} Hz: periodo {:.1f} ms -> ancho reducido a '
+                        '{:.1f} ms (el de 50 ms no entra)'.format(
+                            hz, periodo * 1000, ancho * 1000))
                     PULSE_WIDTH_S = ancho
                 n0 = _seq
                 fin = time.monotonic() + BARRIDO_SEG
@@ -390,14 +402,13 @@ def main():
                     _seq += 1
                     siguiente += periodo
                     dormir_hasta(siguiente)
-                log(f"  {hz:3d} Hz -> EMITIDOS {_seq - n0} en {BARRIDO_SEG} s. "
-                    f"Comparar contra el 'CNT:: total' del equipo.")
+                log("  {:3d} Hz -> EMITIDOS {} en {} s. Comparar contra el 'CNT:: total' del equipo.".format(hz, _seq - n0, BARRIDO_SEG))
                 time.sleep(5)
             resumen("barrido")
             return
 
         if args.escala != 1.0:
-            log(f"[!] ESCALA {args.escala}x: las duraciones se dividen. Esto NO es")
+            log('[!] ESCALA {}x: las duraciones se dividen. Esto NO es'.format(args.escala))
             log("    el test, es el ensayo del script.")
 
         perfil = PERFIL_PRUEBA if args.prueba else PERFIL_DIA
@@ -406,8 +417,8 @@ def main():
             log("no el test. Recorre los mismos caminos que el perfil de 48 h.")
 
         total_dia = sum(x[1] for x in perfil) / args.escala
-        log(f"Perfil: {total_dia/3600:.2f} h, {len(perfil)} tramos")
-        log(f"Objetivo: {args.horas} h")
+        log('Perfil: {:.2f} h, {} tramos'.format(total_dia / 3600, len(perfil)))
+        log('Objetivo: {} h'.format(args.horas))
 
         fin_total = time.monotonic() + args.horas * 3600.0 / args.escala
         ult_resumen = time.monotonic()
@@ -415,7 +426,7 @@ def main():
 
         while time.monotonic() < fin_total:
             vuelta += 1
-            log(f"--- vuelta {vuelta} del perfil ---")
+            log('--- vuelta {} del perfil ---'.format(vuelta))
             for caudal, dur, etiqueta in perfil:
                 if time.monotonic() >= fin_total:
                     break

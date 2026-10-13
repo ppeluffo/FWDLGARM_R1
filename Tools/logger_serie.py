@@ -38,6 +38,16 @@ EL TAG SE PIERDE EN CADA RESET, y por eso se reenvia. 'tag on' es idempotente,
 asi que mandarlo de nuevo no cuesta nada -- es mas robusto que detectar el
 banner, que depende de un string que podria cambiar. Igual se detecta
 'arrancando' para reaccionar rapido a un reset por watchdog.
+
+⛔ COMPATIBLE CON PYTHON 3.5 -- NO USAR f-STRINGS.
+   El tercer equipo (ulises-sat) corre Python 3.5.2 (Ubuntu 16.04), y las
+   f-strings son 3.6+. Un SyntaxError de f-string se detecta al PARSEAR el
+   archivo, asi que falla ANTES de ejecutar una sola linea -- un chequeo de
+   version adentro del script no se veria nunca. Formatear con .format().
+
+   Verificar antes de copiarlo:  python3 -c "import ast;ast.parse(open('X').read())"
+   Buscar f-strings:             grep -nE "f\"|f'" X
+   (el `%f` de los formatos de fecha da falso positivo)
 """
 
 import argparse
@@ -74,13 +84,13 @@ class Log:
     def _abrir(self):
         if self.f:
             self.f.close()
-        suf = "" if self.n == 0 else f".{self.n}"
+        suf = "" if self.n == 0 else '.{}'.format(self.n)
         self.ruta = Path(str(self.base) + suf)
         self.f = open(self.ruta, "a", encoding="utf-8", errors="replace")
-        print(f"[{ts()}] log -> {self.ruta}", flush=True)
+        print('[{}] log -> {}'.format(ts(), self.ruta), flush=True)
 
     def linea(self, texto, marca="<<"):
-        self.f.write(f"{ts()} {marca} {texto}\n")
+        self.f.write('{} {} {}\n'.format(ts(), marca, texto))
         self.f.flush()
         if self.f.tell() > ROTAR_BYTES:
             self.n += 1
@@ -122,12 +132,13 @@ def main():
     d = Path(args.dir)
     d.mkdir(parents=True, exist_ok=True)
     marca = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log = Log(d / f"equipo_{marca}.log")
+    log = Log(d / 'equipo_{}.log'.format(marca))
 
     log.linea("=" * 66, "##")
-    log.linea(f"ARRANCA EL LOGGER -- hora local {ts()}", "##")
-    log.linea(f"puerto {args.puerto} {args.baud} 8N1 | objetivo {args.horas} h | "
-              f"{'PASIVO' if args.pasivo else 'con checkpoints cada 15 min'}", "##")
+    log.linea('ARRANCA EL LOGGER -- hora local {}'.format(ts()), "##")
+    log.linea('puerto {} {} 8N1 | objetivo {} h | {}'.format(
+        args.puerto, args.baud, args.horas,
+        'PASIVO' if args.pasivo else 'con checkpoints cada 15 min'), "##")
     log.linea("VERIFICAR que el reloj de esta maquina y el de la BBB concuerden,", "##")
     log.linea("o el cruce de los dos logs miente.", "##")
     log.linea("=" * 66, "##")
@@ -147,9 +158,9 @@ def main():
             if s is None:
                 try:
                     s = abrir_puerto(args.puerto, args.baud)
-                    log.linea(f"puerto ABIERTO ({args.puerto})", "##")
+                    log.linea('puerto ABIERTO ({})'.format(args.puerto), "##")
                 except Exception as e:
-                    log.linea(f"no se pudo abrir {args.puerto}: {e} -- reintento en 5 s", "##")
+                    log.linea('no se pudo abrir {}: {} -- reintento en 5 s'.format(args.puerto, e), "##")
                     time.sleep(5)
                     continue
 
@@ -157,7 +168,7 @@ def main():
             try:
                 d_ = s.read(4096)
             except Exception as e:
-                log.linea(f"ERROR DE LECTURA: {e} -- cierro y reconecto", "##")
+                log.linea('ERROR DE LECTURA: {} -- cierro y reconecto'.format(e), "##")
                 try:
                     s.close()
                 except Exception:
@@ -184,8 +195,7 @@ def main():
                     # esperar al checkpoint, para no perder 15 min de etiquetas.
                     if (not args.pasivo) and ("arrancando" in texto):
                         n_resets += 1
-                        log.linea(f"detectado ARRANQUE del equipo (#{n_resets}): "
-                                  "repongo 'tag on'", "##")
+                        log.linea("detectado ARRANQUE del equipo (#{}): repongo 'tag on'".format(n_resets), "##")
                         try:
                             s.write(b"tag on\r")
                             s.flush()
@@ -195,9 +205,11 @@ def main():
             # --- checkpoints ---
             if (not args.pasivo) and (time.monotonic() >= prox_check):
                 prox_check = time.monotonic() + SEG_CHECKPOINT
-                log.linea(f"--- CHECKPOINT t+{(time.monotonic()-t0)/3600:.2f} h "
-                          f"({n_lineas} lineas, {n_reconex} reconexiones, "
-                          f"{n_resets} arranques) ---", "##")
+                log.linea(
+                    '--- CHECKPOINT t+{:.2f} h ({} lineas, {} reconexiones, '
+                    '{} arranques) ---'.format(
+                        (time.monotonic() - t0) / 3600,
+                        n_lineas, n_reconex, n_resets), "##")
                 for c in ("tag on",) + CMDS_CHECKPOINT:
                     try:
                         log.linea(c, ">>")
@@ -210,15 +222,15 @@ def main():
                         if d2:
                             buf += d2
                     except Exception as e:
-                        log.linea(f"ERROR al mandar '{c}': {e}", "##")
+                        log.linea("ERROR al mandar '{}': {}".format(c, e), "##")
                         break
 
-        log.linea(f"FIN: {args.horas} h cumplidas. {n_lineas} lineas, "
-                  f"{n_reconex} reconexiones, {n_resets} arranques del equipo.", "##")
+        log.linea('FIN: {} h cumplidas. {} lineas, {} reconexiones, '
+                  '{} arranques del equipo.'.format(
+                      args.horas, n_lineas, n_reconex, n_resets), "##")
 
     except KeyboardInterrupt:
-        log.linea(f"INTERRUMPIDO. {n_lineas} lineas, {n_reconex} reconexiones, "
-                  f"{n_resets} arranques.", "##")
+        log.linea('INTERRUMPIDO. {} lineas, {} reconexiones, {} arranques.'.format(n_lineas, n_reconex, n_resets), "##")
     finally:
         if s:
             try:

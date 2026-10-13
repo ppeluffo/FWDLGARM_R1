@@ -25,6 +25,16 @@ pierden, y ahi el momento en que empieza a crecer dice dONDE mirar.
 Y LOS DESCARTES CIERRAN EL CASO SOLOS: si faltan 5 pulsos y 'cortos' subio 5,
 no hay misterio -- el contacto reboto y el filtro RC los comio. 'cortos' acusa
 al circuito de entrada; 'imposibles', a la cadencia (ver caudal.h).
+
+⛔ COMPATIBLE CON PYTHON 3.5 -- NO USAR f-STRINGS.
+   El tercer equipo (ulises-sat) corre Python 3.5.2 (Ubuntu 16.04), y las
+   f-strings son 3.6+. Un SyntaxError de f-string se detecta al PARSEAR el
+   archivo, asi que falla ANTES de ejecutar una sola linea -- un chequeo de
+   version adentro del script no se veria nunca. Formatear con .format().
+
+   Verificar antes de copiarlo:  python3 -c "import ast;ast.parse(open('X').read())"
+   Buscar f-strings:             grep -nE "f\"|f'" X
+   (el `%f` de los formatos de fecha da falso positivo)
 """
 
 import csv
@@ -118,15 +128,15 @@ def main():
 
     print("=" * 74)
     print("GENERADOR (BBB)")
-    print(f"  cierres emitidos : {len(pulsos)}")
-    print(f"  desde            : {pulsos[0][0]}")
-    print(f"  hasta            : {pulsos[-1][0]}")
+    print('  cierres emitidos : {}'.format(len(pulsos)))
+    print('  desde            : {}'.format(pulsos[0][0]))
+    print('  hasta            : {}'.format(pulsos[-1][0]))
     dur = (pulsos[-1][0] - pulsos[0][0]).total_seconds()
-    print(f"  duracion         : {dur/3600:.2f} h")
+    print('  duracion         : {:.2f} h'.format(dur / 3600))
 
     print("\nEQUIPO (consola)")
-    print(f"  checkpoints CNT:: : {len(checkpoints)}")
-    print(f"  registros de poleo: {len(registros)}")
+    print('  checkpoints CNT:: : {}'.format(len(checkpoints)))
+    print('  registros de poleo: {}'.format(len(registros)))
     if not checkpoints:
         print("\n  [!] NO HAY NINGUNA LINEA 'CNT::' EN EL LOG.")
         print("      Sin eso el conteo NO se puede verificar. Causas posibles:")
@@ -140,8 +150,7 @@ def main():
     print("\n" + "=" * 74)
     print("CONTEO: emitidos por la BBB  vs  contados por el equipo")
     print("=" * 74)
-    print(f"{'hora':^12} {'t+h':>6} {'emitidos':>9} {'contados':>9} {'resta':>7} "
-          f"{'cortos':>7} {'imposib':>8}")
+    print('{:^12} {:>6} {:>9} {:>9} {:>7} {:>7} {:>8}'.format('hora', 't+h', 'emitidos', 'contados', 'resta', 'cortos', 'imposib'))
 
     t_ini = checkpoints[0][0]
     filas = []
@@ -165,8 +174,9 @@ def main():
         if i > ult + 1:
             print("      ...")
         t, em, total, resta, cortos, imp = filas[i]
-        print(f"{t.strftime('%H:%M:%S'):^12} {(t-t_ini).total_seconds()/3600:6.2f} "
-              f"{em:9d} {total:9d} {resta:7d} {cortos:7d} {imp:8d}")
+        print('{:^12} {:6.2f} {:9d} {:9d} {:7d} {:7d} {:8d}'.format(
+            t.strftime('%H:%M:%S'), (t - t_ini).total_seconds() / 3600,
+            em, total, resta, cortos, imp))
         ult = i
 
     r_ini_, r_fin_ = filas[0][3], filas[-1][3]
@@ -208,9 +218,9 @@ def main():
         print("\n" + "-" * 74)
         print("RELOJES")
         print("-" * 74)
-        print(f"  desfase mediano al empezar : {d_ini:+.1f} s")
-        print(f"  desfase mediano al terminar: {d_fin:+.1f} s")
-        print(f"  DERIVA entre los dos relojes: {deriva_relojes:+.1f} s")
+        print('  desfase mediano al empezar : {:+.1f} s'.format(d_ini))
+        print('  desfase mediano al terminar: {:+.1f} s'.format(d_fin))
+        print('  DERIVA entre los dos relojes: {:+.1f} s'.format(deriva_relojes))
         # LAS DOS CAUSAS DE QUE ESE DESFASE CREZCA SON DISTINTAS, y se separan
         # mirando la resta de CONTEOS:
         #
@@ -224,7 +234,7 @@ def main():
         # que es justo lo que este script existe para evitar.
         if abs(deriva_conteo) > 2:
             print("  -> OJO: este desfase NO mide los relojes. Los conteos no cuadran")
-            print(f"     (deriva {deriva_conteo:+d} pulsos), asi que el desfase crece")
+            print('     (deriva {:+d} pulsos), asi que el desfase crece'.format(deriva_conteo))
             print("     porque el total del equipo apunta a un pulso anterior.")
             print("     La causa esta abajo, en el conteo.")
         elif abs(deriva_relojes) > 3.0:
@@ -234,7 +244,7 @@ def main():
             # wan_rtc_sincronizar(), que no calcula ppm con menos de una hora.
             if dur > 3600:
                 ppm = deriva_relojes / dur * 1e6
-                print(f"     {ppm:+.1f} ppm sobre {dur/3600:.1f} h de corrida.")
+                print('     {:+.1f} ppm sobre {:.1f} h de corrida.'.format(ppm, dur / 3600))
             else:
                 print("     (corrida demasiado corta para estimar ppm)")
             print("     El conteo de abajo sigue siendo valido -- compara TOTALES,")
@@ -252,10 +262,10 @@ def main():
     print("\n" + "-" * 74)
     print("VEREDICTO")
     print("-" * 74)
-    print(f"  resta al empezar : {r_ini}")
-    print(f"  resta al terminar: {r_fin}")
-    print(f"  DERIVA           : {deriva}")
-    print(f"  descartes del equipo en el periodo: cortos={cortos_tot} imposibles={imp_tot}")
+    print('  resta al empezar : {}'.format(r_ini))
+    print('  resta al terminar: {}'.format(r_fin))
+    print('  DERIVA           : {}'.format(deriva))
+    print('  descartes del equipo en el periodo: cortos={} imposibles={}'.format(cortos_tot, imp_tot))
 
     if deriva == 0:
         print("\n  ** NO SE PERDIO NI UN PULSO en toda la corrida. **")
@@ -265,22 +275,22 @@ def main():
         # Con relojes que corren libres, +/-1 pulso es el pulso que cae del lado
         # equivocado del borde de un checkpoint. Llamarlo perdida mandaria a
         # buscar un bug por un artefacto del cruce.
-        print(f"\n  ** NO SE PERDIERON PULSOS (deriva {deriva:+d}, dentro del ruido). **")
+        print('\n  ** NO SE PERDIERON PULSOS (deriva {:+d}, dentro del ruido). **'.format(deriva))
         print("  Una deriva de +/-1 o 2 es el pulso que cae del lado equivocado del")
         print("  borde de un checkpoint, sobre todo si los relojes derivaron.")
         print("  LA VERIFICACION QUE NO DEPENDE DE LA HORA es la de los totales:")
         if checkpoints:
-            print(f"    emitidos por la BBB      : {len(pulsos)}")
-            print(f"    ultimo total del equipo  : {checkpoints[-1][1]}")
+            print('    emitidos por la BBB      : {}'.format(len(pulsos)))
+            print('    ultimo total del equipo  : {}'.format(checkpoints[-1][1]))
             print("    (difieren en los pulsos emitidos DESPUES del ultimo poleo)")
     elif deriva > 0:
-        print(f"\n  [!] EL EQUIPO CONTO {deriva} PULSOS MENOS que los emitidos.")
+        print('\n  [!] EL EQUIPO CONTO {} PULSOS MENOS que los emitidos.'.format(deriva))
         if cortos_tot >= deriva * 0.8:
-            print(f"      Y 'cortos' subio {cortos_tot}: el caso esta cerrado -- el")
+            print("      Y 'cortos' subio {}: el caso esta cerrado -- el".format(cortos_tot))
             print("      contacto reboto y el anti-rebote de 500 ms los descarto.")
             print("      Eso acusa al CIRCUITO DE ENTRADA, no al firmware.")
         elif imp_tot >= deriva * 0.8:
-            print(f"      Y 'imposibles' subio {imp_tot}: pulsos mas rapidos que")
+            print("      Y 'imposibles' subio {}: pulsos mas rapidos que".format(imp_tot))
             print("      CAUDAL_MAX_M3H. Revisar el magpp del equipo contra el del")
             print("      generador: tienen que ser EL MISMO.")
         else:
@@ -288,7 +298,7 @@ def main():
             print("      investigar. El primer checkpoint donde la resta crece dice")
             print("      cuando empezo: cruzar esa hora contra el tramo del CSV.")
     else:
-        print(f"\n  [!] EL EQUIPO CONTO {-deriva} PULSOS MAS que los emitidos.")
+        print('\n  [!] EL EQUIPO CONTO {} PULSOS MAS que los emitidos.'.format(-deriva))
         print("      Eso NO puede venir del generador: o hay ruido entrando por el")
         print("      borne, o el contacto rebota y el filtro no lo alcanza a comer.")
         print("      Mirar con 'cnt' y el osciloscopio en PA12.")
@@ -301,8 +311,8 @@ def main():
         print("CAUDAL REPORTADO (para cruzar contra q_real del CSV)")
         print("=" * 74)
         nombres = [k for k in con_caudal[0][1] if k not in ("V0", "bt3v3", "bt12v")]
-        print(f"  campos de medida en el registro: {', '.join(nombres)}")
-        print(f"  registros con medida: {len(con_caudal)}")
+        print('  campos de medida en el registro: {}'.format(', '.join(nombres)))
+        print('  registros con medida: {}'.format(len(con_caudal)))
         print("\n  ⏳ El reproceso del EMA (alpha=1 en el primer intervalo, 0.5")
         print("     despues, decay por silencio, descarte de Q>200, piso de 3)")
         print("     se corre sobre la columna dt_real_ms del CSV y se compara")
@@ -330,17 +340,16 @@ def main():
         print("  stack libre MINIMO por tarea (el peor de toda la corrida):")
         for tk, (libre, tot) in sorted(stacks.items()):
             usado = tot - libre
-            print(f"    {tk:<10} {libre:5d} de {tot:5d} libres -> usado {usado:4d} "
-                  f"({100.0*usado/tot:4.1f} %)")
+            print('    {:<10} {:5d} de {:5d} libres -> usado {:4d} ({:4.1f} %)'.format(tk, libre, tot, usado, 100.0 * usado / tot))
     if uarts:
-        print(f"  errores de UART (maximo visto): {uarts}")
-    print(f"  lineas 'arrancando' (indicio de resets): {arranques}")
+        print('  errores de UART (maximo visto): {}'.format(uarts))
+    print("  lineas 'arrancando' (indicio de resets): {}".format(arranques))
 
     if incidentes:
-        print(f"\n  INCIDENTES ({len(incidentes)}), los primeros 25:")
+        print('\n  INCIDENTES ({}), los primeros 25:'.format(len(incidentes)))
         for t, ln in incidentes[:25]:
             h = t.strftime("%H:%M:%S") if t else "  ?  "
-            print(f"    {h}  {ln[:110]}")
+            print('    {}  {}'.format(h, ln[:110]))
     else:
         print("\n  sin incidentes")
 
