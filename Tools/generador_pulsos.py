@@ -98,12 +98,31 @@ RELE_VIDA_MECANICA = 50000000  # del datasheet TX-S
 # un silencio tiene que pasar de 120 s para disparar el decay a cero. Los de
 # 300 s lo pasan con margen y dejan ver ademas el REARRANQUE, que es un camino
 # propio (alpha = 1 en el primer intervalo).
+# ⛔⛔ EL TRAMO ALTO VA EN 190 m3/h, NO EN 200, Y NO ES UN DETALLE.
+#
+# `CAUDAL_MAX_M3H` del firmware es 200, o sea que un tramo A 200 m3/h corre
+# EXACTAMENTE sobre el umbral del descarte por "fisicamente imposible", y con
+# el jitter de +/-2 % la MITAD de sus pulsos cae de cada lado. Medido en el
+# test del 2026-10-13: de 4002 pulsos de ese tramo, 2015 salieron con
+# dT < 1800 ms y el equipo descarto 1569 para el calculo del caudal.
+#
+# ⚠ El totalizador NO se afecta -- cuenta todos los flancos -- asi que el
+# criterio de aceptacion del test se cumplia igual. Lo que se arruina es el
+# CAUDAL de ese tramo: el equipo reporto ~148 m3/h donde el generador emitia
+# 200, y eso no es un bug del firmware sino el instrumento midiendo en el
+# borde de su propia definicion.
+#
+# ⭐ Es la misma familia que el ancho de 10 ms del simulador del AVR contra el
+# umbral de 4,8 ms del filtro: MARGEN CERO. Con 190 m3/h el periodo es 1895 ms
+# y el peor caso del jitter da 1857 ms, o sea 47 ms de aire sobre el umbral.
+#
+# El techo real del filtro (~60 Hz) se mide con --barrido, que es otro test.
 PERFIL_DIA = [
     (0,      180, "silencio_inicial"),   # arranque desde cero
     (30,    6*3600, "regimen_bajo"),     # noche: regimen estable, el EMA converge
     (150,   4*3600, "pico_manana"),      # ESCALON x5: sin clamp deberia tomar ~5 pulsos
     (60,    4*3600, "medio"),
-    (200,   1*3600, "maximo"),           # el tope: periodo 1,8 s
+    (190,   1*3600, "casi_maximo"),      # ⚠ 190 y NO 200: ver la nota de abajo
     (10,    3*3600, "cerca_del_umbral"), # Q bajo, cerca de CAUDAL_MIN_M3H = 3
     (0,      300, "silencio_decay"),     # > dT_zero: decay a cero Y rearranque
     (80,    5*3600, "tarde"),
@@ -121,7 +140,7 @@ PERFIL_PRUEBA = [
     (0,      150, "silencio_inicial"),   # > dT_zero: arranque limpio desde cero
     (30,     600, "regimen"),            # ~50 pulsos: el EMA converge
     (150,    480, "escalon_arriba"),     # ~200 pulsos: seguimiento sin clamp
-    (200,    300, "maximo"),             # ~166 pulsos: periodo 1,8 s
+    (190,    300, "casi_maximo"),        # ~158 pulsos: ver la nota de abajo
     (0,      150, "silencio_decay"),     # decay a cero Y rearranque
     (60,     600, "medio"),              # ~100 pulsos
     (10,     480, "bajo"),               # ~13 pulsos: Q bajo, cerca del umbral

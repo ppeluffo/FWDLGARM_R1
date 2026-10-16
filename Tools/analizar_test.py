@@ -40,6 +40,7 @@ al circuito de entrada; 'imposibles', a la cadencia (ver caudal.h).
 import csv
 import re
 import sys
+from collections import OrderedDict
 from datetime import datetime, timedelta
 
 RE_CNT = re.compile(r"CNT::\s*total=(\d+)\s+pendientes=(\d+)\s+cortos=(\d+)\s+imposibles=(\d+)")
@@ -56,7 +57,7 @@ def parse_ts(s):
 
 
 def leer_generador(ruta):
-    """Devuelve [(datetime, seq, dt_ms, q_real)] ordenado."""
+    """Devuelve [(datetime, seq, dt_ms, q_real, tramo, q_teorico)] ordenado."""
     out = []
     with open(ruta, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
@@ -67,6 +68,7 @@ def leer_generador(ruta):
                     float(r["dt_real_ms"]),
                     float(r["q_real_m3h"]),
                     r["tramo"],
+                    float(r["q_teorico_m3h"]),
                 ))
             except (ValueError, KeyError):
                 continue
@@ -90,7 +92,11 @@ def leer_equipo(ruta):
 
             m = RE_REG.search(ln)
             if m and t:
-                campos = dict(RE_CAMPO.findall(m.group(2)))
+                # ⚠ OrderedDict y NO dict: en Python 3.5 un dict NO conserva
+                #   el orden de insercion, asi que el orden de los campos del
+                #   frame -- que es significativo -- saldria distinto en 3.5 que
+                #   en 3.7+. Verificado: sin esto la salida DIFIERE entre las dos.
+                campos = OrderedDict(RE_CAMPO.findall(m.group(2)))
                 if campos:
                     registros.append((t, m.group(1), campos))
 
@@ -114,6 +120,279 @@ def emitidos_hasta(pulsos, t):
         else:
             hi = mid
     return lo
+
+
+# ---------------------------------------------------------------------------
+# EL REPROCESO DEL EMA
+#
+# Reproduce `Application/tasks/caudal.{h,c}` sobre los dT que midio la BBB y lo
+# compara contra lo que el equipo reporto. Si coinciden, el firmware implementa
+# lo que su header dice; si no, el bug esta en el firmware y no en el analisis.
+#
+# ⭐ Las constantes son las del firmware, y cada una lleva su origen: si alguien
+#    las cambia alla, hay que cambiarlas aca.
+# ---------------------------------------------------------------------------
+CAU_MAX_M3H       = 200.0     # caudal.h: CAUDAL_MAX_M3H
+CAU_MIN_M3H       = 3.0       # caudal.h: CAUDAL_MIN_M3H
+CAU_MS_ANTIRREB   = 500       # caudal.h: CAUDAL_MS_ANTIRREBOTE
+CAU_ALPHA         = 0.5       # caudal.h: CAUDAL_ALPHA
+TICK_RATE_HZ      = 512       # FreeRTOSConfig.h: configTICK_RATE_HZ
+MS_POR_TICK       = 1000.0 / TICK_RATE_HZ
+TICKS_ANTIRREBOTE = int(CAU_MS_ANTIRREB * TICK_RATE_HZ / 1000)   # pdMS_TO_TICKS
+
+RE_TICK   = re.compile(r'tick\s*:\s*(\d+)')
+RE_MAGPP  = re.compile(r'magpp\s*:\s*([\d.]+)')
+RE_TPOLL  = re.compile(r'timerpoll\s*=\s*(\d+)')
+RE_VALID  = re.compile(r'validos\s*:\s*(\d+)\s*pulsos')
+
+
+def reprocesar(pulsos, magpp, seg_ventana):
+    """Corre el algoritmo del firmware sobre los dT del CSV.
+
+    ⭐ LA SUTILEZA QUE DECIDE EL CONTEO: cuando un pulso se descarta -- por
+    corto o por imposible -- `caudal_pulso_desde_isr()` hace `return` ANTES de
+    `ulUltimoTick = ulTicks`, o sea que **la referencia NO avanza**. El dT del
+    pulso siguiente se mide desde el ultimo VALIDO, no desde el descartado, asi
+    que NO PUEDE HABER DOS DESCARTES SEGUIDOS. Modelarlo mal mueve el conteo de
+    descartes en cientos: con la referencia avanzando da 2009 y sin avanzar
+    1328, sobre los mismos datos.
+
+    Devuelve (contadores, ventanas), con ventanas = [(t_cierre, caudal)].
+    """
+    fK = magpp * 3600.0 * 1000.0          # caudal.c: fK, en ms * m3/h
+    ms_zero = fK / CAU_MIN_M3H            # caudal.c: fMsZero
+
+    validos = cortos = imposibles = 0
+    ema = suma = acum_ms = 0.0
+    muestras = 0
+    ema_arrancado = hay_ref = False
+    ventanas = []
+
+    t_ult_valido = pulsos[0][0]
+    prox_cierre = pulsos[0][0] + timedelta(seconds=seg_ventana)
+
+    for p in pulsos:
+        t, dt_ms = p[0], p[2]
+
+        # --- el cierre de ventana: es `caudal_leer()`, que ademas DECAE ---
+        while t >= prox_cierre:
+            if hay_ref and ema > 0.0:
+                silencio = (prox_cierre - t_ult_valido).total_seconds() * 1000.0
+                if silencio > ms_zero:
+                    ema = suma = 0.0
+                    muestras = 0
+                    ema_arrancado = hay_ref = False
+            cau = (suma / muestras) if muestras > 0 else ema
+            if cau < CAU_MIN_M3H:
+                cau = 0.0                 # piso de reporte
+            ventanas.append((prox_cierre, cau))
+            suma = 0.0
+            muestras = 0
+            prox_cierre += timedelta(seconds=seg_ventana)
+
+        # --- el pulso, tal como lo ve la ISR ---
+        if not hay_ref:
+            hay_ref = True
+            t_ult_valido = t
+            acum_ms = 0.0
+            validos += 1
+            continue                      # sin dT no hay caudal que calcular
+
+        acum_ms += dt_ms
+        ticks = int(round(acum_ms / MS_POR_TICK))
+
+        if ticks < TICKS_ANTIRREBOTE:
+            cortos += 1
+            continue                      # ⭐ la referencia NO avanza
+        q = fK / (ticks * MS_POR_TICK)
+        if q > CAU_MAX_M3H:
+            imposibles += 1
+            continue                      # ⭐ la referencia NO avanza
+
+        validos += 1
+        t_ult_valido = t
+        acum_ms = 0.0
+        if not ema_arrancado:
+            ema = q                       # alpha = 1 en el primer intervalo
+            ema_arrancado = True
+        else:
+            ema = (CAU_ALPHA * q) + ((1.0 - CAU_ALPHA) * ema)
+        suma += ema
+        muestras += 1
+
+    return (validos, cortos, imposibles), ventanas
+
+
+def leer_ticks(ruta):
+    """[(datetime, tick)] de las respuestas de 'status'.
+
+    ⭐ Es el instrumento que mide si el TICK DEL KERNEL corre a 512 Hz. Y no es
+    un detalle: el dT del caudal se mide EN TICKS, asi que un tick que atrasa
+    sale como caudal de MAS.
+    """
+    out = []
+    with open(ruta, encoding="utf-8", errors="replace") as f:
+        for ln in f:
+            mt = RE_TS_LOG.match(ln)
+            mk = RE_TICK.search(ln)
+            if mt and mk:
+                out.append((parse_ts(mt.group(1)), int(mk.group(1))))
+    return out
+
+
+def leer_config_equipo(ruta):
+    """(magpp, timerpoll) leidos del propio log; None si no estan."""
+    magpp = tpoll = None
+    with open(ruta, encoding="utf-8", errors="replace") as f:
+        for ln in f:
+            if magpp is None:
+                m = RE_MAGPP.search(ln)
+                if m:
+                    magpp = float(m.group(1))
+            if tpoll is None:
+                m = RE_TPOLL.search(ln)
+                if m:
+                    tpoll = int(m.group(1))
+            if magpp is not None and tpoll is not None:
+                break
+    return magpp, tpoll
+
+
+def desfase_por_conteo(checkpoints, pulsos):
+    """[(t_equipo, desfase_s)] medido CON EL CONTEO, no supuesto cero.
+
+    La BBB no tiene NTP por USB, asi que los dos relojes derivan. El conteo es
+    la unica referencia comun: si el equipo dice 'total = N', el instante en que
+    la BBB emitio el pulso N - base es el mismo instante fisico.
+    """
+    if not checkpoints or not pulsos:
+        return []
+    base = checkpoints[0][1] - emitidos_hasta(pulsos, checkpoints[0][0])
+    out = []
+    for ck in checkpoints:
+        n = ck[1] - base
+        if 0 < n <= len(pulsos):
+            out.append((ck[0], (ck[0] - pulsos[n - 1][0]).total_seconds()))
+    return out
+
+
+def tramos_del_csv(pulsos):
+    """[(tramo, t_ini, t_fin, q_teorico)] en el orden en que corrieron."""
+    out = []
+    for p in pulsos:
+        tr = p[4]
+        qt = p[5] if len(p) > 5 else 0.0
+        if not out or out[-1][0] != tr:
+            out.append([tr, p[0], p[0], qt])
+        else:
+            out[-1][2] = p[0]
+    return out
+
+
+def reportar_reproceso(pulsos, checkpoints, registros, ruta_log):
+    """Imprime la comparacion firmware vs reproceso, y mide el TICK."""
+    magpp, tpoll = leer_config_equipo(ruta_log)
+    if magpp is None or tpoll is None:
+        print("\n  [!] no se pudo leer magpp/timerpoll del log (hace falta un")
+        print("      checkpoint con 'cnt' y 'status' respondidos): sin eso el")
+        print("      reproceso no se puede correr. Con TERM_SENSE al aire el")
+        print("      equipo no recibe comandos y no hay respuestas.")
+        return
+
+    cont, ventanas = reprocesar(pulsos, magpp, tpoll)
+    print('  constantes: magpp {:.3f} | alpha {:.2f} | Qmax {:.0f} | Qmin {:.0f}'
+          ' | antirreb {} ms'.format(magpp, CAU_ALPHA, CAU_MAX_M3H,
+                                     CAU_MIN_M3H, CAU_MS_ANTIRREB))
+    print('              tick {} Hz -> {:.3f} ms por tick | ventana {} s'.format(
+        TICK_RATE_HZ, MS_POR_TICK, tpoll))
+
+    # ---------- el TICK: se mide primero, porque explica todo lo de abajo ----
+    ticks = leer_ticks(ruta_log)
+    tasa_global = None
+    if len(ticks) >= 2:
+        print("\n  EL TICK DEL KERNEL (de las respuestas de 'status')")
+        dt = (ticks[-1][0] - ticks[0][0]).total_seconds()
+        dk = ticks[-1][1] - ticks[0][1]
+        if dt > 0:
+            tasa_global = dk / dt
+            print('    sobre {:.2f} h: {:.3f} ticks/s  ->  {:+.3f} % contra {} Hz'.format(
+                dt / 3600.0, tasa_global, 100.0 * (tasa_global - TICK_RATE_HZ) / TICK_RATE_HZ,
+                TICK_RATE_HZ))
+            if abs(tasa_global - TICK_RATE_HZ) / TICK_RATE_HZ > 0.002:
+                print("    ⛔ EL TICK ATRASA, y NO es cosmetico: el dT del caudal se")
+                print("       mide EN TICKS, asi que un tick lento da dT cortos y")
+                print("       caudal de MAS, en la misma proporcion.")
+                print("       Causa conocida: `vPortSuppressTicksAndSleep()` descarta")
+                print("       el resto al convertir cuentas del LPTIM en ticks, y con")
+                print("       el contador despertando al micro eso pasa en cada pulso.")
+                print("       El arreglo es arrastrar ese resto a la despertada")
+                print("       siguiente (port_lptim_tick.c).")
+
+    # ---------- contadores: la comparacion que NO depende de la hora --------
+    ult = checkpoints[-1]
+    base = checkpoints[0][1] - emitidos_hasta(pulsos, checkpoints[0][0])
+    # ⚠ El latido 'CNT::' trae total y pendientes, NO validos: aquel cuenta
+    #   TODOS los flancos (drv_pulsos) y este solo los que entraron al EMA
+    #   (caudal.c). La identidad que los liga es
+    #       total = validos + cortos + imposibles
+    #   y 'validos' sale del comando 'cnt', que solo responde con TERM_SENSE.
+    validos_eq = None
+    with open(ruta_log, encoding="utf-8", errors="replace") as f:
+        for ln in f:
+            m = RE_VALID.search(ln)
+            if m:
+                validos_eq = int(m.group(1))
+    filas = [("total", sum(cont), ult[1] - base),
+             ("cortos", cont[1], ult[3]),
+             ("imposibles", cont[2], ult[4])]
+    if validos_eq is not None:
+        filas.insert(1, ("validos", cont[0], validos_eq))
+    print("\n  CONTADORES (no dependen de los relojes: es la comparacion dura)")
+    print("                     reproceso    el equipo       dif")
+    for etq, rep, eq in filas:
+        print('    {:<14} {:10d}   {:10d}   {:+7d}'.format(etq, rep, eq, rep - eq))
+    print("    (ultimo 'validos' del log; los demas, del ultimo latido)")
+
+    # ---------- el caudal, por tramo ----------
+    md = desfase_por_conteo(checkpoints, pulsos)
+    if not md:
+        return
+
+    def desf(t):
+        t0, d0 = md[0]
+        t1, d1 = md[-1]
+        span = max((t1 - t0).total_seconds(), 1.0)
+        return d0 + (t - t0).total_seconds() / span * (d1 - d0)
+
+    BORDE = timedelta(minutes=15)   # cubre la deriva de relojes en los bordes
+    print("\n  CAUDAL POR TRAMO (15 min recortados en cada borde, por la deriva)")
+    print("    tramo              Qteor    reproceso   el equipo      dif")
+    print("    " + "-" * 60)
+    for (tr, ini, fin, qteor) in tramos_del_csv(pulsos):
+        if (fin - ini) < timedelta(minutes=45):
+            continue
+        a, b = ini + BORDE, fin - BORDE
+        vs = [c for (t, c) in ventanas if a <= t <= b]
+        es = []
+        for (t_eq, _clave, campos) in registros:
+            tb = t_eq - timedelta(seconds=desf(t_eq))
+            if a <= tb <= b:
+                for k, v in campos.items():
+                    if k and k[0] in "QC":
+                        try:
+                            es.append(float(v))
+                        except ValueError:
+                            pass
+        if not vs or not es:
+            continue
+        mr = sum(vs) / len(vs)
+        me = sum(es) / len(es)
+        dif = 100.0 * abs(me - mr) / mr if mr else 0.0
+        print('    {:<16} {:7.2f}   {:9.3f}   {:9.3f}   {:6.3f} %'.format(
+            tr, qteor, mr, me, dif))
+    print()
+    print("    ⭐ Una diferencia PAREJA en todos los tramos no es el EMA: es el")
+    print("       tick de arriba. El EMA se valida donde el tick esta sano.")
 
 
 def main():
@@ -313,11 +592,7 @@ def main():
         nombres = [k for k in con_caudal[0][1] if k not in ("V0", "bt3v3", "bt12v")]
         print('  campos de medida en el registro: {}'.format(', '.join(nombres)))
         print('  registros con medida: {}'.format(len(con_caudal)))
-        print("\n  ⏳ El reproceso del EMA (alpha=1 en el primer intervalo, 0.5")
-        print("     despues, decay por silencio, descarte de Q>200, piso de 3)")
-        print("     se corre sobre la columna dt_real_ms del CSV y se compara")
-        print("     contra estos valores. Si coinciden, el firmware implementa lo")
-        print("     que dice; si no, el bug esta en el firmware y no en el analisis.")
+        reportar_reproceso(pulsos, checkpoints, registros, sys.argv[2])
 
     # ---------- estabilidad ----------
     print("\n" + "=" * 74)
