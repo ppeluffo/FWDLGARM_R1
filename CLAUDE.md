@@ -2844,10 +2844,34 @@ despertando solo eso no ocurre nunca; **con el contador de pulsos ocurre en cada
 | 1 Hz | 0,05 % |
 | 30 Hz | **~1,5 %** |
 
-No rompe nada —los timestamps los estampa el RTC, no el tick— pero estira todos los `vTaskDelay()` en
-esa proporción. **El arreglo es arrastrar el resto de una despertada a la siguiente**, unas pocas
+#### ⛔⛔⛔ MEDIDO en el test de 48 h (2026-10-15): **1,141 %**, y NO es inocuo
+
+Lo de arriba era una predicción. El test del contador la confirmó y **corrigió su conclusión**:
+
+| El micro | ticks/s reales | vs 512 Hz |
+|---|---|---|
+| **Stop 2 (dormido)** | **506,160** | ⛔ **−1,141 %** |
+| Sleep (despierto) | 511,728 | −0,053 % |
+
+⛔ **Y lo que esta nota decía —"no rompe nada, los timestamps los estampa el RTC"— NO ALCANZA.** El
+`dT` del caudal **se mide en ticks** (`caudal.c`), así que un tick que atrasa da dT cortos y
+**caudal de MÁS en la misma proporción**: el equipo reportó **1,0 a 1,5 % de más, sistemático y sólo
+en el tramo dormido**, contra el reproceso del propio algoritmo sobre los mismos dT. No es un
+`vTaskDelay()` que se estira: es **una medida física con 1,1 % de sesgo en un dato que viaja al
+servidor**, y sólo en campo, que es donde el equipo duerme.
+
+⭐ **Sólo se pudo atribuir porque el test se partió en dos tramos** —21,75 h en Stop 2 y 26,01 h en
+Sleep—. En un test de un solo régimen se habría visto como "el EMA tiene un error de 1 %".
+
+⚠ **Dimensionarlo antes de decidir**: 1,1 % es menos que la incertidumbre de un caudalímetro de
+campo, así que **no invalida ninguna instalación**. Pero es sesgo, no ruido, y se acumula en los
+totalizados del servidor.
+
+**El arreglo es arrastrar el resto de una despertada a la siguiente**, unas pocas
 líneas en `vPortSuppressTicksAndSleep()`. Va aparte, en su propio commit: toca el port, que está
 validado desde `v0.0.5`, y acá se cambia una variable por vez.
+
+⭐ El detalle completo del test está en **`TESTINGS.md`**.
 
 ### ✅ La electroválvula TOYI (`v0.0.13`)
 
@@ -6384,9 +6408,17 @@ pulsos perdidos, y el checkpoint donde empieza a crecer dice dónde mirar.
 Más la sección de **estabilidad**, que es el soak: stacks mínimos por tarea, errores de UART,
 arranques e incidentes.
 
-⏳ **Lo que el analizador todavía NO hace**: el reproceso del EMA sobre los dT reales del CSV para
-compararlo contra el caudal que informó el equipo. Queda para cuando haya logs de verdad, que es
-donde se puede verificar.
+✅ **El reproceso del EMA ya está** (2026-10-16): `reprocesar()` corre el algoritmo de `caudal.c`
+sobre los dT del CSV y compara contra lo que informó el equipo. Se escribió **contra los logs reales
+del test de 48 h**, que era la condición para poder verificarlo — ver `TESTINGS.md`.
+
+⭐ **La sutileza que decide el conteo**: cuando un pulso se descarta, `caudal_pulso_desde_isr()` hace
+`return` **antes** de `ulUltimoTick = ulTicks`, o sea que **la referencia NO avanza** y no puede
+haber dos descartes seguidos. Modelarlo mal mueve el conteo en cientos: con la referencia avanzando
+el reproceso da **2009** imposibles y sin avanzar **1328**, sobre los mismos datos.
+
+⭐ Y de paso el analizador **mide el tick del kernel** con las lecturas de `status`: es lo que
+encontró el 1,141 % de atraso en Stop 2.
 
 #### ✅ Primera corrida con el latido (2026-10-12): el contador CUENTA BIEN
 
@@ -6514,6 +6546,37 @@ El techo de **~60 Hz** del filtro RC está documentado desde el bring-up y **nun
 `generador_pulsos.py --barrido` hace 10, 20, 30, 45, 60 y 80 Hz de a 30 s y dice dónde empieza a
 perder. Son ~5.000 operaciones, nada para 50 millones. Va aparte: busca el **límite**, mientras el de
 48 h busca que no haya pérdidas.
+
+#### ✅✅ EL TEST DE 48 H PASÓ (2026-10-15) — y encontró algo que no se buscaba
+
+⭐ **El detalle completo, con los números y el procedimiento, está en `TESTINGS.md`.** Acá sólo lo
+que cambia el diseño:
+
+```
+cierres emitidos por la BBB : 33.085
+contados por el equipo      : 33.085     <- resta CONSTANTE en -22 (los que ya tenia)
+cortos : 0        resets en 48 h : 0        heap: 2992 B, INVARIABLE
+```
+
+| ⭐ Lo que quedó probado | |
+|---|---|
+| **No se perdió ni un pulso** | en 48 h y 33.085 cierres, con la resta clavada |
+| ⭐⭐ **Ni dormido ni despierto** | el test se partió en **21,75 h en Stop 2** y **26,01 h en Sleep**, y el conteo es exacto en los dos. El *"la EXTI latchea el flanco"* dejó de ser un razonamiento |
+| ⭐⭐ **El EMA implementa lo que dice** | el reproceso de `caudal.c` sobre los dT del CSV predice el **total exacto** y coincide a **4 cifras** con el caudal reportado donde el tick está sano |
+| El soak | stacks sin moverse (máx 24,6 %), heap sin un byte de variación, watchdog con los 30 s de margen de diseño, 0 resets |
+
+⛔⛔ **Y el hallazgo: el TICK CORRE 1,141 % LENTO MIENTRAS EL EQUIPO DUERME**, lo que mete **1,1 % de
+caudal de más** en campo. Está arriba, en la nota del tickless del contador — la nota que decía
+*"no rompe nada"* y que este test corrigió.
+
+⛔ **De paso, un error del INSTRUMENTO**: el tramo `maximo` del perfil corría a **200 m³/h exactos**,
+que es `CAUDAL_MAX_M3H`, así que con jitter de ±2 % la mitad de sus pulsos caía del lado "imposible"
+(2015 de 4002). ⭐ Es el ancho de 10 ms contra el umbral de 4,8 ms otra vez: **margen cero**.
+Corregido a **190 m³/h** (`casi_maximo`), con 57 ms de aire.
+
+⚠ La BBB no tiene NTP y derivó **938 ppm** (161,8 s en 47,9 h). El conteo no se afecta —compara
+totales— y el analizador **mide** esa deriva con el propio conteo; para la próxima, `sudo date -s`
+antes de arrancar.
 
 ### ⛔ Los buffers, los stacks y el heap NO se agrandan — y el motivo no es el espacio
 

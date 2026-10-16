@@ -21,3 +21,9 @@
 # Respaldos de Pablo: copias de .elf/.ioc por version. No se versionan — el
 # repo ya guarda cada etapa en su tag, que es la forma de volver a "aca andaba".
 /Versiones/
+
+# Datos de las corridas de test que caigan en la RAIZ del repo (los de Tools/
+# ya los cubre Tools/.gitignore). Son DATOS, no fuentes.
+equipo_*.log
+pulsos_*.csv
+generador_*.log

@@ -4,3 +4,9 @@ equipo_*.log
 pulsos_*.csv
 generador_*.log
 PULSOS*.CSV
+
+# Los tarballs con los que llegan los datos desde la BBB, y el cache de Python
+# que deja importar el analizador como modulo.
+*.tgz
+*.tar.gz
+__pycache__/
