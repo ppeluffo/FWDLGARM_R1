@@ -2871,6 +2871,12 @@ totalizados del servidor.
 líneas en `vPortSuppressTicksAndSleep()`. Va aparte, en su propio commit: toca el port, que está
 validado desde `v0.0.5`, y acá se cambia una variable por vez.
 
+⏸ **DIFERIDO por decisión de Pablo (2026-10-19)**: *"El atraso del tick genera solo un 1.1% de error.
+Dejalo anotado para verlo en el futuro."* El firmware sale a **pruebas de campo con el sesgo**. Al
+leer los caudales de esos equipos hay que recordar que vienen **~1,1 % altos mientras el equipo
+duerme** (y exactos con la terminal conectada), así que una comparación contra el caudalímetro o
+contra un AVR va a mostrar esa diferencia sin que haya nada roto.
+
 ⭐ El detalle completo del test está en **`TESTINGS.md`**.
 
 ### ✅ La electroválvula TOYI (`v0.0.13`)

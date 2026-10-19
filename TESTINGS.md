@@ -264,7 +264,7 @@ modo en el servidor con el logger corriendo, y ver moverse el `BH`.
 
 | | |
 |---|---|
-| ⛔ **El resto del tick en `vPortSuppressTicksAndSleep()`** | sigue siendo **el único** hallazgo de los dos tests que afecta un dato que viaja al servidor (+1,1 % de caudal dormido). Antes de campo |
+| ⛔ **El resto del tick en `vPortSuppressTicksAndSleep()`** | sigue siendo **el único** hallazgo de los dos tests que afecta un dato que viaja al servidor (+1,1 % de caudal dormido). ⏸ **Diferido por Pablo (2026-10-19)**: sale a campo con el sesgo, se ve en el futuro |
 | ⏳ El cambio de `PWRMODO` en vivo | ver arriba |
 | ⏳ El registro en una sola escritura de consola | por la app de la terminal |
 | ⚠ Los errores de UART en `status` | siguen sin imprimirse; ningún test los pudo reportar |
