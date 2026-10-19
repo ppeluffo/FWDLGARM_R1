@@ -96,7 +96,11 @@ def leer_equipo(ruta):
                 #   el orden de insercion, asi que el orden de los campos del
                 #   frame -- que es significativo -- saldria distinto en 3.5 que
                 #   en 3.7+. Verificado: sin esto la salida DIFIERE entre las dos.
-                campos = OrderedDict(RE_CAMPO.findall(m.group(2)))
+                # ⚠ Se corta en el "<-": la consola es compartida, y si tkWan
+                #   imprime la respuesta del servidor en medio del registro,
+                #   su CLOCK=2610180446 se leeria como un campo de caudal
+                #   (paso en el Test 2: una ventana dio 17 millones de m3/h).
+                campos = OrderedDict(RE_CAMPO.findall(m.group(2).split("<-")[0]))
                 if campos:
                     registros.append((t, m.group(1), campos))
 

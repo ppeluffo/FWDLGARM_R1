@@ -183,7 +183,7 @@ corrida: `sudo date -s` en la BBB antes de arrancar.
 
 ---
 
-## Test 2 — El contador en modo CONTINUO, 48 h (en curso)
+## Test 2 — El contador en modo CONTINUO, 48 h (2026-10-16 → 2026-10-18)
 
 Mismo banco, con el `PWRMODO` cambiado **desde el servidor** para que el equipo se reconfigure solo.
 
@@ -208,4 +208,64 @@ CONF_ALL  ->  CONFIG=OK                  <- cerro con el modo nuevo
 Si el `BH` no se mueve, el modo **no entró** y el equipo sigue en `DISCRETO` con el log diciendo que
 todo está bien.
 
-⏳ Resultados: pendiente.
+### ✅ Resultado: PASÓ (analizado el 2026-10-19, firmware `0.0.19`)
+
+Logs: `Tools/equipo_20261016_123310.log`, `Tools/pulsos_20261016_123344.csv`,
+`Tools/generador_20261016_123344.log`. Mismo perfil del Test 1 (dos vueltas de 24 h, `magpp` 0,1,
+cierre de 50 ms, jitter ±2 %), con el tramo máximo ya en **190 m³/h**.
+
+```
+cierres emitidos por la BBB : 32.884
+contados por el equipo      : 32.884     <- resta en 0 de principio a fin
+cortos : 0     imposibles : 0     resets en 48 h : 0 (un solo arranque, 47,76 h de tick)
+```
+
+| | |
+|---|---|
+| ⭐⭐ **No se perdió ni un pulso con el modem transmitiendo** | **2.824 sesiones** de datos, una por minuto, durante 48 h. Era el único tramo donde una pérdida por ruido/EMI podía aparecer, y no apareció |
+| ⭐ **El EMA** | equipo contra reproceso: **≤ 0,036 %** en los 14 tramos |
+| ⭐ **El tick** | **512,009 ticks/s = +0,002 %**: sin Stop 2 el tick es exacto. Confirma que el 1,141 % del Test 1 es **sólo** del sueño |
+| ⭐ **La transmisión** | **2.880 registros, 2.880 confirmados** (2.768 × `1 de 1` + 56 × `2 de 2`). La ventana nunca pasó de 2 |
+| La sesión | una sola apertura (`OFFLINE` → `ONLINE_CONFIG` con `CONFIG=OK` → `ONLINE_DATA`) y 48 h sin caerse ni reabrir. 32 acuses vacíos de `DATANR` descartados, como corresponde |
+| El soak | heap fijo en **2992 B**; stacks máx: `tkCmd` 26,1 %, `tkCPres` 24,2 %, `tkSys` 23,2 %, `tkWan` 12,8 %, `tkCtl` 7,8 % — los mismos números del Test 1 |
+
+ℹ️ El `validos` del equipo da 10 menos que el reproceso **por el instrumento**: el último `status`
+fue a las 12:19 y los pulsos siguieron hasta las 12:32. El `total` del último latido coincide exacto.
+
+### ⛔ Lo que este test NO validó: el cambio de régimen en vivo
+
+El equipo **arrancó ya en `CONTINUO`** (`tkWan arrancando (modo CONTINUO)` en el banner) y hubo una
+sola sesión de configuración, que contestó `CONFIG=OK` con **`BH=0xDB`** todo el tiempo. O sea que el
+`PWRMODO` se cambió **antes** de arrancar el logger y el mecanismo —el servidor pide `BASE`, se aplica,
+el `BH` se mueve— **no quedó registrado**. Para validarlo hay que arrancar en `DISCRETO`, cambiar el
+modo en el servidor con el logger corriendo, y ver moverse el `BH`.
+
+### Tres cosas que aparecieron
+
+1. ⛔ **Un error del ANALIZADOR, no del firmware.** Una ventana de `cerca_del_umbral` daba
+   **17 millones de m³/h**. La causa: la consola es compartida, y `tkWan` imprimió la respuesta del
+   servidor **en medio** del registro de `tkSys`:
+   ```
+   18/10/26 04:45:39;</log><log>PA=-2.50;…Q0=9.948;</log><log><- …"<html>CLASS=DATA&CLOCK=2610180446</html>"
+   ```
+   y el `CLOCK=2610180446` se tomó como un campo de caudal. En el log del equipo **no hay ni un
+   `Q0` anómalo**. Corregido en `analizar_test.py` (corta en el `<-`); ese tramo pasó a 0,029 %.
+   Verificado en Python 3.5 con `verificar_py35.sh`.
+2. ⚠ **Esa misma intercalación puede romper la app de la terminal**: un registro llega partido en
+   varios `<log>` con la respuesta del servidor en el medio. No toca los datos, pero si la app arma
+   el registro juntando fragmentos, lo va a armar mal. La salida limpia es que `tkSys` imprima el
+   registro **de una sola escritura**.
+3. ℹ️ **56 minutos llegaron con un minuto de atraso** (los `2 de 2`). `tkWan` en `ONLINE_DATA` espera
+   `timerpoll` **después** de vaciar (~1 s), así que deriva contra el `vTaskDelayUntil` de `tkSys` y
+   cada ~50 vueltas saltea un minuto. **No se pierde nada**; si molesta, se arregla esperando con
+   `vTaskDelayUntil` también en `tkWan`.
+
+### Pendientes que deja este test
+
+| | |
+|---|---|
+| ⛔ **El resto del tick en `vPortSuppressTicksAndSleep()`** | sigue siendo **el único** hallazgo de los dos tests que afecta un dato que viaja al servidor (+1,1 % de caudal dormido). Antes de campo |
+| ⏳ El cambio de `PWRMODO` en vivo | ver arriba |
+| ⏳ El registro en una sola escritura de consola | por la app de la terminal |
+| ⚠ Los errores de UART en `status` | siguen sin imprimirse; ningún test los pudo reportar |
+| ⏳ El consumo con el modem en `CONTINUO` | no se midió |

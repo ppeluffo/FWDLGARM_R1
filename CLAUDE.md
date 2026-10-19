@@ -2206,7 +2206,7 @@ que rehacerlo. De ahí el `.gitignore` heredado de `FWDLGZ` (ignora `Debug/`, `R
 
 ## Build & flash
 
-El proyecto es **STM32CubeIDE 2.2.0** (`/opt/st/stm32cubeide_2.2.0/stm32cubeide`), con el workspace
+El proyecto es **STM32CubeIDE 2.2.0** (`~/st/stm32cubeide_2.2.0/stm32cubeide`), con el workspace
 Eclipse en `Firmware/` (`Firmware/.metadata/`); ambos proyectos STM32 están importados ahí.
 
 El build normal es desde el IDE. `Debug/` contiene los makefiles **generados** por CDT
@@ -2220,7 +2220,7 @@ build — pero:
 - **Hay que usar el `arm-none-eabi-gcc` de CubeIDE, no el de `/usr/bin`.** Los `subdir.mk` pasan
   `-fcyclomatic-complexity`, que es una extensión del GCC de ST y el del sistema rechaza con
   `unrecognized command-line option`. La toolchain está en
-  `/opt/st/stm32cubeide_2.2.0/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.linux64_*/tools/bin`
+  `~/st/stm32cubeide_2.2.0/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.linux64_*/tools/bin`
   — ponerla al frente del `PATH`.
 - **`Debug/` es generado, no se edita a mano**: CubeIDE lo regenera y pisa los cambios. Para agregar
   fuentes o includes hay que hacerlo en las propiedades del proyecto (`.cproject`), no en los `.mk`.
@@ -2252,7 +2252,7 @@ arriba. La launch config `FWDLGARM_R1 Debug.launch` usa el ST-LINK GDB server de
 Para **diagnóstico** —no para flashear— sirve la CLI de CubeProgrammer, que viene dentro de CubeIDE:
 
 ```bash
-P=/opt/st/stm32cubeide_2.2.0/plugins/com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.linux64_*/tools/bin
+P=~/st/stm32cubeide_2.2.0/plugins/com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.linux64_*/tools/bin
 $P/STM32_Programmer_CLI -c port=SWD freq=950 mode=HOTPLUG        # Voltage, device ID, firmware del ST-LINK
 $P/STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -ob displ       # option bytes: RDP, WRP, PCROP
 $P/STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -r32 0x40021094 1   # RCC_CSR: qué tipo de reset hubo
@@ -7233,6 +7233,6 @@ Su mapa de pines, en cambio, **no sirve**: es previo a la placa R001.
 ## Toolchain
 
 - `arm-none-eabi-gcc` del sistema (`/usr/bin`) y el que trae CubeIDE (GNU Tools for STM32 14.3.rel1).
-- STM32CubeIDE 2.2.0 en `/opt/st/stm32cubeide_2.2.0/`.
+- STM32CubeIDE 2.2.0 en `~/st/stm32cubeide_2.2.0/` (en la laptop anterior estaba en `/opt/st/`; cambió con la migración del 2026-10-19).
 - Firmware package: **STM32Cube FW_L4 V1.18.2**; CubeMX 6.18.0.
 - `gh` **no** está instalado — usar git plano; para push, `GIT_TERMINAL_PROMPT=0 git push`.
