@@ -16,6 +16,7 @@
 #include "drv_lte.h"
 #include "drv_rtc79410.h"
 #include "wdg.h"
+#include "eventos.h"
 #include "frtos-io.h"
 #include "main.h"
 
@@ -33,6 +34,29 @@ static bool         bMatada    = false;
    del AVR, y existe para que un equipo recién energizado se configure y vacíe
    la memoria en vez de quedarse callado hasta el primer `timerdial`. */
 static bool bDiscarYa = true;
+
+/*
+ * Para el registro de eventos (`eventos.h`): cuánto duró la sesión, cuántos PING
+ * hicieron falta y cuánto se mandó. Los contadores van en el resumen diario.
+ */
+static TickType_t xInicioSesion;
+static uint8_t    ucPings;
+static uint16_t   usUltEnviados;
+static uint32_t   ulVaciadosOk;
+static uint32_t   ulSesionesFallo;
+static uint32_t   ulEnviadosTotal;
+
+static uint32_t prvSegSesion( void )
+{
+    return ( uint32_t ) ( ( xTaskGetTickCount() - xInicioSesion ) / configTICK_RATE_HZ );
+}
+
+void wan_stats( uint32_t *pulVaciadosOk, uint32_t *pulFallos, uint32_t *pulEnviados )
+{
+    *pulVaciadosOk = ulVaciadosOk;
+    *pulFallos     = ulSesionesFallo;
+    *pulEnviados   = ulEnviadosTotal;
+}
 
 /*------------------------------------------------------------------------------
  * Los tiempos de la sesión. ⏳ Ninguno está en el manual del módulo: son los
@@ -394,6 +418,7 @@ void wan_sesion_config( void )
 
     if( !prvLteTxRx( pcFrame, usLargo, pcRta, sizeof( pcRta ) ) )
     {
+        eventos_log( "CONF_ALL: sin respuesta del servidor" );
         return;
     }
 
@@ -403,11 +428,13 @@ void wan_sesion_config( void )
     {
         case wanCONF_OK:
             xprintf( "CONFIG=OK: la configuracion del equipo coincide con la del servidor\r\n" );
+            eventos_log( "CONF_ALL: CONFIG=OK" );
             break;
 
         case wanCONF_DESCONOCIDO:
             xprintf( "[!] el servidor NO RECONOCE al equipo (CONFIG=ERROR / FAIL).\r\n" );
             xprintf( "    hay que dar de alta el IMEI %s en el servidor.\r\n", wan_imei() );
+            eventos_log( "CONF_ALL: [!] el servidor NO RECONOCE al equipo (IMEI %s)", wan_imei() );
             prvEspaciarPorDesconocido();
             break;
 
@@ -419,6 +446,13 @@ void wan_sesion_config( void )
                      xFlags.bModbus      ? " MODBUS"   : "",
                      xFlags.bConsigna    ? " PRESION"  : "",
                      xFlags.bFlowcontrol ? " FLOWC"    : "" );
+
+            eventos_log( "CONF_ALL: el servidor pide reconfigurar:%s%s%s%s%s",
+                         xFlags.bBase      ? " BASE"    : "",
+                         xFlags.bAinputs   ? " AINPUT"  : "",
+                         xFlags.bCounter   ? " COUNTER" : "",
+                         xFlags.bModbus    ? " MODBUS"  : "",
+                         xFlags.bConsigna  ? " PRESION" : "" );
 
             /*
              * ⛔ Acá había un aviso diciendo que `FLOWC` se pedía siempre porque
@@ -433,6 +467,7 @@ void wan_sesion_config( void )
 
         default:
             xprintf( "respuesta no reconocida\r\n" );
+            eventos_log( "CONF_ALL: respuesta no reconocida" );
             break;
     }
 }
@@ -674,6 +709,7 @@ static bool prvLteLotes( void )
                            **sin borrar el lote** — se retransmite entero al
                            volver, que es lo correcto porque no se confirmó todo. */
                         xprintf( "el servidor pide RESET: reiniciando...\r\n" );
+                        eventos_log( "el servidor pide RESET (en medio de un lote): reiniciando" );
                         fs_sd_lote_cerrar( false );
                         vTaskDelay( pdMS_TO_TICKS( 2000 ) );
                         NVIC_SystemReset();
@@ -757,6 +793,8 @@ bool wan_sesion_datos( void )
     uint16_t         usPendientes;
     uint16_t         usSinConfirmar = 0U;
     uint16_t         usEnviados     = 0U;
+
+    usUltEnviados = 0U;
 
     if( !wan_modem_listo() )
     {
@@ -920,6 +958,8 @@ bool wan_sesion_datos( void )
              * enteros al volver.
              */
             xprintf( "el servidor pide RESET: reiniciando...\r\n" );
+            /* Queda en la SRAM2 y se escribe en el arranque siguiente. */
+            eventos_log( "el servidor pide RESET: reiniciando" );
             vTaskDelay( pdMS_TO_TICKS( 2000 ) );
             NVIC_SystemReset();
         }
@@ -931,6 +971,9 @@ bool wan_sesion_datos( void )
     }
 
     fs_datos_stats( &xStats );
+
+    usUltEnviados    = usEnviados;
+    ulEnviadosTotal += usEnviados;
 
     xprintf( "\r\ntransmitidos %u, quedan %u en la ventana\r\n",
              ( unsigned ) usEnviados, ( unsigned ) xStats.usCount );
@@ -1355,6 +1398,13 @@ static void prvEstadoApagado( void )
     drv_lte_power( false );
 
     /*
+     * ⭐ Fin de sesión: el momento de escribir los eventos a la microSD. El
+     * equipo ya está despierto y el modem recién se apagó, así que prender la
+     * tarjeta un segundo no se nota. Con el registro apagado no hace nada.
+     */
+    ( void ) eventos_volcar();
+
+    /*
      * ⛔ En SILENT el modem **no se enciende nunca**. El AVR se queda en un lazo
      * infinito en este mismo estado; acá se hace lo mismo pero mirando la
      * configuración en cada vuelta, así un `config pwrmodo continuo` desde la
@@ -1407,6 +1457,11 @@ static void prvEstadoApagado( void )
 static void prvFalloVolverAApagado( const char *pcMotivo )
 {
     xprintf( "tkWan:: %s: apago y reintento despues\r\n", pcMotivo );
+
+    ulSesionesFallo++;
+    eventos_log( "SESION FALLO tras %lu s: %s (CSQ %u)",
+                 ( unsigned long ) prvSegSesion(), pcMotivo, ( unsigned ) wan_csq() );
+
     bSesionFallo = true;
     bHayEnlace   = false;
     eEstado      = wanAPAGADO;
@@ -1470,6 +1525,7 @@ static bool prvPingConReintentos( void )
 
         if( wan_sesion_ping_ok() )
         {
+            ucPings = ( uint8_t ) ( i + 1U );
             return true;
         }
 
@@ -1500,6 +1556,9 @@ static bool prvPingConReintentos( void )
 static void prvEstadoOffline( void )
 {
     xprintf( "\r\ntkWan:: OFFLINE\r\n" );
+
+    xInicioSesion = xTaskGetTickCount();
+    ucPings       = 0U;
 
     drv_lte_power( true );
     vTaskDelay( pdMS_TO_TICKS( WAN_MS_ARRANQUE_MODEM ) );
@@ -1570,6 +1629,10 @@ static void prvEstadoOffline( void )
 
     bHayEnlace = true;
     eEstado    = wanONLINE_CONFIG;
+
+    eventos_log( "ENLACE en %lu s: CSQ -%u dBm, %u PING(s)",
+                 ( unsigned long ) prvSegSesion(), ( unsigned ) wan_csq(),
+                 ( unsigned ) ucPings );
 }
 //------------------------------------------------------------------------------
 static void prvEstadoOnlineConfig( void )
@@ -1613,9 +1676,18 @@ static void prvEstadoOnlineData( void )
         return;
     }
 
+    ulVaciadosOk++;
+
     if( wan_segundos_apagado() > 0UL )
     {
         /* DISCRETO, o MIXTO fuera de su ventana: se apaga hasta la próxima. */
+        fs_datos_stats_t xSt;
+
+        fs_datos_stats( &xSt );
+        eventos_log( "SESION OK en %lu s: %u registros enviados, quedan %u",
+                     ( unsigned long ) prvSegSesion(), ( unsigned ) usUltEnviados,
+                     ( unsigned ) xSt.usCount );
+
         eEstado = wanAPAGADO;
         return;
     }

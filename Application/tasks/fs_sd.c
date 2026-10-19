@@ -1236,3 +1236,208 @@ bool fs_sd_volcar_pulsos( void )
     return bRet;
 }
 //------------------------------------------------------------------------------
+/*==============================================================================
+ * EL REGISTRO DE EVENTOS (2026-10-19) — ver `eventos.h`
+ *
+ * Las dos operaciones viven acá y no en `eventos.c` por la regla de siempre: **la
+ * tarjeta tiene un solo dueño**. `eventos.c` arma el texto; esto lo escribe.
+ *============================================================================*/
+static bool prvExiste( const char *pcNombre )
+{
+    FILINFO xFno;
+    bool    bRet;
+
+    if( !prvMontar() )
+    {
+        return false;   /* prvMontar() ya explicó por qué */
+    }
+
+    bRet = ( f_stat( pcNombre, &xFno ) == FR_OK );
+
+    prvDesmontar();
+    return bRet;
+}
+//------------------------------------------------------------------------------
+bool fs_sd_existe( const char *pcNombre )
+{
+    bool bRet;
+
+    if( pcNombre == NULL )
+    {
+        return false;
+    }
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "existe" );
+        return false;
+    }
+
+    bRet = prvExiste( pcNombre );
+
+    prvSoltar();
+    return bRet;
+}
+//------------------------------------------------------------------------------
+static bool prvAgregar( const char *pcNombre, const char *pcViejo,
+                        const char *pcTexto, uint32_t ulLargo, uint32_t ulMax )
+{
+    FILINFO xFno;
+    FIL     xFile;
+    UINT    uiEsc = 0U;
+    bool    bOk;
+
+    if( !prvMontar() )
+    {
+        return false;
+    }
+
+    /*
+     * ⭐ La rotación: al pasar `ulMax` el archivo se renombra a `pcViejo` —pisando
+     * el viejo anterior— y se empieza otro. Así la tarjeta nunca se llena por
+     * esto, y lo último siempre está: se pierde lo más viejo, que es lo que menos
+     * importa en un equipo a estudio.
+     */
+    if( ( f_stat( pcNombre, &xFno ) == FR_OK ) && ( xFno.fsize >= ulMax ) )
+    {
+        ( void ) f_unlink( pcViejo );
+
+        if( f_rename( pcNombre, pcViejo ) != FR_OK )
+        {
+            xprintf( "SD:: no se pudo rotar %s a %s\r\n", pcNombre, pcViejo );
+        }
+    }
+
+    if( f_open( &xFile, pcNombre, FA_OPEN_APPEND | FA_WRITE ) != FR_OK )
+    {
+        xprintf( "SD:: no se pudo abrir %s para agregar\r\n", pcNombre );
+        prvDesmontar();
+        return false;
+    }
+
+    bOk = ( f_write( &xFile, pcTexto, ( UINT ) ulLargo, &uiEsc ) == FR_OK ) &&
+          ( uiEsc == ( UINT ) ulLargo );
+
+    /* ⚠ El `f_close()` se evalúa SIEMPRE, aunque la escritura haya fallado: es el
+       que actualiza el directorio. Sin él, lo escrito no existe para FAT. */
+    bOk = ( f_close( &xFile ) == FR_OK ) && bOk;
+
+    prvDesmontar();
+    return bOk;
+}
+//------------------------------------------------------------------------------
+bool fs_sd_agregar( const char *pcNombre, const char *pcViejo,
+                    const char *pcTexto, uint32_t ulLargo, uint32_t ulMax )
+{
+    bool bRet;
+
+    if( ( pcNombre == NULL ) || ( pcViejo == NULL ) || ( pcTexto == NULL ) )
+    {
+        return false;
+    }
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "agregar" );
+        return false;
+    }
+
+    bRet = prvAgregar( pcNombre, pcViejo, pcTexto, ulLargo, ulMax );
+
+    prvSoltar();
+    return bRet;
+}
+//------------------------------------------------------------------------------
+static bool prvCrear( const char *pcNombre )
+{
+    FIL  xFile;
+    bool bOk;
+
+    if( !prvMontar() )
+    {
+        return false;
+    }
+
+    /* FA_OPEN_ALWAYS: si ya existe se abre sin tocarlo — nunca se trunca. */
+    bOk = ( f_open( &xFile, pcNombre, FA_OPEN_ALWAYS | FA_WRITE ) == FR_OK );
+
+    if( bOk )
+    {
+        bOk = ( f_close( &xFile ) == FR_OK );
+    }
+
+    prvDesmontar();
+
+    if( !bOk )
+    {
+        xprintf( "SD:: no se pudo crear %s\r\n", pcNombre );
+    }
+
+    return bOk;
+}
+//------------------------------------------------------------------------------
+bool fs_sd_crear( const char *pcNombre )
+{
+    bool bRet;
+
+    if( pcNombre == NULL )
+    {
+        return false;
+    }
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "crear" );
+        return false;
+    }
+
+    bRet = prvCrear( pcNombre );
+
+    prvSoltar();
+    return bRet;
+}
+//------------------------------------------------------------------------------
+static bool prvBorrar( const char *pcNombre )
+{
+    FRESULT xRes;
+
+    if( !prvMontar() )
+    {
+        return false;
+    }
+
+    xRes = f_unlink( pcNombre );
+
+    prvDesmontar();
+
+    /* FR_NO_FILE: ya no estaba, que es exactamente lo que se pidió. */
+    if( ( xRes != FR_OK ) && ( xRes != FR_NO_FILE ) )
+    {
+        xprintf( "SD:: no se pudo borrar %s (FRESULT=%d)\r\n", pcNombre, ( int ) xRes );
+        return false;
+    }
+
+    return true;
+}
+//------------------------------------------------------------------------------
+bool fs_sd_borrar( const char *pcNombre )
+{
+    bool bRet;
+
+    if( pcNombre == NULL )
+    {
+        return false;
+    }
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "borrar" );
+        return false;
+    }
+
+    bRet = prvBorrar( pcNombre );
+
+    prvSoltar();
+    return bRet;
+}
+//------------------------------------------------------------------------------

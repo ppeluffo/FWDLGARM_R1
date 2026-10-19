@@ -126,6 +126,10 @@ void wan_sesion_config( void );
    reestablecerlo en vez de seguir reintentando contra un servidor mudo. */
 bool wan_sesion_datos( void );
 
+/* Para el resumen diario del registro de eventos: vaciados que salieron bien,
+   sesiones que fallaron y registros enviados, desde el arranque. */
+void wan_stats( uint32_t *pulVaciadosOk, uint32_t *pulFallos, uint32_t *pulEnviados );
+
 /*------------------------------------------------------------------------------
  * `kill wan`: suspende la tarea para que un operador pueda trabajar con el
  * módulo a mano sin pisarse con la FSM.

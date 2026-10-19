@@ -12,6 +12,7 @@
  * pasó dos veces en este proyecto, una de ellas con un `#include`.
  */
 #include "main.h"
+#include "eventos.h"
 
 #include "tkCtl.h"
 #include "drv_term_sense.h"
@@ -240,6 +241,13 @@ static void prvJuzgar( void )
                  ( unsigned long ) WDG_PLAZO_MS );
         xprintf( "    Dejo de patear el IWDG: el equipo se resetea en ~%lu s.\r\n",
                  ( unsigned long ) ( drv_wdt_ventana_ms() / 1000UL ) );
+
+        /* ⭐ Sin hora a propósito: la tarea colgada puede tener el bus I2C. El
+           evento queda en la SRAM2 y llega a la microSD en el arranque que
+           sigue — que es lo que hace que el log diga QUIÉN fue. */
+        eventos_log_sin_hora( "[X] WATCHDOG: '%s' se paso del plazo: reset en ~%lu s",
+                              ( pcCulpable != NULL ) ? pcCulpable : "?",
+                              ( unsigned long ) ( drv_wdt_ventana_ms() / 1000UL ) );
     }
 
     ulVueltasEnFalta++;

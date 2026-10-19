@@ -181,4 +181,25 @@ bool fs_sd_volcar_pulsos( void );
  */
 uint32_t fs_sd_postergadas( void );
 
+/*------------------------------------------------------------------------------
+ * Para el registro de eventos (`eventos.h`).
+ *
+ * `fs_sd_existe()`: enciende, monta, pregunta si el archivo está y apaga. Sin
+ * tarjeta devuelve false — que para quien pregunta es lo mismo que "no está".
+ *
+ * `fs_sd_agregar()`: agrega `ulLargo` bytes al final de `pcNombre`, creándolo si
+ * no existe. Si el archivo ya pasó `ulMax` bytes lo renombra a `pcViejo`
+ * (pisando el anterior) y empieza uno nuevo. Abre, escribe y CIERRA en cada
+ * llamada: un corte de alimentación entre dos llamadas no deja nada a medias.
+ *
+ * `fs_sd_crear()` / `fs_sd_borrar()`: para `eventos activar|desactivar`. Crear
+ * un archivo que ya existe no lo toca y devuelve true; borrar uno que no existe
+ * también devuelve true — en los dos casos el estado pedido ya es el que hay.
+ *----------------------------------------------------------------------------*/
+bool fs_sd_existe ( const char *pcNombre );
+bool fs_sd_crear  ( const char *pcNombre );
+bool fs_sd_borrar ( const char *pcNombre );
+bool fs_sd_agregar( const char *pcNombre, const char *pcViejo,
+                    const char *pcTexto, uint32_t ulLargo, uint32_t ulMax );
+
 #endif /* APPLICATION_TASKS_FS_SD_H_ */

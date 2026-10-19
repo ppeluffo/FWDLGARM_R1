@@ -41,6 +41,7 @@
 #include "drv_term_sense.h"
 #include "pwr_lock.h"
 #include "main.h"
+#include "eventos.h"
 
 StaticTask_t tkCmd_TCB;
 StackType_t  tkCmd_Stack[ tkCmd_STACK_SIZE ];
@@ -348,6 +349,8 @@ static void cmdFs( void );
 static void prvFsUso( void );
 static void cmdKeys( void );
 static void cmdTag( void );
+static void cmdEventos( void );
+static void prvEventosUso( void );
 static void prvTagUso( void );
 static void cmdReset( void );
 
@@ -570,6 +573,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "wdg",    cmdWdg    );
     FRTOS_CMD_register( "tag",    cmdTag    );
     FRTOS_CMD_register( "reset",  cmdReset  );
+    FRTOS_CMD_register( "eventos", cmdEventos );
 
     /* La versión y la fecha de compilación en el banner, no sólo en 'status':
        es lo primero que uno quiere ver al enchufar la terminal, y contesta sin
@@ -675,6 +679,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "keys",   "muestra el codigo crudo de cada tecla (diagnostico)",   NULL          },
     { "wdg",    "estado del watchdog: el perro y el plazo de cada tarea", prvWdgUso     },
     { "tag",    "<rsp>/<log>/<end> para una app (default OFF)",          prvTagUso     },
+    { "eventos","registro de eventos en la microSD (con EVENTOS.ON)",    prvEventosUso },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
 };
 
@@ -885,6 +890,16 @@ static void cmdStatus( void )
         xprintf( "  [!] operaciones de microSD postergadas seguidas: %lu\r\n",
                  ( unsigned long ) fs_sd_postergadas() );
     }
+
+    xprintf( "eventos      : %s", eventos_estado_str() );
+
+    if( eventos_estado() == eventosACTIVO )
+    {
+        xprintf( " -> %s, %lu bytes en RAM sin escribir",
+                 EVENTOS_ARCHIVO, ( unsigned long ) eventos_pendientes_bytes() );
+    }
+
+    xprintf( "\r\n" );
 }
 //------------------------------------------------------------------------------
 /*
@@ -5319,6 +5334,7 @@ static void prvTagUso( void )
 static void cmdReset( void )
 {
     xprintf( "reiniciando por NVIC_SystemReset (pulsa NRST)...\r\n" );
+    eventos_log( "reset pedido por la consola" );   /* sobrevive en la SRAM2 */
     vTaskDelay( pdMS_TO_TICKS( 125 ) );   /* que salga el mensaje antes del reset */
     NVIC_SystemReset();
 }
@@ -5809,3 +5825,151 @@ static void cmdCpres( void )
 
     prvCpresUso();
 }
+/*==============================================================================
+ * EL REGISTRO DE EVENTOS (2026-10-19) — ver `eventos.h`
+ *
+ * ⚠ Lo que lo habilita es un archivo EVENTOS.ON en la microSD, mirado AL
+ * ARRANCAR (decisión de Pablo). `eventos activar|desactivar` sólo crean o borran
+ * ese archivo —para el técnico que tiene consola pero no una PC para preparar la
+ * tarjeta— y NO cambian el estado en caliente: hace falta un `reset`, igual que
+ * poniendo el archivo a mano. Así hay un solo camino de habilitación, no dos.
+ *============================================================================*/
+static void prvEventosUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  eventos               estado del registro\r\n" );
+    xprintf( "  eventos volcar        escribe ya lo acumulado en %s\r\n", EVENTOS_ARCHIVO );
+    xprintf( "  eventos nota <texto>  deja una marca (UNA palabra: el parser corta\r\n" );
+    xprintf( "                        en los espacios; usar_guiones_bajos)\r\n" );
+    xprintf( "  eventos ver [n]       las primeras n lineas del archivo (40)\r\n" );
+    xprintf( "  eventos activar       crea '%s' en la microSD (vale tras 'reset')\r\n", EVENTOS_ACTIVADOR );
+    xprintf( "  eventos desactivar    borra '%s' (vale tras 'reset')\r\n", EVENTOS_ACTIVADOR );
+    xprintf( "Se HABILITA con un archivo '%s' (puede estar vacio) en la\r\n", EVENTOS_ACTIVADOR );
+    xprintf( "microSD, y se decide AL ARRANCAR: ponerlo o sacarlo y 'reset'.\r\n" );
+}
+//------------------------------------------------------------------------------
+static void cmdEventos( void )
+{
+    uint8_t ucArgs = FRTOS_CMD_makeArgv();
+
+    if( ( ucArgs == 0U ) || ( argv[ 1 ] == NULL ) )
+    {
+        xprintf( "registro de eventos: %s\r\n", eventos_estado_str() );
+
+        if( eventos_estado() == eventosACTIVO )
+        {
+            xprintf( "  archivo           : %s (rota a %s al pasar %lu KB)\r\n",
+                     EVENTOS_ARCHIVO, EVENTOS_ARCHIVO_VIEJO,
+                     ( unsigned long ) ( EVENTOS_ARCHIVO_MAX / 1024UL ) );
+            xprintf( "  en RAM sin escribir: %lu de %u bytes\r\n",
+                     ( unsigned long ) eventos_pendientes_bytes(),
+                     ( unsigned ) EVENTOS_BUFFER_BYTES );
+
+            if( eventos_perdidos() > 0UL )
+            {
+                xprintf( "  [!] PERDIDOS      : %lu (buffer lleno)\r\n",
+                         ( unsigned long ) eventos_perdidos() );
+            }
+        }
+        else
+        {
+            xprintf( "  se habilita con un archivo '%s' en la microSD + 'reset'\r\n",
+                     EVENTOS_ACTIVADOR );
+        }
+
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "volcar" ) == 0 )
+    {
+        if( eventos_estado() != eventosACTIVO )
+        {
+            xprintf( "el registro no esta activo\r\n" );
+            return;
+        }
+
+        wdg_kick_largo( 120000UL );
+        xprintf( "%s\r\n", eventos_volcar() ? "volcado OK" : "ERROR: quedo en RAM" );
+        wdg_kick();
+        return;
+    }
+
+    if( ( strcmp( argv[ 1 ], "nota" ) == 0 ) && ( argv[ 2 ] != NULL ) )
+    {
+        if( eventos_estado() != eventosACTIVO )
+        {
+            xprintf( "el registro no esta activo: la nota no va a ningun lado\r\n" );
+            return;
+        }
+
+        eventos_log( "NOTA: %s", argv[ 2 ] );
+        xprintf( "anotado (se escribe en el proximo volcado)\r\n" );
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "ver" ) == 0 )
+    {
+        uint16_t usN = ( argv[ 2 ] != NULL ) ? ( uint16_t ) atoi( argv[ 2 ] ) : 40U;
+
+        wdg_kick_largo( 120000UL );
+        fs_sd_ver( EVENTOS_ARCHIVO, ( usN > 0U ) ? usN : 40U );
+        wdg_kick();
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "activar" ) == 0 )
+    {
+        wdg_kick_largo( 120000UL );
+        bool bOk = fs_sd_crear( EVENTOS_ACTIVADOR );
+        wdg_kick();
+
+        if( !bOk )
+        {
+            xprintf( "ERROR: no se pudo crear '%s' (hay tarjeta?)\r\n", EVENTOS_ACTIVADOR );
+            return;
+        }
+
+        if( eventos_estado() == eventosACTIVO )
+        {
+            xprintf( "'%s' esta en la microSD y el registro ya esta ACTIVO\r\n", EVENTOS_ACTIVADOR );
+        }
+        else
+        {
+            xprintf( "'%s' creado. El registro arranca con el proximo 'reset'.\r\n",
+                     EVENTOS_ACTIVADOR );
+        }
+        return;
+    }
+
+    if( strcmp( argv[ 1 ], "desactivar" ) == 0 )
+    {
+        wdg_kick_largo( 120000UL );
+        bool bOk = fs_sd_borrar( EVENTOS_ACTIVADOR );
+        wdg_kick();
+
+        if( !bOk )
+        {
+            xprintf( "ERROR: no se pudo borrar '%s' (hay tarjeta?)\r\n", EVENTOS_ACTIVADOR );
+            return;
+        }
+
+        if( eventos_estado() == eventosACTIVO )
+        {
+            /* Lo acumulado se escribe ahora: después del reset ya nadie lo mira. */
+            eventos_log( "registro DESACTIVADO desde la consola (vale tras el reset)" );
+            wdg_kick_largo( 120000UL );
+            ( void ) eventos_volcar();
+            wdg_kick();
+            xprintf( "'%s' borrado. El registro sigue hasta el proximo 'reset';\r\n"
+                     "%s queda en la tarjeta.\r\n", EVENTOS_ACTIVADOR, EVENTOS_ARCHIVO );
+        }
+        else
+        {
+            xprintf( "'%s' no esta en la microSD: el registro queda apagado\r\n", EVENTOS_ACTIVADOR );
+        }
+        return;
+    }
+
+    prvEventosUso();
+}
+//------------------------------------------------------------------------------

@@ -167,6 +167,19 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM
 
+  /* SRAM2 sin inicializar (2026-10-19): el startup NO la toca, asi que su
+     contenido sobrevive a un reset por watchdog o por software. La usa el
+     registro de eventos (eventos.c) para no perder lo que paso justo antes
+     del reset. El contenido se valida con un encabezado: tras un power-on
+     es basura. Requiere SRAM2_RST = 1 en los option bytes (el default). */
+  .ram2_noinit (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.ram2_noinit)
+    *(.ram2_noinit*)
+    . = ALIGN(4);
+  } >RAM2
+
   /* User_heap_stack section, used to check that there is enough "RAM" Ram  type memory left */
   ._user_heap_stack :
   {

@@ -19,6 +19,10 @@
 #include "modbus.h"
 #include "drv_rtc79410.h"
 #include "wdg.h"
+#include "eventos.h"
+#include "tkCmd.h"
+#include "tkCtl.h"
+#include "tkCtlPres.h"
 #include "frtos-io.h"
 #include "main.h"
 
@@ -580,6 +584,116 @@ uint32_t tkSys_segundos_al_proximo( void )
     return ( uint32_t ) ( ( xTicksProximoPoll - xAhora ) / configTICK_RATE_HZ );
 }
 //------------------------------------------------------------------------------
+/*==============================================================================
+ * EL RESUMEN DIARIO del registro de eventos (`eventos.h`, 2026-10-19)
+ *
+ * Es el control de estabilidad del banco —stacks, heap, ventana, contador,
+ * rieles— hecho en campo, una vez por día. Sólo existe si el registro está
+ * activo: con EVENTOS.ON ausente no se calcula nada.
+ *============================================================================*/
+static float      fBt3v3Min, fBt3v3Max, fBt12vMin, fBt12vMax;
+static uint32_t   ulPoleosResumen;
+static uint8_t    ucDiaResumen = 0xFFU;      /* 0xFF: el primero sale enseguida */
+static TickType_t xTickResumen;
+
+/*
+ * Palabras de stack que una tarea NUNCA usó. Es lo mismo que
+ * `uxTaskGetStackHighWaterMark()`, pero mirando el arreglo estático: así no
+ * hacen falta los handles, y `tkCmd` no exporta el suyo. El stack crece hacia
+ * abajo y FreeRTOS lo llena con 0xA5 al crear la tarea.
+ */
+static uint32_t prvStackLibre( const StackType_t *pxStack, uint32_t ulPalabras )
+{
+    uint32_t i = 0UL;
+
+    while( ( i < ulPalabras ) && ( pxStack[ i ] == ( StackType_t ) 0xA5A5A5A5UL ) )
+    {
+        i++;
+    }
+
+    return i;
+}
+
+static void prvAcumularRieles( const dataRcd_t *pxDr )
+{
+    if( !( pxDr->usInvalidos & dataINVALIDO_BT3V3 ) )
+    {
+        if( ( ulPoleosResumen == 0UL ) || ( pxDr->fBt3v3 < fBt3v3Min ) ) { fBt3v3Min = pxDr->fBt3v3; }
+        if( ( ulPoleosResumen == 0UL ) || ( pxDr->fBt3v3 > fBt3v3Max ) ) { fBt3v3Max = pxDr->fBt3v3; }
+    }
+
+    if( !( pxDr->usInvalidos & dataINVALIDO_BT12V ) )
+    {
+        if( ( ulPoleosResumen == 0UL ) || ( pxDr->fBt12v < fBt12vMin ) ) { fBt12vMin = pxDr->fBt12v; }
+        if( ( ulPoleosResumen == 0UL ) || ( pxDr->fBt12v > fBt12vMax ) ) { fBt12vMax = pxDr->fBt12v; }
+    }
+
+    ulPoleosResumen++;
+}
+
+/*
+ * ¿Toca resumen? Con la hora confiable, al cambiar el día; sin ella, cada 24 h
+ * de tick. El primero sale con el primer poleo: es la línea de base.
+ */
+static bool prvTocaResumen( const dataRcd_t *pxDr )
+{
+    if( ucDiaResumen == 0xFFU )
+    {
+        return true;
+    }
+
+    if( !( pxDr->usInvalidos & dataINVALIDO_RTC ) )
+    {
+        return ( pxDr->xRtc.day != ucDiaResumen );
+    }
+
+    return ( ( xTaskGetTickCount() - xTickResumen ) >= pdMS_TO_TICKS( 3600UL * 1000UL ) * 24UL );
+}
+
+static void prvResumen( const dataRcd_t *pxDr )
+{
+    fs_datos_stats_t xFs;
+    uint32_t         ulOk, ulFallos, ulEnviados;
+
+    fs_datos_stats( &xFs );
+    wan_stats( &ulOk, &ulFallos, &ulEnviados );
+
+    eventos_log( "RESUMEN: up %lu h | heap %u B | stack libre (palabras) sys %lu/%u wan %lu/%u cmd %lu/%u ctl %lu/%u cpres %lu/%u",
+                 ( unsigned long ) ( xTaskGetTickCount() / configTICK_RATE_HZ / 3600UL ),
+                 ( unsigned ) xPortGetFreeHeapSize(),
+                 ( unsigned long ) prvStackLibre( tkSys_Stack, tkSys_STACK_SIZE ),         ( unsigned ) tkSys_STACK_SIZE,
+                 ( unsigned long ) prvStackLibre( tkWan_Stack, tkWan_STACK_SIZE ),         ( unsigned ) tkWan_STACK_SIZE,
+                 ( unsigned long ) prvStackLibre( tkCmd_Stack, tkCmd_STACK_SIZE ),         ( unsigned ) tkCmd_STACK_SIZE,
+                 ( unsigned long ) prvStackLibre( tkCtl_Stack, tkCtl_STACK_SIZE ),         ( unsigned ) tkCtl_STACK_SIZE,
+                 ( unsigned long ) prvStackLibre( tkCtlPres_Stack, tkCtlPres_STACK_SIZE ), ( unsigned ) tkCtlPres_STACK_SIZE );
+
+    eventos_log( "RESUMEN: ventana %u/%u, pisados %lu | wan: vaciados ok %lu, sesiones fallidas %lu, registros enviados %lu | sd postergadas %lu | rtu descartados %lu",
+                 ( unsigned ) xFs.usCount, ( unsigned ) xFs.usLength,
+                 ( unsigned long ) xFs.ulPisados,
+                 ( unsigned long ) ulOk, ( unsigned long ) ulFallos, ( unsigned long ) ulEnviados,
+                 ( unsigned long ) fs_sd_postergadas(),
+                 ( unsigned long ) ulDescartadosRtu );
+
+    if( xCfgCounter.bEnabled )
+    {
+        caudal_t xC;
+
+        caudal_peek( &xC );
+        eventos_log( "RESUMEN: cnt total %lu, cortos %lu, imposibles %lu",
+                     ( unsigned long ) drv_pulsos_total(),
+                     ( unsigned long ) xC.ulCortos, ( unsigned long ) xC.ulImposibles );
+    }
+
+    eventos_log( "RESUMEN: bt3v3 %.3f..%.3f V | bt12v %.3f..%.3f V (en %lu poleos)",
+                 ( double ) fBt3v3Min, ( double ) fBt3v3Max,
+                 ( double ) fBt12vMin, ( double ) fBt12vMax,
+                 ( unsigned long ) ulPoleosResumen );
+
+    ulPoleosResumen = 0UL;
+    xTickResumen    = xTaskGetTickCount();
+    ucDiaResumen    = ( pxDr->usInvalidos & dataINVALIDO_RTC ) ? 0xFEU : pxDr->xRtc.day;
+}
+//------------------------------------------------------------------------------
 void tkSys( void *pvParameters )
 {
     ( void ) pvParameters;
@@ -599,6 +713,15 @@ void tkSys( void *pvParameters )
 
     xprintf( "\r\ntkSys arrancando, timerpoll = %u s\r\n",
              ( unsigned ) xCfgBase.usTimerPoll );
+
+    /*
+     * ⭐ ¿Este equipo está "a estudio"? Se decide UNA vez, acá: si la microSD
+     * tiene EVENTOS.ON se registra. Va en esta tarea porque usa FatFs, y antes
+     * del primer poleo para que el resumen de base ya caiga en el archivo.
+     */
+    wdg_kick_largo( 120000UL );
+    eventos_init();
+    wdg_kick();
 
     xLastWakeTime = xTaskGetTickCount();
 
@@ -647,6 +770,7 @@ void tkSys( void *pvParameters )
         else if( !fs_datos_write( &xUltimo ) )
         {
             xprintf( "tkSys:: [!] no se pudo guardar el registro\r\n" );
+            eventos_log( "[!] no se pudo guardar el registro en la EEPROM" );
         }
         else
         {
@@ -709,12 +833,48 @@ void tkSys( void *pvParameters )
              */
             wdg_kick_largo( 120000UL );
 
-            if( !fs_sd_volcar_ventana() && cfg_base_modo_sin_modem() )
+            if( !fs_sd_volcar_ventana() )
             {
-                xprintf( "tkSys:: ⛔ SILENT sin microSD: los datos SE VAN A PERDER\r\n" );
+                eventos_log( "[!] la ventana esta al %u %% y NO se pudo volcar a la microSD",
+                             ( unsigned ) TKSYS_UMBRAL_VOLCADO_PCT );
+
+                if( cfg_base_modo_sin_modem() )
+                {
+                    xprintf( "tkSys:: ⛔ SILENT sin microSD: los datos SE VAN A PERDER\r\n" );
+                }
+            }
+            else
+            {
+                eventos_log( "la ventana llego al %u %%: volcada a un lote de la microSD",
+                             ( unsigned ) TKSYS_UMBRAL_VOLCADO_PCT );
             }
 
             wdg_kick();    /* de vuelta al plazo normal */
+        }
+
+        /*
+         * El registro de eventos: el resumen diario, y volcar si hace falta. En
+         * DISCRETO lo vuelca `tkWan` al final de cada sesión; esto cubre el
+         * CONTINUO —que no tiene fin de sesión— y el buffer que se llena.
+         */
+        if( eventos_estado() == eventosACTIVO )
+        {
+            bool bResumen;
+
+            prvAcumularRieles( &xUltimo );
+            bResumen = prvTocaResumen( &xUltimo );
+
+            if( bResumen )
+            {
+                prvResumen( &xUltimo );
+            }
+
+            if( bResumen || eventos_conviene_volcar() )
+            {
+                wdg_kick_largo( 120000UL );
+                ( void ) eventos_volcar();
+                wdg_kick();
+            }
         }
 
         /*
