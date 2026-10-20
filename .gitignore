@@ -27,3 +27,6 @@
 equipo_*.log
 pulsos_*.csv
 generador_*.log
+
+# Configuracion local de Claude Code (por maquina, no del proyecto).
+/.claude/

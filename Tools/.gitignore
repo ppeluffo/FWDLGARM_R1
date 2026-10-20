@@ -10,3 +10,8 @@ PULSOS*.CSV
 *.tgz
 *.tar.gz
 __pycache__/
+
+# El registro de eventos que se baja de la tarjeta: es un DATO de corrida, igual
+# que los logs de arriba. Los numeros que importan quedan en TESTINGS.md.
+EVENTOS.TXT
+EVENTOS.OLD
