@@ -6641,6 +6641,111 @@ ejercitaron.** Faltan tres, y son justamente los más profundos:
 los que valen. Si ahí alguno baja del 50 % de margen, **ahí sí hay una razón concreta** — y se va a
 saber cuál y por qué, que es lo que hoy no se sabría.
 
+## ✅ EL REGISTRO DE EVENTOS EN LA microSD (`0.0.19`, 2026-10-19)
+
+`Application/tasks/eventos.{h,c}`, comando `eventos`. Pedido de Pablo: *"en campo sólo se tienen los
+datos que llegan al servidor, y lo que más importa en una primera instalación es justamente lo que
+NO llega —cuánto tardó una sesión, en qué paso falló, por qué se reinició—"*.
+
+⭐ **Validado en banco con 19,3 h de corrida** (Test 3 de `TESTINGS.md`, 2026-10-19/20). Acá va el
+diseño; los números y el procedimiento están allá.
+
+### ⭐ Se habilita con un ARCHIVO EN LA TARJETA, no con un comando
+
+Al arrancar, si hay microSD y tiene un **`EVENTOS.ON`** (puede estar vacío: sólo importa que exista),
+se loguea en **`EVENTOS.TXT`** de esa misma tarjeta. Se decide **una vez**, al arrancar.
+
+⭐ **Y el control lo lleva la tarjeta a propósito**: esto es para un equipo *a estudio*, así que
+**llevarse la tarjeta apaga el log** y un equipo normal nunca paga nada. Un flag en la configuración
+habría viajado en el hash y habría que acordarse de apagarlo; un archivo no se olvida porque es lo
+mismo que uno va a buscar para leer el log.
+
+### ⭐⭐ El buffer vive en la SRAM2 y SOBREVIVE AL RESET — validado al byte
+
+Los eventos se acumulan en RAM (8 KB) y se vuelcan de a tandas —al final de cada sesión del modem, y
+desde el poleo cuando el buffer pasa la mitad, que es lo que cubre `CONTINUO`—. Escribir la tarjeta
+en cada evento serían decenas de encendidos por día.
+
+⭐ **El buffer está en `.ram2_noinit`, que el startup NO inicializa**, así que lo que pasó justo antes
+de un reset —que es lo más valioso del log— se escribe en el arranque siguiente, **delante** de la
+línea `ARRANQUE`. Tras un power-on el contenido es basura y un encabezado con magia lo descarta.
+
+⭐⭐ **La primera corrida lo probó de la forma más fuerte posible**: informó `245 bytes recuperados de
+la SRAM2` y esos 245 bytes son **exactamente**, al byte, las cuatro líneas que quedaban sin volcar
+cuando el servidor pidió el reset. Que el número coincida vale más que leer las líneas y encontrarlas
+plausibles.
+
+⚠ **El log nunca puede trabar al equipo**: sin tarjeta, con la tarjeta ocupada o con un error de
+escritura los eventos quedan en RAM y se reintenta. Si el buffer se llena, los **nuevos** se descartan
+y se cuentan, y el conteo se escribe en cuanto se pueda — hacer visible lo que se perdió, como
+`ulPisados`. El archivo rota a `EVENTOS.OLD` al pasar 1 MB (a ~30 líneas por día, años).
+
+### Qué se registra hoy
+
+| | |
+|---|---|
+| `==== ARRANQUE` | versión, fecha de compilación, **causa del reset**, modo y los dos timers |
+| `RESUMEN` (4 líneas) | uptime, heap, los 5 stacks, ventana y pisados, contadores de `tkWan`, descartes del contador, y **min..max de `bt3v3`/`bt12v`** con cuántos poleos |
+| `ENLACE` | cuánto tardó, CSQ y cuántos PING hicieron falta |
+| `CONF_ALL` | `CONFIG=OK`, qué bloques pide, `[!] NO RECONOCE al equipo`, sin respuesta, no reconocida |
+| `SESION OK` / ⭐ `SESION FALLO` | la segunda **con el motivo y el CSQ**: es la línea que en campo dice en qué paso se cayó |
+| `[X] WATCHDOG` | quién se pasó del plazo — **sin leer el RTC**, porque el bus I2C puede estar tomado por la tarea colgada |
+| la ventana | al llegar al umbral: volcada a un lote, o `[!] no se pudo volcar` |
+| `[!] no se pudo guardar el registro en la EEPROM` | |
+| el servidor pide RESET, `NOTA:` manual | |
+
+⭐ **Cada línea lleva fecha, hora y `t=`, los segundos desde el arranque.** Ese `t=` sale del tick y es
+**independiente del RTC**, y eso resultó ser más útil de lo previsto: cruzar las dos columnas es lo
+que destapó el salto de reloj de abajo y lo que permite medir el atraso del tick sin instrumentos.
+
+### ✅ Los tres agregados para la primera instalación de campo (2026-10-20)
+
+Pablo: *"¿querés que se loguee algo?"*, con el objetivo de una **primera versión para producción**.
+Los tres son **aditivos y viven dentro del camino del log**, así que un equipo sin `EVENTOS.ON` no
+cambia en nada. Costo total: **+560 B de flash en Release**, 0 warnings.
+
+| | Dónde | Qué agrega |
+|---|---|---|
+| ⭐⭐ **La corrección del RELOJ** | `wan_frame.c` | `RELOJ puesto en hora…` con **el salto en segundos**, y `RELOJ deriva: … ppm` cuando se puede calcular. Cierra el hueco de abajo |
+| ⭐ **Los descartes del contador** | `tkSys.c::prvVigilarDescartes()` | una línea **por crecimiento, con el delta** — no una por descarte, que llenaría el archivo |
+| ⭐ **El `RESUMEN` cada 6 h** | `TKSYS_RESUMEN_HORAS` | además del de medianoche, que se conserva |
+
+⭐ **Por qué el período del resumen**: con una línea por día, una corrida de 72 h deja **tres
+puntos**; a 6 h son 12 resúmenes —48 líneas contra el techo de 1 MB— y eso ya es la **curva** de
+batería, heap y stacks, que es la mitad del valor de una primera instalación.
+
+⚠ **El del reloj AGREGA, no reemplaza el `xprintf`**: el técnico sigue viendo la deriva completa en
+banco, con el diagnóstico del cristal `Y1`. Lo que faltaba era que el dato existiera **sin nadie
+mirando la consola**.
+
+#### ⭐ Y por qué no cuestan nada en producción, verificado y no supuesto
+
+| | |
+|---|---|
+| `prvLog()` **sale en su primera línea** con `eventosINACTIVO` | no formatea, no lee el RTC, no toca la tarjeta |
+| ⭐ El bloque del poleo **ya está dentro de `if( eventos_estado() == eventosACTIVO )`** | así que ni `prvVigilarDescartes()` ni el acumulador de rieles corren con el log apagado |
+| `prvResumen()` sólo hace 4 `eventos_log` + resetea **3 variables propias de `tkSys.c`** | nadie más las lee: subir su frecuencia no toca nada observable |
+| ⚠ **El stack**: `prvLog` es la función más pesada del firmware (**264 B**, por su línea de 192) | y el frame se reserva en el prólogo, con o sin tarjeta. **Pero `tkSys`, `tkWan` y `tkCmd` ya lo llamaban**, así que los tres cambios **no agregan un consumidor nuevo** |
+
+### ⛔ El hueco que la primera corrida encontró: la corrección del RELOJ no se loguea — ✅ CERRADO
+
+En las 19 h el reloj dio **dos saltos** —uno de 880 s que después se recuperó— y **el log no lo
+dice**: hubo que deducirlo cruzando el RTC contra el `t=`. El detalle está en `TESTINGS.md`.
+
+✅ **Cerrado el 2026-10-20** con el primero de los tres agregados de arriba. Lo que sigue explica por
+qué importaba, porque el razonamiento vale para el próximo dato que se quiera registrar.
+
+⭐ `wan_rtc_sincronizar()` **ya calculaba e imprimía la deriva en ppm** cuando ajusta la hora, así que
+convertir esa línea en un evento fue casi gratis. ⛔ **Y era lo que más faltaba antes de campo**: las
+muestras llevan fecha, **el servidor indexa por esa fecha**, y un reloj que salta se ve como datos
+corridos sin nada que apunte a la causa. Es el mismo criterio por el que la medición de deriva vive en
+el punto donde se aplica la corrección y no en un comando: *si el servidor corrige en cada sesión, el
+desvío queda tapado para siempre*.
+
+ℓ **Y una arruga menor del mismo tipo**: `reset pedido por la consola` se imprime también cuando el
+reset lo pidió **el servidor** —la línea anterior lo dice—. Un mensaje fijo que nombra al actor
+equivocado manda a buscar al lado equivocado, que es la lección del `help` que mentía sobre el parser.
+
 ## ⏸ ACTUALIZAR EL FIRMWARE DESDE LA microSD — diseñado, DIFERIDO al post-soak (2026-10-12)
 
 Idea de Pablo: *"¿este micro es capaz de autoprogramarse? Sería posible que cuando arranque lea la

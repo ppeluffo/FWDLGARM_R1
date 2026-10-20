@@ -232,13 +232,16 @@ cortos : 0     imposibles : 0     resets en 48 h : 0 (un solo arranque, 47,76 h 
 ℹ️ El `validos` del equipo da 10 menos que el reproceso **por el instrumento**: el último `status`
 fue a las 12:19 y los pulsos siguieron hasta las 12:32. El `total` del último latido coincide exacto.
 
-### ⛔ Lo que este test NO validó: el cambio de régimen en vivo
+### ⛔ Lo que este test NO validó: el cambio de régimen en vivo  — ✅ lo cerró el Test 3
 
 El equipo **arrancó ya en `CONTINUO`** (`tkWan arrancando (modo CONTINUO)` en el banner) y hubo una
 sola sesión de configuración, que contestó `CONFIG=OK` con **`BH=0xDB`** todo el tiempo. O sea que el
 `PWRMODO` se cambió **antes** de arrancar el logger y el mecanismo —el servidor pide `BASE`, se aplica,
 el `BH` se mueve— **no quedó registrado**. Para validarlo hay que arrancar en `DISCRETO`, cambiar el
 modo en el servidor con el logger corriendo, y ver moverse el `BH`.
+
+✅ **Eso pasó solo el 2026-10-19 y quedó en el registro de eventos** — ver el Test 3: `CONTINUO` → el
+servidor pide `BASE` → `RESET` → `ARRANQUE … modo DISCRETO`. No hizo falta montar nada.
 
 ### Tres cosas que aparecieron
 
@@ -265,7 +268,153 @@ modo en el servidor con el logger corriendo, y ver moverse el `BH`.
 | | |
 |---|---|
 | ⛔ **El resto del tick en `vPortSuppressTicksAndSleep()`** | sigue siendo **el único** hallazgo de los dos tests que afecta un dato que viaja al servidor (+1,1 % de caudal dormido). ⏸ **Diferido por Pablo (2026-10-19)**: sale a campo con el sesgo, se ve en el futuro |
-| ⏳ El cambio de `PWRMODO` en vivo | ver arriba |
+| ✅ El cambio de `PWRMODO` en vivo | **CERRADO por el Test 3**: quedó registrado en el log de eventos, con el `BH` moviéndose y el modo nuevo en el `ARRANQUE` siguiente |
 | ⏳ El registro en una sola escritura de consola | por la app de la terminal |
 | ⚠ Los errores de UART en `status` | siguen sin imprimirse; ningún test los pudo reportar |
 | ⏳ El consumo con el modem en `CONTINUO` | no se midió |
+
+---
+
+## Test 3 — El registro de eventos en la microSD, 19 h en banco (2026-10-19 → 2026-10-20)
+
+Primera corrida del registro de eventos (`eventos.{h,c}`, commit `89a4f2e`, firmware `0.0.19`
+compilado `Oct 19 2026 14:31:44`). Quedó corriendo toda la noche **sin terminal**, en `DISCRETO` con
+`timerpoll` 60 s y `timerdial` 900 s, contra el servidor de testing.
+
+El log: `Tools/EVENTOS.TXT`, **251 líneas / 17.074 bytes**, de `19/10 14:40:36` a `20/10 10:02:15`.
+⚠ No es un test del contador: **no había caudalímetro** (`cnt total 0` en los cuatro `RESUMEN`), así
+que lo que se validó es el *instrumento*, no la medición.
+
+### ⭐⭐ Los 245 bytes recuperados de la SRAM2 eran LEGÍTIMOS, y la cuenta cierra AL BYTE
+
+Al arrancar, el equipo informó `245 bytes de eventos de ANTES del reset, recuperados de la SRAM2`, y
+quedó la duda de si eran líneas reales o basura que la validación de la magia dejó pasar. **Son
+exactamente las cuatro líneas que quedaban sin volcar cuando el servidor pidió el reset:**
+
+```
+26/10/19 14:40:46 t=20 ENLACE en 10 s: CSQ -57 dBm, 1 PING(s)
+26/10/19 14:40:47 t=21 CONF_ALL: el servidor pide reconfigurar: BASE
+26/10/19 14:40:51 t=25 el servidor pide RESET: reiniciando
+26/10/19 14:40:51 t=25 reset pedido por la consola
+```
+
+```
+las 4 lineas con sus CRLF  =  245 bytes     <- el numero que informo el equipo, exacto
+```
+
+Las cinco anteriores —el `ARRANQUE` y los cuatro `RESUMEN`— ya se habían escrito a la tarjeta, así
+que **no quedó nada por explicar**: el buffer en `.ram2_noinit` sobrevivió al reset por software y se
+volcó entero en el arranque siguiente. ⭐ Que el número coincida al byte es más fuerte que leer las
+líneas y encontrarlas plausibles.
+
+### ⭐⭐ Y de paso cerró el pendiente que dejó el Test 2: el cambio de régimen EN VIVO
+
+El Test 2 no pudo validarlo porque el equipo ya había arrancado en `CONTINUO`. Esas mismas cuatro
+líneas son la secuencia completa, y ocurrió sola:
+
+```
+ARRANQUE … modo CONTINUO | timerpoll 60 s, timerdial 3600 s     <- como estaba
+CONF_ALL: el servidor pide reconfigurar: BASE                    <- el hash dejo de coincidir
+el servidor pide RESET: reiniciando
+ARRANQUE … modo DISCRETO | timerpoll 60 s, timerdial 900 s       <- ENTRO
+```
+
+⭐ **El `PWRMODO` se cambió desde el servidor sin que nadie fuera al equipo, y el registro de eventos
+lo deja demostrado en cuatro líneas.** Es exactamente el caso de uso para el que se escribió: en
+campo esa secuencia es invisible, porque lo único que llega al servidor son los datos.
+
+### ✅ Resultado: PASÓ
+
+| Criterio | Resultado |
+|---|---|
+| ⭐ **El log sobrevive al reset** | los 245 bytes, al byte |
+| ⭐ **19,3 h sin una sola falla** | **77 enlaces, 76 sesiones, `sesiones fallidas 0`** |
+| **1153 registros transmitidos** | ventana nunca pasó de **10 de 1984**; `pisados 0` |
+| ⭐ **El acumulado del `RESUMEN` cierra exacto** | informa `36 vaciados ok, 545 registros` y las sesiones desde ese arranque suman **36 y 545** — y se reinicia con el reset, como debe |
+| **Heap invariable** | 2992 B en los cuatro `RESUMEN` |
+| Sin descartes | `cortos 0, imposibles 0, sd postergadas 0, rtu descartados 0`, sin `[!] PERDIDOS` |
+| Sesiones | 28-39 s, media **31,8 s**; CSQ de −57 a −81 dBm, media −70 |
+| Rotación y volcado | el archivo quedó en 17 KB contra el techo de 1 MB; ningún evento perdido |
+
+**Los stacks, por primera vez con `tkCtlPres` consumiendo de verdad** (palabras libres, arranque →
+`RESUMEN` de medianoche, 9 h):
+
+```
+cpres  485 -> 389  (-96, el que mas se movio)      sys  793 -> 726  (-67)
+wan   1927 -> 1780 (-147)                          ctl  359 -> 353  (-6)      cmd  870 -> 870
+```
+
+⚠ Siguen holgados —`cpres` en 389 de 512 es **76 % libre**— y coinciden con el peor caso ya medido
+(124 palabras usadas). No se mueven los márgenes: ver la nota de `CLAUDE.md` sobre por qué los *high
+water mark* son un instrumento.
+
+### ⛔⛔ EL HALLAZGO: el reloj saltó 15 MINUTOS, y el log no lo dice
+
+No se buscaba. Sale de cruzar el timestamp del RTC contra el campo **`t=`** de cada línea, que es el
+tick y es independiente del RTC:
+
+```
+20 00:06:07  t=33594   el RTC RETROCEDE   -74 s   mientras el tick avanza  +17 s
+20 00:21:31  t=34510   el RTC avanza      -83 s menos que el tick
+20 09:00:01  t=66213   el RTC avanza      +59 s   mientras el tick avanza +939 s   <- 880 s atrasado
+20 09:15:07  t=66231   el RTC avanza     +905 s   mientras el tick avanza  +17 s   <- y los recupera
+```
+
+Los otros **71 intervalos entre sesiones son limpios** (el RTC avanza +9 s más que el tick, que es la
+deriva conocida), así que no es un corrimiento progresivo: son **dos saltos puntuales**, y el grande
+casi se cancela consigo mismo (−880 / +897).
+
+⛔ **Y el hueco real es que el log no registra ninguna corrección de reloj.** Hubo que deducir el
+salto cruzando dos columnas. `wan_rtc_sincronizar()` **ya calcula e imprime la deriva en ppm** cuando
+ajusta — si esa línea fuera un evento, el log se explicaría solo.
+
+⚠ **Las dos hipótesis, y ninguna está verificada:**
+
+| | |
+|---|---|
+| **(a)** el `CLOCK=` del servidor metió una hora mala en la sesión de 08:59 y la corrigió en la siguiente | explica los dos signos y que se cancelen |
+| **(b)** el MCP79410 se detuvo ~880 s | pero su cristal `Y1` **adelanta** (+332 ppm, sin condensadores de carga), no atrasa |
+
+⭐ La (a) es la más probable, y **las separa una sola cosa: loguear la corrección como evento.** En
+campo esto se vería como muestras con la fecha corrida y nada que apunte a la causa — y el servidor
+indexa por esa fecha.
+
+### ⭐ El tick: reconfirmado de forma independiente, y NO es una constante
+
+Sobre los 71 intervalos limpios, con el RTC como referencia:
+
+| | ticks/s reales | vs 512 Hz |
+|---|---|---|
+| **Esta corrida** (DISCRETO, **sin caudalímetro**) | **507,256** | **−0,927 %** |
+| Test 1, Stop 2 (con caudalímetro a ~0,2 Hz) | 506,160 | −1,141 % |
+| Test 1, Sleep (terminal conectada) | 511,728 | −0,053 % |
+
+⭐ **La diferencia es coherente con que acá no hubiera pulsos**: cada despertada descarta el resto de
+la división al convertir cuentas del LPTIM en ticks, así que **el atraso depende del patrón de
+despertadas, no es un número fijo del firmware**. Dicho de otro modo: el sesgo que va a ver un equipo
+en campo depende del caudal que mida. ⏸ El arreglo sigue **diferido** por decisión de Pablo.
+
+### ⛔ Un falso hallazgo mío, y vale como lección de método
+
+Reporté que `get_fattime()` estampaba las fechas **3 h corridas**, porque el `mtime` de la copia en
+`Tools/EVENTOS.TXT` (`07:02:14`) daba exactamente 3 h menos que su última línea (`10:02:15`), y el
+segundo cuadraba con la cuantización a 2 s de FAT.
+
+⛔ **Es falso, y lo desmienten dos cosas:** el código de `get_fattime()` no tiene ningún ajuste de
+huso —lee el mismo RTC que el log y empaqueta los campos sin tocarlos— y los **`PULSOS*.CSV` de la
+otra tarjeta llevan la hora local correcta**: `PULSOS00.CSV` dice `2026-10-13 09:05:26`, que es la
+hora exacta en que arrancó el Test 1.
+
+⭐ O sea que el corrimiento es de **cómo llegó el archivo a `Tools/`**, no del firmware. Van varias en
+este proyecto: **un timestamp de archivo no es un instrumento del equipo**, y la verificación que
+cerró el caso fue mirar el código y un segundo archivo, no razonar sobre el primero.
+
+### Pendientes que deja este test
+
+| | |
+|---|---|
+| ✅ **Loguear la corrección del reloj** | **HECHO el 2026-10-20**: `RELOJ puesto en hora…` con el salto, y `RELOJ deriva: … ppm`. Era el único hueco que este test encontró, y lo encontró en la primera corrida |
+| ⏳ **`wdg colgar`** | no hay ni un `[X] WATCHDOG` ni un `ARRANQUE … IWDG` en el log: el camino del watchdog en el registro sigue sin ejercitarse |
+| ⏳ El contador en el log | `cnt total 0`: sin caudalímetro, esa parte del `RESUMEN` no se ejercitó |
+| ℓ `reset pedido por la consola` | lo imprime también cuando el reset lo pidió **el servidor** (la línea anterior lo dice). Mensaje fijo; manda a buscar al lado equivocado |
+| ℹ️ `bt12v` 10,17..10,66 V | el montaje de banco de ese riel, ya conocido — no hay nada que investigar |
