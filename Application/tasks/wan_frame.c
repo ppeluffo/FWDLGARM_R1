@@ -17,6 +17,7 @@
 #include "tkFlow.h"
 #include "tkCtlPres.h"
 #include "drv_rtc79410.h"
+#include "eventos.h"
 #include "frtos-io.h"
 #include "main.h"
 
@@ -1087,6 +1088,14 @@ static void prvDerivaInformarYGuardar( const RtcTimeType_t *pxAntes,
 
             xprintf( "  ==> %+ld ppm  (%+ld s/dia)\r\n", lPpm, lSegDia );
 
+            /* ⭐ La medición también al registro: es la única forma de ver la
+               deriva del cristal de un equipo que está en campo. */
+            eventos_log( "RELOJ deriva: %+ld s en %ld h -> %+ld ppm (%+ld s/dia)%s",
+                         ( long ) lDesvio, ( long ) ( lTranscurrido / 3600 ),
+                         lPpm, lSegDia,
+                         ( ( lPpm > 20L ) || ( lPpm < -20L ) )
+                             ? " [!] fuera de +-20 ppm (el cristal Y1 del MCP79410)" : "" );
+
             /*
              * ⚠ El umbral no es arbitrario: **±20 ppm es la tolerancia típica de
              * un cristal de reloj** (±1,7 s/día). Por encima de eso el cristal
@@ -1335,6 +1344,38 @@ bool wan_rtc_sincronizar( const RtcTimeType_t *pxNueva, const char *pcOrigen,
              ( unsigned ) pxNueva->day,  ( unsigned ) pxNueva->month,
              ( unsigned ) pxNueva->year, ( unsigned ) pxNueva->hour,
              ( unsigned ) pxNueva->min,  ( unsigned ) pxNueva->sec );
+
+    /*
+     * ⭐⭐ Y AL REGISTRO DE EVENTOS, porque en campo no hay nadie leyendo la
+     * consola. El Test 3 (2026-10-19) lo encontró de la peor forma: el reloj
+     * dio dos saltos —uno de 880 s— y **el log no lo decía**, así que hubo que
+     * deducirlo cruzando la hora del RTC contra el `t=` de cada línea.
+     *
+     * ⛔ Y no es un detalle de diagnóstico: **las muestras llevan fecha y el
+     * servidor indexa por ella**, así que un reloj que salta se ve del otro lado
+     * como datos corridos, sin nada que apunte a la causa.
+     *
+     * Va el SALTO —que es el hecho— y, si se puede calcular, los ppm los agrega
+     * `prvDerivaInformarYGuardar()`. Con `bLeida` en false no hay desvío que
+     * informar: no había hora contra la que comparar.
+     */
+    if( bLeida )
+    {
+        int32_t lSalto = prvDiferenciaSeg( &xActual, pxNueva );
+
+        eventos_log( "RELOJ puesto en hora desde %s: %+ld s "
+                     "(estaba %02u/%02u/%02u %02u:%02u:%02u)%s",
+                     pcOrigen, ( long ) ( -lSalto ),
+                     ( unsigned ) xActual.day,  ( unsigned ) xActual.month,
+                     ( unsigned ) xActual.year, ( unsigned ) xActual.hour,
+                     ( unsigned ) xActual.min,  ( unsigned ) xActual.sec,
+                     bHabiaHora ? "" : " [!] la hora NO era confiable" );
+    }
+    else
+    {
+        eventos_log( "RELOJ puesto en hora desde %s: no se pudo leer la anterior",
+                     pcOrigen );
+    }
 
     /* ⭐ Y acá la corrección se vuelve una MEDICIÓN. Ver el bloque de arriba. */
     prvDerivaInformarYGuardar( &xActual, pxNueva, bHabiaHora && bLeida );

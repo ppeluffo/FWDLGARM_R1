@@ -46,6 +46,18 @@ static TickType_t xTicksProximoPoll;
    volcado, más abajo: el margen que queda es para poder reintentar. */
 #define TKSYS_UMBRAL_VOLCADO_PCT   90U
 
+/*
+ * Cada cuántas horas sale un `RESUMEN` al registro de eventos, además del que
+ * sale al cambiar el día. Sólo se usa con el registro ACTIVO, así que un equipo
+ * de producción —sin `EVENTOS.ON`— no paga nada por esto.
+ *
+ * ⚠ Entra en `pdMS_TO_TICKS( 3600 * 1000 ) * TKSYS_RESUMEN_HORAS`: con el tick a
+ * 512 Hz cada hora son 1 843 200 ticks, así que el techo antes de desbordar un
+ * `uint32_t` son ~2330 h. No apretarlo igual: 6 h es la resolución que hace
+ * falta para ver la curva de batería y stacks en una corrida de 72 h.
+ */
+#define TKSYS_RESUMEN_HORAS         6UL
+
 /* Cuántos registros se descartaron por estar en modo RTU sin enlace. Ver el
    comentario en el lazo de la tarea: es la única pérdida deliberada de datos
    del equipo, y por eso se cuenta. */
@@ -632,22 +644,95 @@ static void prvAcumularRieles( const dataRcd_t *pxDr )
 }
 
 /*
- * ¿Toca resumen? Con la hora confiable, al cambiar el día; sin ella, cada 24 h
- * de tick. El primero sale con el primer poleo: es la línea de base.
+ * ¿Toca resumen? Al cambiar el día **o** cada `TKSYS_RESUMEN_HORAS`; sin hora
+ * confiable, sólo por tiempo. El primero sale con el primer poleo: es la línea
+ * de base.
+ *
+ * ⭐ **Por qué hay un período además del cambio de día** (2026-10-20): el
+ * resumen es la única fuente de la CURVA de batería, heap y stacks, y con una
+ * línea por día una corrida de 72 h deja **tres puntos**. A 6 h son 12 resúmenes
+ * —48 líneas contra el techo de 1 MB del archivo, nada— y eso ya es una curva.
+ *
+ * ⚠ Y el cambio de día **se conserva**: alinea un resumen a medianoche, que es
+ * lo que hace legible el archivo cuando se lo lee a mano. Los dos criterios
+ * pueden caer juntos (un resumen a las 23:xx y otro a las 00:0x) y está bien:
+ * son cuatro líneas.
  */
 static bool prvTocaResumen( const dataRcd_t *pxDr )
 {
+    bool bPorTiempo;
+
     if( ucDiaResumen == 0xFFU )
     {
         return true;
     }
 
+    /* ⚠ En ticks, y troceado por la misma razón que las esperas de `tkWan`:
+       `pdMS_TO_TICKS( horas * 3600 * 1000 )` desbordaría un `uint32_t` a partir
+       de ~2,3 h con el tick a 512 Hz. Multiplicando DESPUÉS, 6 h son 11 059 200
+       ticks y hay margen de sobra. */
+    bPorTiempo = ( ( xTaskGetTickCount() - xTickResumen ) >=
+                   ( pdMS_TO_TICKS( 3600UL * 1000UL ) * TKSYS_RESUMEN_HORAS ) );
+
     if( !( pxDr->usInvalidos & dataINVALIDO_RTC ) )
     {
-        return ( pxDr->xRtc.day != ucDiaResumen );
+        return ( ( pxDr->xRtc.day != ucDiaResumen ) || bPorTiempo );
     }
 
-    return ( ( xTaskGetTickCount() - xTickResumen ) >= pdMS_TO_TICKS( 3600UL * 1000UL ) * 24UL );
+    return bPorTiempo;
+}
+
+/*
+ * ⭐ LOS DESCARTES DEL CONTADOR, CUANDO CRECEN (2026-10-20)
+ *
+ * `cortos` e `imposibles` ya salen en el `RESUMEN`, pero ahí son **acumulados**:
+ * si en 72 h aparecen 50 cortos, se sabe cuántos y no **cuándo**. Y en una
+ * primera instalación eso es justamente el diagnóstico del circuito de entrada.
+ *
+ * ⚠ Los dos acusan a lugares OPUESTOS y por eso van separados: `cortos` al
+ * contacto (rebotes que el pasa-bajos no filtró), `imposibles` a la cadencia
+ * (pulsos más rápidos que el caudal máximo).
+ *
+ * ⭐ Se emite una línea **por crecimiento, con el delta**, no una por descarte:
+ * un reed que rebota puede dar cientos seguidos y llenaría el archivo con lo
+ * mismo. El llamador ya garantiza que esto sólo corre con el registro activo.
+ */
+static void prvVigilarDescartes( void )
+{
+    static uint32_t ulCortosPrev     = 0UL;
+    static uint32_t ulImposiblesPrev = 0UL;
+    static bool     bInicializado    = false;
+
+    caudal_t xC;
+
+    if( !xCfgCounter.bEnabled )
+    {
+        return;
+    }
+
+    caudal_peek( &xC );
+
+    /* La línea de base no se informa: al arrancar los contadores pueden venir
+       de una corrida anterior, y eso ya lo dice el primer `RESUMEN`. */
+    if( !bInicializado )
+    {
+        bInicializado    = true;
+        ulCortosPrev     = xC.ulCortos;
+        ulImposiblesPrev = xC.ulImposibles;
+        return;
+    }
+
+    if( ( xC.ulCortos > ulCortosPrev ) || ( xC.ulImposibles > ulImposiblesPrev ) )
+    {
+        eventos_log( "CNT descartes: +%lu cortos (total %lu), +%lu imposibles (total %lu)",
+                     ( unsigned long ) ( xC.ulCortos - ulCortosPrev ),
+                     ( unsigned long ) xC.ulCortos,
+                     ( unsigned long ) ( xC.ulImposibles - ulImposiblesPrev ),
+                     ( unsigned long ) xC.ulImposibles );
+
+        ulCortosPrev     = xC.ulCortos;
+        ulImposiblesPrev = xC.ulImposibles;
+    }
 }
 
 static void prvResumen( const dataRcd_t *pxDr )
@@ -862,6 +947,7 @@ void tkSys( void *pvParameters )
             bool bResumen;
 
             prvAcumularRieles( &xUltimo );
+            prvVigilarDescartes();
             bResumen = prvTocaResumen( &xUltimo );
 
             if( bResumen )
