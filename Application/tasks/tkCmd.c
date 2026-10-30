@@ -32,6 +32,7 @@
 #include "wan_frame.h"
 #include "fs_datos.h"
 #include "fs_sd.h"
+#include "fw_update.h"
 #include "tkWan.h"
 #include "frtos-io.h"
 #include "frtos_cmd.h"
@@ -351,6 +352,7 @@ static void prvFsUso( void );
 static void cmdKeys( void );
 static void cmdTag( void );
 static void cmdEventos( void );
+static void cmdFw( void );
 static void prvEventosUso( void );
 static void prvTagUso( void );
 static void cmdReset( void );
@@ -575,6 +577,7 @@ void tkCmd( void *pvParameters )
     FRTOS_CMD_register( "tag",    cmdTag    );
     FRTOS_CMD_register( "reset",  cmdReset  );
     FRTOS_CMD_register( "eventos", cmdEventos );
+    FRTOS_CMD_register( "fw",     cmdFw     );
 
     /* La versión y la fecha de compilación en el banner, no sólo en 'status':
        es lo primero que uno quiere ver al enchufar la terminal, y contesta sin
@@ -5899,6 +5902,7 @@ static void prvEventosUso( void )
 {
     xprintf( "uso:\r\n" );
     xprintf( "  eventos               estado del registro\r\n" );
+    xprintf( "  fw                  hay un firmware nuevo en la microSD? (no lo aplica)\r\n" );
     xprintf( "  eventos volcar        escribe ya lo acumulado en %s\r\n", EVENTOS_ARCHIVO );
     xprintf( "  eventos nota <texto>  deja una marca (UNA palabra: el parser corta\r\n" );
     xprintf( "                        en los espacios; usar_guiones_bajos)\r\n" );
@@ -6034,3 +6038,78 @@ static void cmdEventos( void )
     prvEventosUso();
 }
 //------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------
+/*
+ * `fw`: ¿hay un firmware nuevo en la microSD?
+ *
+ * ⭐ **ETAPA 2 de 5: esto NO escribe un solo byte de flash.** Lee la tarjeta,
+ * valida el header y verifica el CRC de la imagen entera. El equipo sigue
+ * arrancando del banco 1 pase lo que pase.
+ *
+ * Existe antes que el grabado a propósito: **el camino que decide si un
+ * archivo es confiable se puede validar sin ningún riesgo**, y una vez que
+ * está validado, lo que queda es sólo mover bytes.
+ */
+static void cmdFw( void )
+{
+    fw_info_t   xInfo;
+    fw_result_t xRes;
+    /* ⚠ En TICKS, y la conversión a ms al final sobre la DIFERENCIA.
+       `configTICK_RATE_HZ / 1000` es 512/1000 = **0** en aritmética entera, o
+       sea una división por cero — el compilador la caza, que es exactamente
+       para lo que el proyecto eligió 512 Hz y envenenó `portTICK_PERIOD_MS`. */
+    TickType_t  xT0 = xTaskGetTickCount();
+
+    xprintf( "\r\nFW:: el que esta CORRIENDO\r\n" );
+    xprintf( "  version    : %s  (%s)\r\n", FW_VERSION, FW_FECHA );
+    xprintf( "  hardware   : %s\r\n", FW_HW );
+    xprintf( "  banco      : 512 KB por banco; esta imagen son %lu KB\r\n",
+             ( unsigned long ) ( FW_UPDATE_BANCO_BYTES / 1024UL ) );
+
+    xprintf( "\r\nFW:: mirando la microSD (%s)...\r\n", FW_UPDATE_ARCHIVO );
+    xprintf( "     se lee el archivo ENTERO para verificar el CRC: tarda unos segundos\r\n" );
+
+    /* ⚠ La prórroga del watchdog: leer 176 KB de la microSD puede pasarse del
+       plazo de 90 s si la tarjeta es lenta, y acá no hay dónde reportar en el
+       medio. Es el mismo criterio que `f_mkfs()` y el volcado de la ventana. */
+    wdg_kick_largo( 120000UL );
+
+    xRes = fw_update_examinar( &xInfo );
+
+    wdg_kick();
+
+    xprintf( "\r\n  resultado  : %s\r\n", fw_update_str( xRes ) );
+
+    if( ( xRes != fwSIN_TARJETA ) && ( xRes != fwNO_HAY ) )
+    {
+        /* ⭐ Se imprime lo leído AUNQUE el archivo no sirva: en uno corrupto,
+           ver la versión que *dice* tener ya orienta al que está mirando. */
+        xprintf( "  el archivo dice:\r\n" );
+        xprintf( "    version  : '%s'\r\n", xInfo.pcVersion );
+        xprintf( "    hardware : '%s'%s\r\n", xInfo.pcHw,
+                 ( xRes == fwHW ) ? "   <- NO es este equipo" : "" );
+        xprintf( "    imagen   : %lu bytes\r\n", ( unsigned long ) xInfo.ulLargo );
+        xprintf( "    CRC      : declarado 0x%08lX",
+                 ( unsigned long ) xInfo.ulCrc );
+
+        if( xInfo.ulCrcLeido != 0UL )
+        {
+            xprintf( " / leido 0x%08lX%s", ( unsigned long ) xInfo.ulCrcLeido,
+                     ( xInfo.ulCrcLeido != xInfo.ulCrc ) ? "   <- NO COINCIDEN" : "  OK" );
+        }
+        xprintf( "\r\n" );
+    }
+
+    xprintf( "  tardo      : %lu ms\r\n",
+             ( unsigned long ) ( ( ( uint32_t ) ( xTaskGetTickCount() - xT0 ) * 1000UL )
+                                 / configTICK_RATE_HZ ) );
+
+    if( xRes == fwHAY_NUEVO )
+    {
+        xprintf( "\r\n  ==> HAY UN FIRMWARE NUEVO Y VALIDO ('%s' contra '%s')\r\n",
+                 xInfo.pcVersion, FW_VERSION );
+        xprintf( "      (todavia NO se aplica: eso es la etapa 3)\r\n" );
+    }
+}
+/*----------------------------------------------------------------------------*/

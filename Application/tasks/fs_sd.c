@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "fs_sd.h"
+#include "fw_update.h"
 
 /* ⚠ `semphr.h` exige que `FreeRTOS.h` se vea ANTES: lo dice con un `#error`.
    Van los dos acá, explícitos, para no depender de qué arrastre otro header. */
@@ -971,6 +972,111 @@ bool fs_sd_lote_mas_viejo( char *pcNombre, uint16_t usSize )
  * ⚠ En TODOS los caminos de error suelta antes de volver, porque si no la
  * tarjeta queda inaccesible para las otras dos tareas y no hay ningún síntoma.
  */
+/*==============================================================================
+ * EL FIRMWARE DE LA microSD  (ver fw_update.h)
+ *
+ * ⭐ Vive ACÁ y no en `fw_update.c` por la regla de siempre: **la tarjeta tiene
+ * un solo dueño**. Quien conoce el mutex, el encendido del riel y el montaje es
+ * este archivo; `fw_update` pone la lógica y no toca FatFs.
+ *
+ * Es el mismo patrón de `fs_sd_lote_abrir/leer/cerrar`, con dos diferencias:
+ * se lee por BYTES y no por líneas, y el archivo se nombra desde afuera.
+ *============================================================================*/
+static FIL         xFwFile;
+static bool        bFwAbierto = false;
+static fw_result_t xFwError   = fwNO_HAY;
+
+bool fs_sd_fw_abrir( const char *pcNombre, uint32_t *pulTam )
+{
+    if( pcNombre == NULL )
+    {
+        xFwError = fwNO_HAY;
+        return false;
+    }
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "fw_abrir" );
+        xFwError = fwNO_SE_PUDO_LEER;
+        return false;
+    }
+
+    bTengoMutex = true;
+
+    if( bFwAbierto )
+    {
+        /* Abrir dos veces sin cerrar perdería el `FIL` anterior y dejaría la
+           tarjeta encendida. Misma defensa que en los lotes. */
+        ( void ) f_close( &xFwFile );
+        bFwAbierto = false;
+    }
+
+    if( !prvMontar() )
+    {
+        bTengoMutex = false;
+        prvSoltar();
+        xFwError = fwSIN_TARJETA;   /* prvMontar() ya explicó por qué */
+        return false;
+    }
+
+    if( f_open( &xFwFile, pcNombre, FA_READ ) != FR_OK )
+    {
+        prvDesmontar();
+        bTengoMutex = false;
+        prvSoltar();
+        xFwError = fwNO_HAY;        /* la tarjeta está, el archivo no */
+        return false;
+    }
+
+    bFwAbierto = true;
+    xFwError   = fwHAY_NUEVO;       /* hasta acá, todo bien */
+
+    if( pulTam != NULL )
+    {
+        *pulTam = ( uint32_t ) f_size( &xFwFile );
+    }
+
+    /* ⚠ La tarjeta queda ENCENDIDA y el mutex TOMADO hasta `fs_sd_fw_cerrar()`.
+       Es deliberado, igual que con los lotes: leer 176 KB en bloques de 512
+       serían ~350 ciclos de montar y desmontar para no ganar nada. */
+    return true;
+}
+
+int32_t fs_sd_fw_leer( void *pvBuf, uint32_t ulLargo )
+{
+    UINT uiLeidos = 0U;
+
+    if( ( !bFwAbierto ) || ( pvBuf == NULL ) || ( ulLargo == 0UL ) )
+    {
+        return -1;
+    }
+
+    if( f_read( &xFwFile, pvBuf, ( UINT ) ulLargo, &uiLeidos ) != FR_OK )
+    {
+        return -1;
+    }
+
+    return ( int32_t ) uiLeidos;
+}
+
+void fs_sd_fw_cerrar( void )
+{
+    if( bFwAbierto )
+    {
+        ( void ) f_close( &xFwFile );
+        bFwAbierto = false;
+
+        prvDesmontar();     /* desmonta Y corta la alimentación de la tarjeta */
+        bTengoMutex = false;
+        prvSoltar();
+    }
+}
+
+fw_result_t fs_sd_fw_ultimo_error( void )
+{
+    return xFwError;
+}
+//------------------------------------------------------------------------------
 bool fs_sd_lote_abrir( char *pcNombre, uint16_t usSize )
 {
     if( !prvTomar() )

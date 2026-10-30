@@ -7199,7 +7199,133 @@ medida y la autonomía.
 | ⛔ **El `dataRcd`** | T + HR + nivel del peine son **4 bytes más** sobre **62 de 64 usados**. Hay que subir el registro a **72 B** (1763 registros en vez de 1984 — de 6,9 a 6,1 días de buffer, y con transmisión cada 3 h sobra). ⚠ **Antes de que haya equipos con datos guardados**, porque cambiar el tamaño invalida lo grabado |
 | El punto de rocío | **lo calcula el SERVIDOR**, no el equipo: evita meter logaritmos en el firmware y es coherente con que el servidor decide |
 
-## ⏸ ACTUALIZAR EL FIRMWARE DESDE LA microSD — diseñado, DIFERIDO al post-soak (2026-10-12)
+## 🔨 ACTUALIZAR EL FIRMWARE DESDE LA microSD — etapas 1 y 2 HECHAS (2026-10-30)
+
+⭐ **Retomado tras la instalación de campo.** El diseño de octubre quedó **confirmado contra los
+documentos**, y con una sorpresa a favor: el silicio aporta el fallback que faltaba.
+
+### ✅ Lo que los documentos cerraron, y que antes era un supuesto
+
+| | |
+|---|---|
+| **RM0351 §3.3.8** | *"While executing a program code from bank 1, it is possible to perform a page erase operation on bank 2"* — ✅ se puede escribir el banco 2 con el equipo corriendo. ⚠ Y el límite: *"write-while-write operations are not allowed"* |
+| ⭐⭐ **AN2606, Figura 102** (el L496 exacto) | el *dual bank boot*: si el primer word del banco 2 **no apunta a SRAM**, el micro **arranca del banco 1**. **FALLBACK AUTOMÁTICO del silicio** — era el agujero más grande del diseño |
+| ⭐ **"Set Bank Swap to Bank2"** | el banco activo queda mapeado en `0x08000000`: **el mismo binario sirve para los dos bancos**, sin relinkear. El diseño lo afirmaba; ahora está probado |
+| ✅ El L496 usa el **Pattern 6** | ninguna de sus cuatro condiciones menciona `BFB2` |
+
+#### ⛔ Un error mío que vale como lección, y lo desmintió la misma AN2606
+
+Al leer que con `BFB2=1` *"the device boots from system memory"* (RM0351 pág. 91) miré la **tabla
+172** —*"configuration in system memory boot mode"*— y vi que el bootloader toma **PA5, PA6, PA7,
+PB12..PB15**: en R001 eso es `LTE_PWR`, **`EN_EV_TOYI`**, `CTL_EV_TOYI`, `EN_PWR_SENS420`, el
+**I2C2** y `EN_PWR_CPRES`. Avisé que el bootloader podía **energizar el servo de la válvula en cada
+arranque**.
+
+⛔ **Era falso.** La figura 102 muestra que esa configuración pertenece a la rama *"Continue
+Bootloader execution"*, que **sólo se recorre si NINGÚN banco tiene código válido** — o sea cuando el
+equipo ya está muerto. En operación normal el bootloader **chequea y salta, sin tocar un pin**.
+
+⚠ **La lección: una tabla leída fuera de su diagrama de flujo dice lo contrario de lo que dice.**
+Es la familia del volcado de `ADC_CR` mal decodificado — con la diferencia de que acá el error duró
+un mensaje porque el documento correcto estaba a dos páginas.
+
+#### ⚠ Y por eso el CRC sigue siendo nuestro
+
+El chequeo del silicio sólo mira que *el primer word apunte al rango de SRAM*:
+
+```
+el bootloader de ST   evita el banco EN BLANCO
+nuestro CRC32         evita el banco con BASURA
+la marca EN PRUEBA    evita el firmware que ARRANCA y NO FUNCIONA   (etapa 5)
+```
+
+### ✅ ETAPA 1 — el formato y el generador: `Tools/mkfw.py`
+
+`FIRMWARE.BIN` = **64 bytes de header + la imagen cruda**.
+
+```
+off  largo  campo                     00000000: 5350 5146 0100 4000  SPQF..@.
+  0      4  magic "SPQF"              00000008: 302e 302e 3139 ...   0.0.19
+  4      2  hdr_ver (1)               00000018: 5350 515f 4152 4d5f  SPQ_ARM_
+  6      2  hdr_len (64)              00000020: 5231 ... 28b2 0200   R1 ...
+  8     16  fw_ver  "0.0.19"          00000028: f1fc 33d9 12e7 81a3  CRCs
+ 24     16  fw_hw   "SPQ_ARM_R1"
+ 40      4  img_len     44  4  img_crc32     48  4  hdr_crc32
+```
+
+⭐ **La versión y el hardware salen de `Core/Inc/main.h`**, no de argumentos: pasarlos a mano crearía
+una segunda fuente de verdad, y **un firmware que dice ser una versión que no es** es exactamente lo
+que este mecanismo tiene que hacer imposible.
+
+⭐ **`fw_hw` no es decorativo**: impide que el firmware de otro producto entre en este equipo. Mismo
+criterio que el IMEI falso — hacer el error imposible en vez de confiar.
+
+⚠ Y el header es **legible en un volcado hexadecimal**: con `xxd -l 64` se ve la versión y el
+hardware en ASCII. Un técnico puede verificar la tarjeta sin el equipo.
+
+### ✅ ETAPA 2 — examinar la tarjeta: `fw_update.{h,c}` y el comando `fw`
+
+⭐⭐ **No escribe un solo byte de flash.** Lee el archivo, valida el header, **verifica el CRC de la
+imagen entera** y compara la versión. El equipo sigue arrancando del banco 1 pase lo que pase.
+
+⭐ **El resultado dice QUÉ pasó** (`fw_result_t`), no sólo que falló — criterio del `mb_result_t` y
+del `lteESC_*`: *archivo corrupto*, *de otro producto* y *misma versión* mandan a mirar lugares
+completamente distintos.
+
+| Pieza | Dónde |
+|---|---|
+| La lógica y el CRC | `Application/tasks/fw_update.{h,c}` |
+| **Leer la tarjeta** | `fs_sd_fw_abrir/leer/cerrar` — ⭐ **en `fs_sd.c`, porque la tarjeta tiene un solo dueño**. `fw_update` no toca FatFs |
+| El comando | `fw` en `tkCmd.c` |
+
+#### ⭐⭐ El CRC-32 quedó validado en LAS DOS PUNTAS, sin hardware
+
+Con la función **extraída del `.c` real**, no una copia:
+
+| | |
+|---|---|
+| Los 5 vectores canónicos | ✅ incluido `"123456789" → 0xCBF43926` |
+| ⭐ **Por tramos de 7 B contra de una vez** | ✅ idéntico — y es como lo usa el firmware (bloques de 512) |
+| ⭐⭐ **Sobre el `FIRMWARE.BIN` real** | ✅ el C del firmware da **`0xD933FCF1`**, lo mismo que escribió `zlib` desde Python |
+
+⚠ **Por software y no con el periférico CRC del micro, a propósito**: el del STM32 arranca con el
+polinomio sin reflejar, y hay que configurar `REV_IN`, `REV_OUT`, el init y el XOR final para igualar
+a zlib — cuatro campos que, puestos mal, dan un número **plausible y distinto**. La tabla por nibble
+son **64 bytes** de flash (contra 1 KB la de byte) y da lo mismo.
+
+#### ⭐ Y el compilador cazó un bug mío, con el mecanismo que el proyecto puso a propósito
+
+`configTICK_RATE_HZ / 1000U` es **512/1000 = 0** en aritmética entera, o sea una división por cero.
+GCC la rechazó. Es exactamente la red que se ganó al elegir **512 Hz y no 1024** —*"con 1024 hubiera
+dado 0 y el compilador lo cazaba"*— y acá funcionó.
+
+### ⛔⛔ HAY UN `.c` NUEVO: Refresh (F5) ANTES de compilar
+
+`Application/tasks/fw_update.c` **no entra al build solo**: las listas viven en los `subdir.mk` y en
+`Debug/objects.list`. ⚠ El síntoma de olvidarlo es un `undefined reference` a funciones que **sí
+están en el árbol**, que es el error confuso de siempre.
+
+**Project → Refresh (F5) y después Build.** (El `.h` no lo necesita.)
+
+ℓ Verificado acá linkeando a mano con el `.o` agregado: **Debug queda en 248.084 B de text**, o sea
+**+2.792 bytes** por las dos etapas.
+
+### ⏳ Lo que falta, por riesgo creciente
+
+| Etapa | Qué | ¿Puede romper algo? |
+|---|---|---|
+| **3** | Borrar y escribir el **banco 2**, releerlo y verificar el CRC. Y **acotar el `.ld` a 512K** (hoy dice `1024K`, los dos bancos) | no: el equipo sigue arrancando del banco 1 |
+| **4** | El commit: `BFB2` por `HAL_FLASHEx_OBProgram()` y arrancar del banco 2 | ⚠ bajo, ahora que el fallback está confirmado — pero **la primera vez con el ST-LINK a mano** |
+| **5** | La marca *en prueba* en la SRAM del RTC, con rollback a los N resets sin confirmar. ⭐ El criterio de "funciona" ya existe: **una sesión que llega a `CONFIG=OK` y transmite** | medio |
+
+⚠ **Y el argumento en contra sigue abierto**: esto toca el **camino de arranque**, que es lo que las
+188 h de campo validaron. Lo que lo mitiga es que sin archivo en la tarjeta todo el mecanismo es
+*montar → buscar → no está → apagar*. Recomendación: un soak **corto, de 24 h**, sobre el binario
+final — no repetir las 188.
+
+### (histórico) El diseño original, 2026-10-12
+
+#### El planteo inicial y lo que ya se había verificado
 
 Idea de Pablo: *"¿este micro es capaz de autoprogramarse? Sería posible que cuando arranque lea la
 microSD, si hay un firmware vea si la versión es superior a la instalada y se autoprograme?"*. Alcance

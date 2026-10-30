@@ -53,6 +53,7 @@
 #define APPLICATION_TASKS_FS_SD_H_
 
 #include <stdbool.h>
+#include "fw_update.h"
 #include <stdint.h>
 
 /* 8.3, que es lo que admite FatFs con _USE_LFN = 0. */
@@ -201,5 +202,25 @@ bool fs_sd_crear  ( const char *pcNombre );
 bool fs_sd_borrar ( const char *pcNombre );
 bool fs_sd_agregar( const char *pcNombre, const char *pcViejo,
                     const char *pcTexto, uint32_t ulLargo, uint32_t ulMax );
+
+/*------------------------------------------------------------------------------
+ * EL FIRMWARE DE LA microSD (ver `fw_update.h` para qué se hace con él).
+ *
+ * ⭐ Estas tres viven acá, y no en `fw_update.c`, por la regla de siempre: **la
+ * tarjeta tiene un solo dueño**. Quien conoce el mutex, el riel y el montaje es
+ * este módulo.
+ *
+ * ⚠ Entre `abrir()` y `cerrar()` la tarjeta queda ENCENDIDA y el mutex TOMADO
+ * — deliberado: leer 176 KB en bloques de 512 serían ~350 ciclos de montar y
+ * desmontar para no ganar nada. Hay que cerrar SIEMPRE.
+ *
+ * `leer()` devuelve los bytes leídos, 0 en fin de archivo, o -1 si falló.
+ * `ultimo_error()` dice por qué falló `abrir()`: sin tarjeta, sin archivo o
+ * sin poder leer — que mandan a mirar lugares distintos.
+ */
+bool        fs_sd_fw_abrir( const char *pcNombre, uint32_t *pulTam );
+int32_t     fs_sd_fw_leer ( void *pvBuf, uint32_t ulLargo );
+void        fs_sd_fw_cerrar( void );
+fw_result_t fs_sd_fw_ultimo_error( void );
 
 #endif /* APPLICATION_TASKS_FS_SD_H_ */
