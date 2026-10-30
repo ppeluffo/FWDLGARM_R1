@@ -7408,6 +7408,41 @@ hace*. ⏳ Queda anotado como palanca conocida e inocua para la revisión nueva 
 está cableado, `nSWBOOT0 = 0` es más determinista**, porque además desactiva el *empty check
 mechanism* que puede mandar al bootloader solo.
 
+#### ✅ `PH3` TIENE un pull-down de 10K (Pablo, 2026-10-30), y eso cierra la figura
+
+Así que **`BOOT0 = 0` es firme**, no flota — lo cual explica de paso por qué `nSWBOOT0 = 0` no
+cambió nada: el pin ya entregaba lo mismo que el bit.
+
+⭐ Con `Boot0 = 0` confirmado **por hardware**, la Figura 102 queda sin ambigüedad: el bootloader
+tiene que mirar el primer word del banco 2, verlo dentro de SRAM1 y **saltar ahí**.
+
+⛔ Y de paso se refutó el último candidato del Pattern 6, su condición 3 (*"`Boot0(pin) = 0`,
+`nBoot0_SW = 1` y **main flash memory empty**"*): en el L4 ese *"empty"* es el flag
+**`FLASH_ACR.EMPTY`** (bit 16), que **no se recalcula en cada reset**. Medido en los dos casos:
+**`EMPTY = 0`**.
+
+#### ⛔⛔ EL DATO QUE REENCUADRA TODO: el micro NO ESTÁ EN EL BOOTLOADER, está DETENIDO
+
+Con `BFB2 = 1`, **los cuatro registros están en su estado de RESET**:
+
+| | con `BFB2=1` | con el equipo corriendo |
+|---|---|---|
+| `FLASH_ACR` | `0x00000600` — ⛔ **LATENCY = 0** | `0x00000603` — LATENCY = 3 |
+| `RCC_CFGR` | `0x00000000` | PLL |
+| `RCC_CR` | HSI **apagado** | — |
+| `SYSCFG_MEMRMP` | `0x00000000` — ⚠ **FB_MODE = 0: el swap NI SE APLICÓ** | 0 |
+
+⭐⭐ **`LATENCY = 0` es la prueba más limpia**: el bootloader corre a **72 MHz**, que a 1,2 V exige
+latencia ≥ 3. Si estuviera ejecutando, ese campo **no podría** ser 0.
+
+⛔ O sea que la lectura correcta **no** es *"el bootloader se queda esperando comandos"* —que era mi
+marco desde el principio— sino **el micro no ejecuta una sola instrucción**. ⚠ Y `FB_MODE = 0` dice
+que **el bank swap tampoco se aplicó**, que es lo primero que `BFB2` tendría que hacer.
+
+⭐ Eso descarta de un saque todo lo que estuve persiguiendo —el contenido de los bancos, el
+`_estack`, BOOT0, el empty check—: **ninguno de ellos puede impedir que el micro arranque el
+bootloader**, y el bootloader ni siquiera empieza.
+
 #### ⏳ Dónde seguir, cuando se retome
 
 Lo que **no** se probó todavía, en orden de costo:
