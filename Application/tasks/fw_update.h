@@ -134,6 +134,37 @@ typedef struct {
 fw_result_t fw_update_examinar( const char *pcArchivo, fw_info_t *pxInfo );
 
 /*------------------------------------------------------------------------------
+ * ⭐ ETAPA 3: ESCRIBE LA IMAGEN EN EL **BANCO 2** y la verifica releyéndola.
+ *
+ * ⚠ **No cambia el banco de arranque.** Al terminar, el equipo sigue
+ * arrancando del banco 1 — con éxito o sin él. Eso es lo que hace que esta
+ * etapa no pueda dejar el equipo muerto: el commit es la etapa 4.
+ *
+ * El orden importa y no es el obvio:
+ *
+ *   1. examinar          <- el CRC del ARCHIVO, antes de tocar nada
+ *   2. borrar el banco 2
+ *   3. escribir
+ *   4. ⭐ releer DESDE LA FLASH y recalcular el CRC
+ *
+ * ⭐⭐ El paso 4 es el que convierte esto en verificable: **no se le cree a que
+ * `HAL_FLASH_Program()` devolvió OK**. Una celda que no tomó el dato, una
+ * página que no se borró del todo o un bit que se cae con el tiempo devuelven
+ * OK igual. Lo único que prueba que el banco 2 tiene el firmware es leerlo.
+ *
+ * Tarda ~10 s: borrar 122 páginas, escribir 249 KB de a 64 bits y releerlos.
+ */
+bool fw_update_grabar( const char *pcArchivo, fw_info_t *pxInfo,
+                       fw_result_t *pxRes );
+
+/*------------------------------------------------------------------------------
+ * El CRC de lo que HAY en el banco 2 ahora, sobre `ulLargo` bytes. Para
+ * verificar sin reescribir —y, en la etapa 4, para decidir si el banco 2 es
+ * confiable antes de arrancar de él.
+ */
+uint32_t fw_update_crc_banco2( uint32_t ulLargo );
+
+/*------------------------------------------------------------------------------
  * El texto de un resultado, para la consola y el registro de eventos.
  */
 const char *fw_update_str( fw_result_t xRes );

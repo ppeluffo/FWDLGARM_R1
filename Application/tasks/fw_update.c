@@ -7,6 +7,7 @@
 
 #include "fw_update.h"
 
+#include <stddef.h>
 #include <string.h>
 
 #include "FreeRTOS.h"
@@ -86,7 +87,11 @@ const char *fw_update_str( fw_result_t xRes )
     {
         case fwHAY_NUEVO:      return "hay un firmware nuevo y valido";
         case fwSIN_TARJETA:    return "no hay microSD";
-        case fwNO_HAY:         return "la tarjeta no tiene " FW_UPDATE_ARCHIVO;
+        /* ⚠ NO nombra el archivo: el enum no sabe cuál se pidió, y decir
+           "FIRMWARE.BIN" cuando se pidió otro manda a buscar al lado
+           equivocado — me costó una vuelta entera en el banco el 2026-10-30.
+           El nombre lo imprime el comando dos líneas antes. */
+        case fwNO_HAY:         return "la tarjeta NO TIENE ese archivo";
         case fwNO_SE_PUDO_LEER:return "no se pudo leer el archivo";
         case fwMAGIC:          return "no es un firmware de este mecanismo (magic)";
         case fwHDR_VER:        return "formato de header desconocido: firmware mas nuevo que este";
@@ -243,4 +248,218 @@ fw_result_t fw_update_examinar( const char *pcArchivo, fw_info_t *pxInfo )
     }
 
     return fwHAY_NUEVO;
+}
+
+/*==============================================================================
+ * ETAPA 3 — ESCRIBIR EL BANCO 2
+ *
+ * ⚠ No cambia el banco de arranque: el equipo sigue arrancando del banco 1 pase
+ * lo que pase acá. El commit es la etapa 4.
+ *============================================================================*/
+
+/*
+ * ⛔⛔ ESTAS TRES CONSTANTES NO SE PONEN DE MEMORIA.
+ *
+ * `FLASH_PAGE_SIZE` aparece DOS veces en `stm32l4xx_hal_flash.h`: vale `0x1000`
+ * para la familia L4P5/L4R/L4S y `0x800` para el L496, y un `grep` descuidado
+ * muestra la primera. Si la página fuera de 4 KB y acá se usaran 2, el borrado
+ * dejaría media imagen sin borrar **y el error aparecería como un CRC que no
+ * cierra, sin decir por qué**.
+ *
+ * ⭐ Por eso van estos asserts y no un comentario: si alguna vez cambia la HAL,
+ * el micro o el `#if`, lo dice el compilador. Es la lección del volcado de
+ * `ADC_CR` mal decodificado, que costó tres días por una posición de bit puesta
+ * de memoria.
+ */
+_Static_assert( FLASH_PAGE_SIZE == 0x800UL,
+                "la pagina del L496 son 2 KB: revisar el #if de la HAL" );
+_Static_assert( FW_UPDATE_BANCO_BYTES == ( 512UL * 1024UL ),
+                "el banco del L496 son 512 KB" );
+_Static_assert( ( FW_UPDATE_BANCO_BYTES / FLASH_PAGE_SIZE ) <= 256UL,
+                "el campo PNB del FLASH_CR son 8 bits: 256 paginas por banco" );
+
+/* El banco 2 empieza acá. ⚠ Es su dirección FÍSICA; cuando el micro arranque de
+   él, el silicio lo remapea a 0x08000000 ("Set Bank Swap to Bank2", AN2606
+   fig. 102) — y por eso el mismo binario sirve para los dos bancos. */
+#define FW_BANCO2_BASE      ( FLASH_BASE + FW_UPDATE_BANCO_BYTES )
+
+uint32_t fw_update_crc_banco2( uint32_t ulLargo )
+{
+    if( ( ulLargo == 0UL ) || ( ulLargo > FW_UPDATE_BANCO_BYTES ) )
+    {
+        return 0UL;
+    }
+
+    /* ⭐ Se lee por el bus, como cualquier memoria: el banco 2 está mapeado y
+       legible mientras se ejecuta del banco 1. */
+    return fw_update_crc32( 0UL, ( const void * ) FW_BANCO2_BASE, ulLargo );
+}
+
+/*------------------------------------------------------------------------------*/
+static bool prvBorrarBanco2( uint32_t ulBytes )
+{
+    FLASH_EraseInitTypeDef xBorrado;
+    uint32_t               ulPaginas = ( ulBytes + FLASH_PAGE_SIZE - 1UL ) / FLASH_PAGE_SIZE;
+    uint32_t               ulError   = 0xFFFFFFFFUL;
+
+    xBorrado.TypeErase = FLASH_TYPEERASE_PAGES;
+    xBorrado.Banks     = FLASH_BANK_2;
+    xBorrado.Page      = 0UL;           /* ⚠ RELATIVA AL BANCO: la HAL la mete
+                                           en PNB y elige el banco con BKER */
+    xBorrado.NbPages   = ulPaginas;
+
+    if( HAL_FLASHEx_Erase( &xBorrado, &ulError ) != HAL_OK )
+    {
+        xprintf( "FW:: ERROR borrando la pagina %lu del banco 2 (err 0x%08lX)\r\n",
+                 ( unsigned long ) ulError, ( unsigned long ) HAL_FLASH_GetError() );
+        return false;
+    }
+
+    return true;
+}
+
+/*------------------------------------------------------------------------------*/
+bool fw_update_grabar( const char *pcArchivo, fw_info_t *pxInfo, fw_result_t *pxRes )
+{
+    fw_info_t   xInfo;
+    fw_result_t xRes;
+    uint32_t    ulEscritos = 0UL;
+    uint32_t    ulCrc;
+    bool        bOk = true;
+
+    if( pcArchivo == NULL )
+    {
+        pcArchivo = FW_UPDATE_ARCHIVO;
+    }
+
+    /* ---- 1. el CRC del ARCHIVO, antes de tocar un solo byte de flash ----- */
+    xRes = fw_update_examinar( pcArchivo, &xInfo );
+
+    if( pxInfo != NULL ) { *pxInfo = xInfo; }
+    if( pxRes  != NULL ) { *pxRes  = xRes;  }
+
+    if( xRes != fwHAY_NUEVO )
+    {
+        /* ⭐ Se verifica DE NUEVO aunque el llamador ya haya corrido `fw`: son
+           1,7 s contra el riesgo de escribir la flash con un archivo que entre
+           medio se cambió, o que nunca se verificó porque nadie corrió el
+           comando. El que graba no hereda la confianza de otro. */
+        return false;
+    }
+
+    xprintf( "FW:: borrando el banco 2 (%lu paginas de %lu B)...\r\n",
+             ( unsigned long ) ( ( xInfo.ulLargo + FLASH_PAGE_SIZE - 1UL ) / FLASH_PAGE_SIZE ),
+             ( unsigned long ) FLASH_PAGE_SIZE );
+
+    if( HAL_FLASH_Unlock() != HAL_OK )
+    {
+        xprintf( "FW:: ERROR: no se pudo desbloquear la flash\r\n" );
+        return false;
+    }
+
+    if( !prvBorrarBanco2( xInfo.ulLargo ) )
+    {
+        ( void ) HAL_FLASH_Lock();
+        return false;
+    }
+
+    /* ---- 2. escribir, leyendo el archivo de nuevo ------------------------ */
+    xprintf( "FW:: escribiendo %lu bytes...\r\n", ( unsigned long ) xInfo.ulLargo );
+
+    if( !fs_sd_fw_abrir( pcArchivo, NULL ) )
+    {
+        ( void ) HAL_FLASH_Lock();
+        return false;
+    }
+
+    /* saltear el header: lo que va a la flash es la imagen cruda */
+    if( fs_sd_fw_leer( pucBloque, FW_UPDATE_HDR_LEN ) != ( int32_t ) FW_UPDATE_HDR_LEN )
+    {
+        fs_sd_fw_cerrar();
+        ( void ) HAL_FLASH_Lock();
+        return false;
+    }
+
+    while( ( ulEscritos < xInfo.ulLargo ) && bOk )
+    {
+        uint32_t ulPedir = xInfo.ulLargo - ulEscritos;
+        int32_t  lN;
+        uint32_t i;
+
+        if( ulPedir > sizeof( pucBloque ) ) { ulPedir = sizeof( pucBloque ); }
+
+        lN = fs_sd_fw_leer( pucBloque, ulPedir );
+
+        if( lN <= 0 )
+        {
+            bOk = false;
+            break;
+        }
+
+        /*
+         * ⚠ De a DOBLE PALABRA (64 bits): es la única granularidad que el L4
+         * admite para programar. Por eso `mkfw.py` rellena la imagen a múltiplo
+         * de 8 con 0xFF —el valor de la flash borrada— y por eso
+         * `fw_update_examinar()` rechaza un largo que no lo sea: mejor acá que
+         * a mitad del grabado.
+         *
+         * El `memcpy` a una variable alineada no es cosmético: `pucBloque + i`
+         * es un `uint8_t*` y leerlo como `uint64_t*` sería un acceso
+         * desalineado, que en Cortex-M4 es undefined behaviour.
+         */
+        for( i = 0U; i < ( uint32_t ) lN; i += 8U )
+        {
+            uint64_t ullDato;
+
+            memcpy( &ullDato, &pucBloque[ i ], sizeof( ullDato ) );
+
+            if( HAL_FLASH_Program( FLASH_TYPEPROGRAM_DOUBLEWORD,
+                                   FW_BANCO2_BASE + ulEscritos + i,
+                                   ullDato ) != HAL_OK )
+            {
+                xprintf( "FW:: ERROR escribiendo en 0x%08lX (err 0x%08lX)\r\n",
+                         ( unsigned long ) ( FW_BANCO2_BASE + ulEscritos + i ),
+                         ( unsigned long ) HAL_FLASH_GetError() );
+                bOk = false;
+                break;
+            }
+        }
+
+        ulEscritos += ( uint32_t ) lN;
+    }
+
+    fs_sd_fw_cerrar();
+    ( void ) HAL_FLASH_Lock();
+
+    if( !bOk )
+    {
+        return false;
+    }
+
+    /* ---- 3. ⭐⭐ RELEER DE LA FLASH y verificar -------------------------- */
+    /*
+     * Acá está el valor de esta etapa. `HAL_FLASH_Program()` devolvió OK en
+     * cada una de las ~31.000 escrituras, y eso **no prueba nada**: una celda
+     * que no tomó el dato, una página que no se borró del todo o un bit débil
+     * devuelven OK igual. Lo único que prueba que el banco 2 tiene el firmware
+     * es leerlo de vuelta.
+     *
+     * ⚠ Y se lee del BUS, no del buffer que acabamos de escribir: comparar
+     * contra lo que creemos haber escrito no detectaría nada.
+     */
+    ulCrc = fw_update_crc_banco2( xInfo.ulLargo );
+
+    if( pxInfo != NULL )
+    {
+        pxInfo->ulCrcLeido = ulCrc;
+    }
+
+    if( ulCrc != xInfo.ulCrc )
+    {
+        xprintf( "FW:: ⛔ el banco 2 NO verifica: 0x%08lX contra 0x%08lX\r\n",
+                 ( unsigned long ) ulCrc, ( unsigned long ) xInfo.ulCrc );
+        return false;
+    }
+
+    return true;
 }

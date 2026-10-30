@@ -47,7 +47,13 @@ MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 256K
   RAM2    (xrw)    : ORIGIN = 0x10000000,   LENGTH = 64K
-  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 1024K
+  /* ⛔ 512K y NO 1024K: la flash son DOS BANCOS de 512 KB, y el banco 2 es el
+     respaldo del autoupdate (ver Application/tasks/fw_update.h). Con 1024K el
+     linker podria poner codigo encima del banco 2 y la aplicacion se estaria
+     pisando su propio respaldo -- sin que nada lo avise hasta que una
+     actualizacion fallara en campo. Con 249 KB de imagen no se cruza, pero el
+     linker script es lo unico que lo GARANTIZA. */
+  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 512K
 }
 
 /* Sections */

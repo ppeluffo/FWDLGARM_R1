@@ -5115,7 +5115,7 @@ static void cmdFs( void )
             xprintf( "volcando el remanente de la ventana (%u registros)...\r\n",
                      ( unsigned ) xVent.usCount );
 
-            wdg_kick_largo( 120000UL );   /* ver `wdg.h` */
+            wdg_kick_largo( 300000UL );   /* el grabado son ~10 s, pero la SD puede ser lenta */   /* ver `wdg.h` */
             bool bOk = fs_sd_volcar_ventana();
             wdg_kick();
 
@@ -5902,7 +5902,9 @@ static void prvEventosUso( void )
 {
     xprintf( "uso:\r\n" );
     xprintf( "  eventos               estado del registro\r\n" );
-    xprintf( "  fw                  hay un firmware nuevo en la microSD? (no lo aplica)\r\n" );
+    xprintf( "  fw [archivo]        hay un firmware nuevo en la microSD? (no lo aplica)\r\n" );
+    xprintf( "  fw grabar [arch]    lo escribe en el BANCO 2 y lo verifica releyendo\r\n" );
+    xprintf( "                      (el equipo sigue arrancando del banco 1)\r\n" );
     xprintf( "  eventos volcar        escribe ya lo acumulado en %s\r\n", EVENTOS_ARCHIVO );
     xprintf( "  eventos nota <texto>  deja una marca (UNA palabra: el parser corta\r\n" );
     xprintf( "                        en los espacios; usar_guiones_bajos)\r\n" );
@@ -6070,8 +6072,19 @@ static void cmdFw( void )
      * lado, vale. Por omisión, el que el equipo aplicaría solo.
      */
     uint8_t     ucArgs    = FRTOS_CMD_makeArgv();
-    const char *pcArchivo = ( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) )
-                            ? argv[ 1 ] : FW_UPDATE_ARCHIVO;
+    bool        bGrabar   = ( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) &&
+                              ( strcmp( argv[ 1 ], "grabar" ) == 0 ) );
+    const char *pcArchivo = FW_UPDATE_ARCHIVO;
+
+    if( bGrabar )
+    {
+        /* `fw grabar [archivo]` */
+        if( argv[ 2 ] != NULL ) { pcArchivo = argv[ 2 ]; }
+    }
+    else if( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) )
+    {
+        pcArchivo = argv[ 1 ];
+    }
     /* ⚠ En TICKS, y la conversión a ms al final sobre la DIFERENCIA.
        `configTICK_RATE_HZ / 1000` es 512/1000 = **0** en aritmética entera, o
        sea una división por cero — el compilador la caza, que es exactamente
@@ -6084,13 +6097,47 @@ static void cmdFw( void )
     xprintf( "  banco      : %lu KB (la flash son 2 bancos de ese tamaño)\r\n",
              ( unsigned long ) ( FW_UPDATE_BANCO_BYTES / 1024UL ) );
 
-    xprintf( "\r\nFW:: mirando la microSD (%s)...\r\n", pcArchivo );
+    xprintf( "\r\nFW:: %s la microSD (%s)...\r\n",
+             bGrabar ? "GRABANDO desde" : "mirando", pcArchivo );
     xprintf( "     se lee el archivo ENTERO para verificar el CRC: tarda unos segundos\r\n" );
 
     /* ⚠ La prórroga del watchdog: leer 176 KB de la microSD puede pasarse del
        plazo de 90 s si la tarjeta es lenta, y acá no hay dónde reportar en el
        medio. Es el mismo criterio que `f_mkfs()` y el volcado de la ventana. */
     wdg_kick_largo( 120000UL );
+
+    if( bGrabar )
+    {
+        /*
+         * ⚠ ETAPA 3: escribe el BANCO 2 y lo verifica releyéndolo. **No cambia
+         * el banco de arranque**: al terminar, con éxito o sin él, el equipo
+         * sigue arrancando del banco 1. Por eso este comando no pide una
+         * palabra de confirmación como `fs sd format borrar` — no hay nada
+         * que se pueda perder.
+         */
+        bool bOk = fw_update_grabar( pcArchivo, &xInfo, &xRes );
+
+        wdg_kick();
+
+        if( bOk )
+        {
+            xprintf( "\r\n  ==> EL BANCO 2 QUEDO ESCRITO Y VERIFICADO\r\n" );
+            xprintf( "      CRC releido de la flash: 0x%08lX  (igual al del archivo)\r\n",
+                     ( unsigned long ) xInfo.ulCrcLeido );
+            xprintf( "      ⚠ el equipo SIGUE arrancando del banco 1: cambiar el\r\n" );
+            xprintf( "        banco de arranque es la etapa 4\r\n" );
+        }
+        else if( xRes != fwHAY_NUEVO )
+        {
+            xprintf( "\r\n  no se grabo nada: %s\r\n", fw_update_str( xRes ) );
+        }
+        else
+        {
+            xprintf( "\r\n  ⛔ FALLO EL GRABADO (ver arriba)\r\n" );
+        }
+
+        return;
+    }
 
     xRes = fw_update_examinar( pcArchivo, &xInfo );
 
