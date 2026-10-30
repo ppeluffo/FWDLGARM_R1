@@ -7443,21 +7443,95 @@ que **el bank swap tampoco se aplicó**, que es lo primero que `BFB2` tendría q
 `_estack`, BOOT0, el empty check—: **ninguno de ellos puede impedir que el micro arranque el
 bootloader**, y el bootloader ni siquiera empieza.
 
-#### ⏳ Dónde seguir, cuando se retome
+#### ⏸ DÓNDE SE RETOMA: `BFB2` se abandona, y hay UNA decisión sin tomar
 
-Lo que **no** se probó todavía, en orden de costo:
+⭐ **Decidido con Pablo (2026-10-30): se abandona `BFB2`.** Seis hipótesis refutadas, y la última
+medición dice que el micro **no ejecuta nada** — no es algo que se arregle desde el firmware. Las
+etapas **1, 2 y 3 quedan validadas y NO se tocan**: el formato, el examen de la tarjeta y la
+escritura del banco 2 con verificación por CRC siguen siendo correctos.
+
+Lo que falta es **cómo se pone en marcha el firmware nuevo**, y quedaron dos arquitecturas parejas:
+
+##### A — Salto por software, con una marca en la EEPROM
+
+El banco 1 arranca siempre, lee una marca y, si corresponde, escribe `SYSCFG_MEMRMP.FB_MODE`
+(mapea el banco 2 en `0x08000000`) y salta, **desde una función en `.RamFunc`** — porque al
+conmutar, el código que se está ejecutando deja de estar en la dirección desde la que se lee.
+
+✅ La infraestructura existe: el `.ld` tiene `.RamFunc` **dentro de `.data`**, que el startup copia
+a RAM, y `flash_ramfunc.c` ya se compila.
+
+⭐ **La marca va en la EEPROM, no en la SRAM del MCP79410** (idea de Pablo, y es mejor):
 
 | | |
 |---|---|
-| ⭐ **Otra placa** | con dos placas, la sana separa *"el chip"* de *"esta unidad"* en un minuto — es la regla que ya cerró lo del TPS62130 y lo del conector SWD |
-| El `(1)` de la Figura 102 | la nota **no existe** en el documento; el rango real de *"int. SRAM address"* del bootloader V9.3 sólo lo sabe ST |
-| ⚠ **Preguntarle a ST** | con los cuatro registros medidos y los dos bancos válidos, es un reporte corto y concreto |
+| ⛔ SRAM del MCP79410 | si falla la pila el equipo **revierte al banco 1 en silencio** — la familia del `MODE` del INA y el `VREFEN` del ADC. Y esa SRAM **ya falló dos veces acá**: la FAT, y `LOTE9041`/`LOTE3682` |
+| ⛔ SRAM2 (`.ram2_noinit`) | peor: no hace falta que falle nada, **basta un corte de alimentación** |
+| ⭐ **EEPROM** | **ya es dependencia crítica** (la configuración vive ahí), así que no agrega un punto de falla. Y si falla, **se grita**: checksums malos, defaults, el hash cambia y el servidor pide los cinco bloques |
 
-⭐⭐ **Y hay una salida que NO necesita `BFB2` ni el bootloader**: que el **firmware del banco 1 salte
-al banco 2 por software** —`SYSCFG_MEMRMP.FB_MODE` es escribible—. Cuesta la atomicidad perfecta
-(el banco 1 pasa a ser un bootloader mínimo que siempre corre primero), pero **conserva todo lo
-demás de las etapas 1 a 3, que están validadas**, y el riesgo real que el diseño quería evitar
-—un corte de alimentación a mitad de la escritura— lo sigue cubriendo.
+⚠ **NO en los primeros bytes**: `0x00000` es el bloque `base`, y moverlo invalidaría las
+configuraciones ya grabadas en los equipos. ⭐ Hay **3 KB libres desde `0x00400`**
+(`0x00300` queda reservado por si vuelve flowcontrol).
+
+⚠ Y el salto tiene que ocurrir **después de `MX_I2C2_Init()`** para poder leer la marca, con
+`HAL_DeInit()` y `__disable_irq()` antes de saltar. ⛔ Además obliga a **ping-pong** entre bancos,
+o el banco 1 queda congelado con el firmware de fábrica para siempre.
+
+##### B — Copiar el banco 2 al banco 1, sin marca de ninguna clase
+
+```
+fw grabar  ->  banco 2 escrito y verificado por CRC        (YA HECHO)
+fw commit  ->  rutina en .RamFunc:
+                 a) borra el banco 1 entero                  22 ms   <- tME, no 128 x tERASE
+                 b) copia banco 2 -> banco 1,
+                    MENOS el primer doubleword             2,63 s
+                 c) escribe el primer doubleword             82 us
+                 d) reset
+```
+
+⭐⭐ **El orden es el diseño**: el primer doubleword —`SP` y `Reset_Handler`— va **último**.
+Mientras no esté escrito, `0x08000000` lee `0xFFFFFFFF` y entra el mecanismo del silicio
+(DS11585 §3.8): *"if the first flash memory location is found empty, the flash empty check
+mechanism **forces boot from the system memory**"*.
+
+| Si se corta la alimentación… | Qué queda |
+|---|---|
+| antes del borrado | ⭐ el firmware viejo, intacto |
+| durante los **2,65 s** de la copia | ⚠ flash vacía → **arranca el bootloader de ST**: recuperable por SWD o por serie |
+| durante los **82 µs** finales | ⛔ el único caso malo |
+| después | ⭐ el firmware nuevo |
+
+⭐ **La ventana peligrosa son 82 µs, no 10 s**, y el banco 2 conserva la copia buena todo el tiempo.
+
+⚠⚠ **Y ese empty check está activo PORQUE `nSWBOOT0 = 1`** — el datasheet dice que ponerlo en 0
+lo desactiva. O sea que devolverlo a su valor validado resultó necesario por una segunda razón.
+**No cambiarlo.**
+
+##### ⭐ La recomendación, y el argumento
+
+**B**, por la **asimetría del riesgo**:
+
+| Si falla… | Cuesta |
+|---|---|
+| `fw commit` | 82 µs, y el estado intermedio es **recuperable** |
+| ⛔ **el arranque** | el equipo no arranca — **en campo, a 300 km** |
+
+**A** mete código en el único camino que las 188 h de campo validaron; **B** no lo toca en absoluto:
+el equipo arranca exactamente igual que hoy y todo lo nuevo corre dentro de un comando, con el
+técnico presente. Es la misma lógica que los 10 s de la válvula.
+
+⭐ Y la EEPROM igual se usa, donde sí aporta: **el contador de arranques sin confirmar de la etapa
+5**, en `0x00400`, con el patrón de checksum + `offsetof` de la FAT y el contador de lotes.
+
+##### Los tiempos, del DS11585 (no estimados)
+
+| | típ | máx |
+|---|---|---|
+| `tME` — borrar **un banco entero** | **22,13 ms** | 24,59 |
+| `tPROG_PAGE` — 2 KB | 20,91 ms | 23,24 |
+| `tPROG` — un doubleword | **81,69 µs** | 90,76 |
+
+⭐ Borrar el banco entero con `tME` son **22 ms**, contra los **2,8 s** de hacerlo página por página.
 
 ### ⏳ Lo que falta, por riesgo creciente
 
