@@ -418,3 +418,70 @@ cerró el caso fue mirar el código y un segundo archivo, no razonar sobre el pr
 | ⏳ El contador en el log | `cnt total 0`: sin caudalímetro, esa parte del `RESUMEN` no se ejercitó |
 | ℓ `reset pedido por la consola` | lo imprime también cuando el reset lo pidió **el servidor** (la línea anterior lo dice). Mensaje fijo; manda a buscar al lado equivocado |
 | ℹ️ `bt12v` 10,17..10,66 V | el montaje de banco de ese riel, ya conocido — no hay nada que investigar |
+
+---
+
+## Test 4 — La primera instalación de campo, 188 h (2026-10-20 → 2026-10-28)
+
+El equipo instalado en una red real, modo `DISCRETO`, muestreo cada 5 min y transmisión cada 3 h,
+con el registro de eventos encendido (`EVENTOS.ON`). Firmware `0.0.19`, `ARRANCA_WDG = 1`.
+
+⭐ **El informe completo está en `Informe_campo_2026-10-20_28.pdf`.** Acá, el resumen y los
+pendientes que deja.
+
+### ✅ Resultado: PASÓ
+
+| Criterio | Resultado |
+|---|---|
+| ⭐⭐ **Estabilidad** | **188 h sin un reinicio**, y **cero falsos positivos del watchdog** — lo único que el banco no puede demostrar |
+| ⭐ **Memoria** | heap **2992 B en las 41 lecturas, invariable**; peor stack `tkSys` al 28 % (en Debug) |
+| **Datos** | 2.190 registros entregados, **60 sesiones OK de 63 (95,2 %)**, `pisados 0` |
+| ⭐ **Batería** | 12,546 → 12,157 V en 7,6 días = **−51 mV/día**, monótona. Primera medida real |
+| Riel de 3,3 V | 3,284..3,364 V en nueve días |
+| ⭐ **Degradación sin enlace** | 21,5 h sin antena: siguió midiendo, **sin perder un dato**, abortando cada intento en 19 s |
+
+⚠ **Las ventanas no son la misma**: el archivo cubre 215 h, pero la **operación en campo** son las
+188 h entre el último arranque (20/10 16:21) y el retiro del equipo (28/10 12:39).
+
+### ⛔⛔ Los tres hallazgos
+
+| | Estado |
+|---|---|
+| **El tick atrasa 2,31 %** (contra 1,14 % en banco) → **+2,3 % de caudal** al servidor | 🔨 parcial: el resto arrastrado cubre el 3 %; entró el instrumento para el resto |
+| **El cálculo de ppm desbordaba** e informaba con el signo cambiado | ✅ corregido y verificado contra el log |
+| **El `+CCLK:` del módulo entregó una hora errada en 3 h** y se aplicó | ✅ corregido: huso y magnitud |
+
+⭐ **Y dos casos que NO eran del firmware**: el modem del 28/10 fue **el retiro del equipo** (antena
+desconectada) y la deriva de +400 ppm es el cristal `Y1` **sin condensadores**, que el PCB nuevo
+lleva.
+
+### ⭐⭐ Lo que hizo posible el análisis: las dos marcas de tiempo por línea
+
+Cada evento lleva la hora del RTC **y** los segundos de tick desde el arranque. Esa redundancia no
+era el objetivo del diseño y **destapó dos de los tres hallazgos**: cruzar las dos columnas es lo
+que midió el atraso del tick y lo que mostró el salto de 3 h del módulo.
+
+### ⛔ La lección de método: la aritmética del arreglo obvio NO cerraba
+
+El atraso del tick tenía un arreglo diseñado desde octubre —arrastrar el resto de la división—. Al
+implementarlo, la cuenta lo desmintió:
+
+```
+LPTIM_COUNTS_POR_TICK = 2  ->  resto de 0,488 ms promedio por despertada
+4800 despertadas/h  ->  2,3 s/h  =  651 ppm       de los 23.504 medidos  =  el 3 %
+```
+
+⭐ **Hacer el arreglo y declarar el problema resuelto habría sido el error**, y habría costado otra
+instalación de campo descubrirlo. Entró el arreglo **más** el instrumento, y el arreglo de fondo
+espera a que el instrumento hable. Es la regla que costó tres días con el ADC.
+
+### ⏳ Pendientes que deja este test
+
+| | |
+|---|---|
+| ⭐ **Correr el banco con el instrumento**, a ~4.000 pulsos/h | es la cadencia donde el defecto se manifiesta al doble; `status` da `atraso / sueños` = µs por ciclo |
+| El arreglo de fondo del tick | dirigido por lo anterior, en commit aparte: toca el port |
+| Validar en banco los arreglos 2 y 3 | provocar un salto de hora grande y una respuesta con huso distinto |
+| **Medir el consumo del modem** | el 82 % del presupuesto de energía, y el único dato estimado |
+| El PCB nuevo | leer `RELOJ deriva` en la primera semana: criterio de aceptación de los condensadores de `Y1` |
+| Observar los descartes del contador | 1.145 en un episodio de 7 h el 22/10; si reaparece, mirar el contacto y el filtro |

@@ -13,6 +13,7 @@
 #include "drv_ina3221.h"
 #include "drv_pulsos.h"
 #include "caudal.h"
+#include "port_lptim_tick.h"
 #include "caudal_log.h"
 #include "drv_valvula.h"
 #include "drv_rs485.h"
@@ -769,6 +770,36 @@ static void prvResumen( const dataRcd_t *pxDr )
                      ( unsigned long ) xC.ulCortos, ( unsigned long ) xC.ulImposibles );
     }
 
+#if ( PORT_SIN_TICKLESS == 0 )
+    /*
+     * ⭐⭐ EL ATRASO DEL TICK, medido por el propio equipo.
+     *
+     * El RTC interno corre del MISMO LSE que el tick, así que la diferencia NO
+     * incluye la deriva de ningún cristal: es lo que pierde el mecanismo de
+     * sueño, y nada más. En campo del 2026-10-20 ese número fue 2,31 % y hubo
+     * que deducirlo cruzando el log contra el MCP79410 y contra el servidor;
+     * ahora sale solo, en una línea.
+     */
+    {
+        uint32_t ulSegRtc = 0U, ulSegTick = 0U;
+
+        if( port_tick_vs_rtc( &ulSegRtc, &ulSegTick ) && ( ulSegRtc > 0U ) )
+        {
+            uint32_t ulCiclos = 0U, ulCuentas = 0U, ulRescatado = 0U;
+            int32_t  lPpm = ( int32_t ) ( ( ( ( int64_t ) ulSegRtc - ( int64_t ) ulSegTick )
+                                            * 1000000LL ) / ( int64_t ) ulSegRtc );
+
+            ( void ) port_tickless_stats( &ulCiclos, &ulCuentas, &ulRescatado );
+
+            eventos_log( "RESUMEN: tick %lu s contra RTC interno %lu s -> %+ld ppm | "
+                         "sueños %lu, resto rescatado %lu cuentas (%lu ms)",
+                         ( unsigned long ) ulSegTick, ( unsigned long ) ulSegRtc, ( long ) lPpm,
+                         ( unsigned long ) ulCiclos, ( unsigned long ) ulRescatado,
+                         ( unsigned long ) ( ulRescatado * 1000UL / 1024UL ) );
+        }
+    }
+#endif
+
     eventos_log( "RESUMEN: bt3v3 %.3f..%.3f V | bt12v %.3f..%.3f V (en %lu poleos)",
                  ( double ) fBt3v3Min, ( double ) fBt3v3Max,
                  ( double ) fBt12vMin, ( double ) fBt12vMax,
@@ -942,6 +973,23 @@ void tkSys( void *pvParameters )
          * DISCRETO lo vuelca `tkWan` al final de cada sesión; esto cubre el
          * CONTINUO —que no tiene fin de sesión— y el buffer que se llena.
          */
+#if ( PORT_SIN_TICKLESS == 0 )
+        /*
+         * ⚠ El muestreo del tick contra el RTC va ACÁ y NO dentro del `if` del
+         * registro de eventos, y por dos razones:
+         *
+         *   - acumula **diferencias cortas** entre llamadas, que es lo que le
+         *     permite corregir el cruce de medianoche sin conocer la fecha. Si
+         *     sólo se llamara desde el resumen —cada 6 h— cada intervalo caería
+         *     fuera del filtro de cordura y no acumularía nunca;
+         *   - `status` lo muestra aunque el registro esté apagado, que es como
+         *     se va a mirar en el banco.
+         *
+         * ⭐ Y no cuesta nada: dos lecturas de registro del RTC por poleo.
+         */
+        ( void ) port_tick_vs_rtc( NULL, NULL );
+#endif
+
         if( eventos_estado() == eventosACTIVO )
         {
             bool bResumen;

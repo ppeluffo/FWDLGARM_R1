@@ -35,6 +35,7 @@
 
 #include "main.h"
 #include "pwr_lock.h"
+#include "port_lptim_tick.h"   /* ⚠ ARRIBA: define PORT_SIN_TICKLESS, que se usa en #if */
 
 /*
  * ---------------------------------------------------------------------------
@@ -57,7 +58,10 @@
  * tiempo. Se vuelve a 0 cuando eso se resuelva, y ahí hay que **medir el reposo
  * de nuevo** — es el criterio de aceptación de cada etapa.
  */
-#define PORT_SIN_TICKLESS   0
+/* ⭐ El define vive en `port_lptim_tick.h`, porque lo necesitan DOS unidades de
+   compilación: este archivo y `tkSys.c`, que sólo instrumenta el tick si el
+   tickless está activo. Es la misma razón por la que `ARRANCA_WDG` está en
+   `main.h` y no en `main.c`. */
 
 /* ⚠ Este #define va ACÁ, antes de todo, y no al lado de la función que lo usa:
    el preprocesador evalúa cada #if en el orden del archivo, así que una
@@ -167,6 +171,139 @@ void HAL_LPTIM_AutoReloadMatchCallback( LPTIM_HandleTypeDef *hlptim )
 #define TICKLESS_MIN_TICKS      3UL
 
 #if ( PORT_SIN_TICKLESS == 0 )
+
+/*------------------------------------------------------------------------------
+ * EL RESTO QUE SE ARRASTRA, Y LOS CONTADORES QUE DICEN SI ALCANZA.
+ *
+ * ⛔⛔ EL PROBLEMA, medido en la instalación de campo del 2026-10-20:
+ *
+ *     el RTC avanzó 185,21 h   mientras el tick contó 180,95 h
+ *     el RTC adelanta +430 ppm (lo dice el servidor) -> el TICK ATRASA 2,31 %
+ *
+ * ⛔ Y NO es inocuo: el `dT` del caudal **se mide en ticks**, así que un tick que
+ * atrasa da intervalos cortos y **caudal de más en la misma proporción** — en un
+ * dato que viaja al servidor y que ve el cliente.
+ *
+ * ⚠⚠ **PERO LA ARITMÉTICA NO CIERRA, Y POR ESO ACÁ HAY DOS COSAS Y NO UNA.**
+ *
+ * `LPTIM_COUNTS_POR_TICK` son **2**, así que el resto de la división vale 0 ó 1
+ * cuenta: a lo sumo 0,977 ms por despertada, 0,488 en promedio. Con las ~4.800
+ * despertadas/hora de esa instalación eso explica:
+ *
+ *     4800 x 0,488 ms = 2,3 s/h  =  651 ppm        de los 23.504 medidos
+ *
+ * ⭐ **O sea que arrastrar el resto corrige el 3 % del problema.** Está bien
+ * hacerlo —es correcto y es gratis— pero **quien afirme que con esto se arregló
+ * se va a equivocar**: faltan 97 de cada 100 ppm.
+ *
+ * ⏳ EL SOSPECHOSO QUE QUEDA, sin confirmar: cada ciclo de sueño para y rearranca
+ * el LPTIM **dos veces** (al dormirse y al despertar), y `LPTIM_Disable()` de la
+ * HAL no es barato — hace `__HAL_RCC_LPTIM1_FORCE_RESET()` y después reprograma
+ * esperando `CMPOK`, `ARROK` y `REPOK`, tres flags de ~92 µs cada uno. Durante
+ * todo eso **el contador está reseteado y el tiempo real corre sin contarse**.
+ *
+ * ⛔ **No se toca nada de eso todavía, a propósito.** Es exactamente la situación
+ * en que este proyecto ya se quemó: el 2026-10-02 se hicieron cuatro "arreglos"
+ * sobre un ADC que funcionaba bien, guiados por un instrumento que mentía. Acá
+ * primero va el instrumento —los contadores de abajo— y después el arreglo que
+ * ellos señalen.
+ */
+static uint32_t ulRestoCuentas     = 0U;   /* se arrastra a la despertada siguiente */
+static uint32_t ulCiclosSueno      = 0U;   /* cuántas veces se durmió de verdad     */
+static uint32_t ulCuentasInformadas = 0U;  /* lo que se le contabilizó al kernel    */
+static uint32_t ulRestoRescatado   = 0U;   /* lo que ANTES se perdía: prueba el fix */
+
+/*------------------------------------------------------------------------------
+ * Los contadores del tickless, para que `status` y el registro de eventos puedan
+ * mostrarlos. Devuelve el resto pendiente; los demás por puntero (admite NULL).
+ */
+uint32_t port_tickless_stats( uint32_t *pulCiclos, uint32_t *pulCuentas,
+                              uint32_t *pulRescatado )
+{
+    if( pulCiclos != NULL )    { *pulCiclos    = ulCiclosSueno;       }
+    if( pulCuentas != NULL )   { *pulCuentas   = ulCuentasInformadas; }
+    if( pulRescatado != NULL ) { *pulRescatado = ulRestoRescatado;    }
+
+    return ulRestoCuentas;
+}
+
+/*------------------------------------------------------------------------------
+ * ⭐⭐ EL INSTRUMENTO QUE CIERRA EL CASO: el tick contra el RTC INTERNO.
+ *
+ * El atraso del tick se descubrió **cruzando el log del equipo contra el reloj
+ * del MCP79410**, y eso tiene dos problemas: hace falta una corrida larga con el
+ * registro de eventos encendido, y el MCP79410 tiene su propia deriva (+430 ppm
+ * con el cristal sin condensadores), así que hay que descontarla con lo que diga
+ * el servidor. Tres instrumentos para medir una cosa.
+ *
+ * ⭐ El RTC **interno** del STM32 no tiene ninguno de esos problemas:
+ *
+ *   - corre del **mismo LSE** que el LPTIM del tick, así que el cristal se
+ *     cancela y lo que queda es **exactamente lo que pierde el mecanismo**;
+ *   - **sigue contando en Stop 2** y el firmware no lo toca nunca;
+ *   - está ahí desde `v0.0.3` y no cuesta un microamper: es el consumidor que
+ *     destrabó el encendido del LSE.
+ *
+ * Se llama periódicamente (desde el poleo) y acumula diferencias cortas, así que
+ * no necesita la fecha: alcanza con h:m:s y corregir el cruce de medianoche.
+ *
+ * ⚠ La primera llamada sólo toma la referencia y devuelve false.
+ */
+bool port_tick_vs_rtc( uint32_t *pulSegRtc, uint32_t *pulSegTick )
+{
+    extern RTC_HandleTypeDef hrtc;
+
+    static uint32_t ulRtcAnterior  = 0U;
+    static uint32_t ulTickAnterior = 0U;
+    static uint32_t ulRtcAcum      = 0U;
+    static uint32_t ulTickAcum     = 0U;
+    static bool     bHayReferencia = false;
+
+    RTC_TimeTypeDef xT;
+    RTC_DateTypeDef xD;
+    uint32_t        ulRtc, ulTick;
+
+    /* ⚠ El orden NO es opcional: leer la hora bloquea los registros sombra y
+       leer la fecha los libera. Sin la segunda lectura el RTC se congela. */
+    if( HAL_RTC_GetTime( &hrtc, &xT, RTC_FORMAT_BIN ) != HAL_OK )
+    {
+        return false;
+    }
+    ( void ) HAL_RTC_GetDate( &hrtc, &xD, RTC_FORMAT_BIN );
+
+    ulRtc  = ( (uint32_t) xT.Hours * 3600U ) + ( (uint32_t) xT.Minutes * 60U ) +
+             (uint32_t) xT.Seconds;
+    ulTick = ( uint32_t ) ( xTaskGetTickCount() / configTICK_RATE_HZ );
+
+    if( bHayReferencia )
+    {
+        uint32_t ulDeltaRtc = ulRtc - ulRtcAnterior;
+
+        if( ulRtc < ulRtcAnterior )
+        {
+            ulDeltaRtc = ( 86400U - ulRtcAnterior ) + ulRtc;   /* cruzó medianoche */
+        }
+
+        /* ⚠ Sólo se acumulan intervalos razonables. Si alguien pone el RTC en
+           hora, o si pasó demasiado entre dos llamadas, el intervalo se descarta
+           en vez de contaminar el acumulado con un salto que no es deriva. */
+        if( ulDeltaRtc <= 3600U )
+        {
+            ulRtcAcum  += ulDeltaRtc;
+            ulTickAcum += ( ulTick - ulTickAnterior );
+        }
+    }
+
+    ulRtcAnterior  = ulRtc;
+    ulTickAnterior = ulTick;
+    bHayReferencia = true;
+
+    if( pulSegRtc != NULL )  { *pulSegRtc  = ulRtcAcum;  }
+    if( pulSegTick != NULL ) { *pulSegTick = ulTickAcum; }
+
+    return ( ulRtcAcum > 0U );
+}
+
 /*------------------------------------------------------------------------------
  * CNT vive en el dominio del LSE, asíncrono respecto del bus: el RM exige leerlo dos
  * veces seguidas y aceptar el valor sólo cuando ambas lecturas coinciden.
@@ -311,11 +448,7 @@ void vPortSuppressTicksAndSleep( TickType_t xExpectedIdleTime )
     }
 
     /* Volver al tick normal. El flag y el pendiente del NVIC se limpian a mano para que
-       no entre un tick de más: la cuenta de todo el sueño la hace vTaskStepTick().
-
-       Se pierde el resto de la división (menos de un tick, < 1,95 ms) cada vez que algo
-       despierta al micro antes de tiempo. No afecta a los timestamps, que los estampa el
-       RTC; si alguna medición mostrara que importa, habría que arrastrar el resto. */
+       no entre un tick de más: la cuenta de todo el sueño la hace vTaskStepTick(). */
     ( void ) HAL_LPTIM_Counter_Stop_IT( &hlptim1 );
     __HAL_LPTIM_CLEAR_FLAG( &hlptim1, LPTIM_FLAG_ARRM );
     NVIC_ClearPendingIRQ( LPTIM1_IRQn );
@@ -324,13 +457,38 @@ void vPortSuppressTicksAndSleep( TickType_t xExpectedIdleTime )
         Error_Handler();
     }
 
+    /*
+     * ⭐ EL RESTO SE ARRASTRA, no se descarta.
+     *
+     * Con 2 cuentas por tick, `ulCuentasDormidas / 2` tira 0 ó 1 cuenta cada vez
+     * que algo despierta al micro antes de tiempo —y el contador de pulsos lo
+     * hace miles de veces por hora—. Sumando el sobrante a la cuenta siguiente,
+     * el error deja de acumularse: cada dos despertadas impares se recupera un
+     * tick entero.
+     *
+     * ⚠ Y el arrastre es seguro frente al clamp de abajo: el resto siempre es
+     * menor que `LPTIM_COUNTS_POR_TICK`, así que `(N*C + r)/C` sigue dando N y
+     * nunca empuja el resultado por encima de `xExpectedIdleTime`.
+     */
+    ulCiclosSueno++;
+    ulRestoRescatado += ( ulCuentasDormidas % LPTIM_COUNTS_POR_TICK );
+
+    ulCuentasDormidas += ulRestoCuentas;
+    ulRestoCuentas     = ulCuentasDormidas % LPTIM_COUNTS_POR_TICK;
+
     xTicksDormidos = ( TickType_t ) ( ulCuentasDormidas / LPTIM_COUNTS_POR_TICK );
     if( xTicksDormidos > xExpectedIdleTime )
     {
         xTicksDormidos = xExpectedIdleTime;   /* vTaskStepTick() no admite pasarse */
+
+        /* ⚠ Si alguna vez se recortara, el resto se descarta: arrastrar lo que
+           no entró lo haría crecer sin techo y el próximo sueño contabilizaría
+           de más. Preferible perder una cuenta que inventar un tick. */
+        ulRestoCuentas = 0U;
     }
     if( xTicksDormidos > 0U )
     {
+        ulCuentasInformadas += ( uint32_t ) xTicksDormidos * LPTIM_COUNTS_POR_TICK;
         vTaskStepTick( xTicksDormidos );
     }
 

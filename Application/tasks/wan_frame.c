@@ -1082,9 +1082,25 @@ static void prvDerivaInformarYGuardar( const RtcTimeType_t *pxAntes,
              * ppm = desvio / transcurrido * 1e6. Se hace en enteros y con el
              * numerador primero para no perder la parte que interesa: con
              * desvíos de segundos sobre días, dividir antes daría cero.
+             *
+             * ⛔⛔ Y LA CUENTA VA EN 64 BITS, que no es una precaución teórica:
+             * `long` son 32 bits en este micro, así que `lDesvio * 1000000`
+             * **desborda en cuanto el desvío pasa de 2147 s** — y ahí no da un
+             * número grande sino uno CHICO Y CON EL SIGNO CAMBIADO.
+             *
+             * La instalación de campo del 2026-10-20 lo mostró con dos saltos de
+             * ~11.000 s seguidos (el reloj del módulo LTE, ver `prvParsearCCLK`):
+             *
+             *     +11127 s en 30 h  ->  informó  -15791 ppm   (son +103.028)
+             *     -11125 s en  3 h  ->  informó +158022 ppm   (son -1.030.093)
+             *
+             * ⚠ Es la familia del volcado de `ADC_CR` mal decodificado que costó
+             * tres días: un instrumento que miente **con autoridad** dirige el
+             * diagnóstico al lugar equivocado. Y éste se dispara justo cuando
+             * pasa algo grave, que es cuando más falta hace que diga la verdad.
              */
-            long lPpm     = ( long ) ( ( lDesvio * 1000000L ) / lTranscurrido );
-            long lSegDia  = ( long ) ( ( lDesvio * 86400L ) / lTranscurrido );
+            long lPpm     = ( long ) ( ( ( int64_t ) lDesvio * 1000000LL ) / lTranscurrido );
+            long lSegDia  = ( long ) ( ( ( int64_t ) lDesvio * 86400LL ) / lTranscurrido );
 
             xprintf( "  ==> %+ld ppm  (%+ld s/dia)\r\n", lPpm, lSegDia );
 
@@ -1110,16 +1126,50 @@ static void prvDerivaInformarYGuardar( const RtcTimeType_t *pxAntes,
              */
             if( ( lPpm > 20L ) || ( lPpm < -20L ) )
             {
-                xprintf( "  [!] fuera de la tolerancia tipica de un cristal (+-20 ppm).\r\n" );
-                xprintf( "      El cristal es Y1, el del MCP79410 (X1/X2 de ese chip),\r\n" );
-                xprintf( "      NO el de PC14/PC15 del micro.\r\n" );
-
-                if( lPpm > 0L )
+                /*
+                 * ⭐⭐ LA MAGNITUD SEPARA DOS CAUSAS QUE NO SE PARECEN EN NADA,
+                 * y distinguirlas es la diferencia entre mirar la placa y mirar
+                 * el módulo.
+                 *
+                 * Ningún cristal de reloj, por malo que esté, deriva miles de
+                 * ppm: el peor caso realista es un cristal sin sus condensadores
+                 * de carga, y eso dio **+400 ppm** medidos. Por encima de
+                 * `WAN_DERIVA_MAX_CRISTAL_PPM` lo que hay no es deriva: es un
+                 * SALTO de hora que entró al cálculo, y el sospechoso es la
+                 * fuente que puso esa hora, no el cristal.
+                 *
+                 * ⛔ El 2026-10-26 esto habría cerrado el caso en el acto: el
+                 * equipo informó -15791 ppm (un número que además estaba mal,
+                 * por el desborde de arriba) y la causa real era que el reloj
+                 * del módulo LTE había mandado una hora 3 h corrida.
+                 */
+                if( ( lPpm > WAN_DERIVA_MAX_CRISTAL_PPM ) ||
+                    ( lPpm < -WAN_DERIVA_MAX_CRISTAL_PPM ) )
                 {
-                    /* Cargar de MENOS siempre adelanta, y cuanto menos carga,
-                       más adelanta: es la primera cosa a verificar. */
-                    xprintf( "      ADELANTA -> le falta CARGA capacitiva: verificar que\r\n" );
-                    xprintf( "      Y1 tenga sus condensadores y que correspondan a su CL.\r\n" );
+                    xprintf( "  [!] %+ld ppm NO es deriva de cristal: es un SALTO de hora.\r\n",
+                             lPpm );
+                    xprintf( "      Mirar QUIEN puso la hora (el modulo LTE manda mal el\r\n" );
+                    xprintf( "      huso cada tanto), no el cristal de la placa.\r\n" );
+                }
+                else
+                {
+                    xprintf( "  [!] fuera de la tolerancia tipica de un cristal (+-20 ppm).\r\n" );
+                    xprintf( "      El cristal es Y1, el del MCP79410 (X1/X2 de ese chip),\r\n" );
+                    xprintf( "      NO el de PC14/PC15 del micro.\r\n" );
+
+                    if( lPpm > 0L )
+                    {
+                        /* Cargar de MENOS siempre adelanta, y cuanto menos carga,
+                           más adelanta: es la primera cosa a verificar. */
+                        xprintf( "      ADELANTA -> le falta CARGA capacitiva: verificar que\r\n" );
+                        xprintf( "      Y1 tenga sus condensadores y que correspondan a su CL.\r\n" );
+
+                        /* ⭐ El criterio de aceptación del PCB nuevo, dicho donde
+                           alguien lo va a leer: la placa vieja daba ~+400 ppm por
+                           no tener los condensadores, y la nueva los lleva. */
+                        xprintf( "      (la placa SIN condensadores daba ~+400 ppm; el PCB\r\n" );
+                        xprintf( "      nuevo SI los lleva, y ahi esto tiene que caer a pocas ppm)\r\n" );
+                    }
                 }
             }
         }
@@ -1228,10 +1278,22 @@ bool wan_cclk_parsear( const char *pcRta, RtcTimeType_t *pxHora )
      * CRLF corren todo; si no hay comillas, se cae al `+CCLK:` y se saltean los
      * espacios.
      *
-     * ⭐ **La hora viene en LOCAL, con el huso ya aplicado** —el `-12` son
-     * cuartos de hora, UTC-3— confirmado en banco el 2026-09-21 contra el reloj
-     * de la PC. Si viniera en UTC, estampar eso donde el AVR estampa local
-     * correría todos los registros 3 horas: plausibles y mal.
+     * ⛔⛔ **EL HUSO SE VERIFICA, Y NO ES UNA PRECAUCIÓN TEÓRICA.**
+     *
+     * Acá decía que *"la hora viene en LOCAL, con el huso ya aplicado —el `-12`
+     * son cuartos de hora, UTC-3— confirmado en banco el 2026-09-21"*, y el
+     * parser no miraba ese campo. **La instalación de campo lo refutó**: el
+     * 2026-10-26 el módulo entregó una hora **3 h 5 min anterior** a la real y el
+     * equipo la aplicó sin chistar; el servidor la deshizo 12 s después.
+     *
+     *     23:35:50  el MODULO dice que son las 20:30:23  -> el equipo retrasa 3 h
+     *     20:30:35  el SERVIDOR dice que son las 23:36   -> y lo vuelve a adelantar
+     *
+     * Una observación de banco de un solo día estaba elevada a invariante. Ahora
+     * el huso **se lee y tiene que ser el esperado**: si no lo es, la hora se
+     * rechaza y se deja que la corrija el servidor, que es la autoridad del
+     * contrato. Perder una sincronización no cuesta nada; aplicar una hora mala
+     * corre los registros que el servidor indexa POR FECHA.
      */
     const char *p = strchr( pcRta, '"' );
 
@@ -1250,7 +1312,9 @@ bool wan_cclk_parsear( const char *pcRta, RtcTimeType_t *pxHora )
         p++;
     }
 
-    if( ( p == NULL ) || ( strlen( p ) < 17U ) )
+    /* 17 son los campos de fecha y hora; los 3 que siguen son el huso, que ahora
+       es obligatorio: sin él no se puede saber si la hora es local o UTC. */
+    if( ( p == NULL ) || ( strlen( p ) < 20U ) )
     {
         return false;
     }
@@ -1260,6 +1324,40 @@ bool wan_cclk_parsear( const char *pcRta, RtcTimeType_t *pxHora )
         ( p[ 11 ] != ':' ) || ( p[ 14 ] != ':' ) )
     {
         return false;
+    }
+
+    /*
+     * EL HUSO: `p[17]` es el signo y `p[18..19]` los cuartos de hora.
+     *
+     * ⚠ Se compara contra el esperado en vez de aplicarlo, y la diferencia
+     * importa: el campo dice **cuál es el huso del lugar**, no si el módulo ya
+     * lo aplicó a la hora que manda. Aplicarlo por nuestra cuenta sería adivinar
+     * —y adivinar mal corre los registros 3 horas, que es exactamente el daño
+     * que esto viene a evitar—. Si el huso no es el nuestro, el dato no se
+     * entiende y se descarta.
+     */
+    if( ( ( p[ 17 ] != '+' ) && ( p[ 17 ] != '-' ) ) ||
+        ( p[ 18 ] < '0' ) || ( p[ 18 ] > '9' ) ||
+        ( p[ 19 ] < '0' ) || ( p[ 19 ] > '9' ) )
+    {
+        return false;
+    }
+
+    {
+        int iCuartos = ( ( p[ 18 ] - '0' ) * 10 ) + ( p[ 19 ] - '0' );
+
+        if( p[ 17 ] == '-' )
+        {
+            iCuartos = -iCuartos;
+        }
+
+        if( iCuartos != WAN_CCLK_HUSO_CUARTOS )
+        {
+            xprintf( "WAN:: la hora del modulo viene con huso %+d cuartos de hora "
+                     "(se espera %+d): SE DESCARTA\r\n",
+                     iCuartos, ( int ) WAN_CCLK_HUSO_CUARTOS );
+            return false;
+        }
     }
 
     #define DOSD( n )   ( ( uint8_t ) ( ( p[ n ] - '0' ) * 10 + ( p[ n + 1 ] - '0' ) ) )
@@ -1381,6 +1479,77 @@ bool wan_rtc_sincronizar( const RtcTimeType_t *pxNueva, const char *pcOrigen,
     prvDerivaInformarYGuardar( &xActual, pxNueva, bHabiaHora && bLeida );
 
     return true;
+}
+//------------------------------------------------------------------------------
+/*
+ * La hora del MÓDULO (NTP), con el filtro de cordura que el servidor no necesita.
+ *
+ * ⭐ **Por qué es una función aparte y no un parámetro de `wan_rtc_sincronizar()`:
+ * a las dos fuentes NO se les cree igual.**
+ *
+ *   el SERVIDOR  -> es la autoridad del contrato: indexa las muestras por fecha,
+ *                   así que si él dice que son las 23:36, son las 23:36
+ *   el MÓDULO    -> es una comodidad para el arranque en frío, y el 2026-10-26
+ *                   quedó demostrado que se equivoca
+ *
+ * Rechazar una hora del módulo **no cuesta nada**: el `CLOCK=` del servidor llega
+ * en la misma sesión, unos segundos después. Aplicar una mala corre los
+ * registros hasta la sesión siguiente que funcione — con `timerdial` de 3 h, unas
+ * 36 muestras con fecha equivocada.
+ */
+/*
+ * La diferencia en segundos entre dos horas, expuesta.
+ *
+ * ⭐ Existe para que los llamadores NO reimplementen la aritmética de fechas:
+ * `prvDiferenciaSeg()` está validada con 9 casos —los dos cruces de bisiesto
+ * incluidos— y una segunda copia sería una segunda cosa que mantener y que
+ * puede divergir justo en el caso raro.
+ */
+int32_t wan_rtc_salto_seg( const RtcTimeType_t *pxA, const RtcTimeType_t *pxB )
+{
+    if( ( pxA == NULL ) || ( pxB == NULL ) )
+    {
+        return 0;
+    }
+
+    return prvDiferenciaSeg( pxA, pxB );
+}
+//------------------------------------------------------------------------------
+bool wan_rtc_sincronizar_ntp( const RtcTimeType_t *pxNueva )
+{
+    RtcTimeType_t xActual;
+
+    if( pxNueva == NULL )
+    {
+        return false;
+    }
+
+    /*
+     * ⭐ Con la hora NO confiable se acepta cualquier salto, y es el caso de uso
+     * principal de esta fuente: un equipo nuevo, o al que le cambiaron la pila,
+     * arranca en 2001 y se pone en hora solo, sin que nadie vaya al sitio.
+     */
+    if( ( drv_rtc_validez() == rtcHORA_VALIDA ) && drv_rtc_leer( &xActual ) )
+    {
+        int32_t lSalto = wan_rtc_salto_seg( pxNueva, &xActual );
+
+        if( ( lSalto > WAN_CCLK_SALTO_MAX_SEG ) ||
+            ( lSalto < -WAN_CCLK_SALTO_MAX_SEG ) )
+        {
+            xprintf( "WAN:: la hora del modulo salta %+ld s sobre un reloj CONFIABLE: "
+                     "SE DESCARTA (lo corrige el servidor)\r\n", ( long ) lSalto );
+
+            /* ⚠ Y al registro de eventos, porque en campo nadie mira la consola
+               y esto es justamente lo que el 2026-10-26 hubo que deducir cruzando
+               la hora del RTC contra el `t=` de cada línea. */
+            eventos_log( "RELOJ: se DESCARTA la hora del modulo (NTP): salta %+ld s "
+                         "sobre un reloj confiable (max %ld s)",
+                         ( long ) lSalto, ( long ) WAN_CCLK_SALTO_MAX_SEG );
+            return false;
+        }
+    }
+
+    return wan_rtc_sincronizar( pxNueva, "el modulo (NTP)", false );
 }
 //------------------------------------------------------------------------------
 /*

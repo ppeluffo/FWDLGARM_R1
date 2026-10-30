@@ -28,6 +28,7 @@
 #include "cfg_utils.h"   /* cfg_strlcpy: newlib no trae strlcpy */
 #include "tkCtl.h"
 #include "tkSys.h"
+#include "port_lptim_tick.h"
 #include "wan_frame.h"
 #include "fs_datos.h"
 #include "fs_sd.h"
@@ -754,6 +755,41 @@ static void cmdStatus( void )
     xprintf( "tick        : %lu (%lu Hz)\r\n",
              ( unsigned long ) xTaskGetTickCount(),
              ( unsigned long ) configTICK_RATE_HZ );
+#if ( PORT_SIN_TICKLESS == 0 )
+    /*
+     * ⭐⭐ CUÁNTO ATRASA EL TICK, contra el RTC INTERNO.
+     *
+     * Los dos relojes salen del MISMO LSE, así que acá no hay deriva de cristal:
+     * lo que se ve es **lo que pierde el mecanismo de sueño**, que en la
+     * instalación de campo del 2026-10-20 fue 2,31 % y metió ese mismo sesgo en
+     * el caudal. Antes había que deducirlo cruzando tres fuentes; ahora el
+     * equipo lo dice solo.
+     *
+     * ⚠ Necesita varios poleos para tener algo que decir: acumula entre
+     * llamadas, y el que lo llama es el poleo.
+     */
+    {
+        uint32_t ulSegRtc = 0U, ulSegTick = 0U, ulCiclos = 0U, ulRescatado = 0U;
+
+        if( port_tick_vs_rtc( &ulSegRtc, &ulSegTick ) && ( ulSegRtc > 0U ) )
+        {
+            int32_t lPpm = ( int32_t ) ( ( ( ( int64_t ) ulSegRtc - ( int64_t ) ulSegTick )
+                                           * 1000000LL ) / ( int64_t ) ulSegRtc );
+
+            ( void ) port_tickless_stats( &ulCiclos, NULL, &ulRescatado );
+
+            xprintf( "atraso tick : %+ld ppm  (RTC interno %lu s contra tick %lu s)\r\n",
+                     ( long ) lPpm, ( unsigned long ) ulSegRtc, ( unsigned long ) ulSegTick );
+            xprintf( "              %lu sueños, resto rescatado %lu cuentas = %lu ms\r\n",
+                     ( unsigned long ) ulCiclos, ( unsigned long ) ulRescatado,
+                     ( unsigned long ) ( ulRescatado * 1000UL / 1024UL ) );
+        }
+        else
+        {
+            xprintf( "atraso tick : todavia sin medida (hacen falta 2 poleos)\r\n" );
+        }
+    }
+#endif
     xprintf( "clock        : %lu Hz\r\n", ( unsigned long ) SystemCoreClock );
     prvImprimirCausaReset();
     xprintf( "terminal     : %s\r\n", drv_term_sense_presente() ? "conectada" : "ausente" );
@@ -3088,7 +3124,32 @@ static void prvLteClock( bool bAplicar )
      * `bSiempre = true` porque acá lo pidió una persona: el umbral de 90 s
      * existe para que el ajuste automático no reajuste en cada poleo, no para
      * discutirle a un comando explícito.
+     *
+     * ⚠ Y por la misma razón este camino **no pasa por `wan_rtc_sincronizar_ntp()`**,
+     * que descarta los saltos grandes: ese filtro es para la FSM, que corre sola
+     * en campo. Acá hay alguien mirando, así que se aplica igual pero **se avisa**
+     * —el técnico tiene que poder ver que el módulo está mandando cualquier cosa
+     * antes de que el salto le corra los registros—.
      */
+    {
+        RtcTimeType_t xPrevia;
+
+        if( ( drv_rtc_validez() == rtcHORA_VALIDA ) && drv_rtc_leer( &xPrevia ) )
+        {
+            int32_t lSalto = wan_rtc_salto_seg( &xHora, &xPrevia );
+
+            if( ( lSalto > WAN_CCLK_SALTO_MAX_SEG ) ||
+                ( lSalto < -WAN_CCLK_SALTO_MAX_SEG ) )
+            {
+                xprintf( "[!] OJO: el modulo salta %+ld s sobre un reloj que ya era\r\n",
+                         ( long ) lSalto );
+                xprintf( "    CONFIABLE. En la FSM esto se descartaria; se aplica\r\n" );
+                xprintf( "    porque lo pediste vos. Si no era lo que esperabas,\r\n" );
+                xprintf( "    el modulo esta mandando mal la hora.\r\n" );
+            }
+        }
+    }
+
     if( wan_rtc_sincronizar( &xHora, "el modulo (NTP)", true ) )
     {
         /* `drv_rtc_escribir()` escribe además la firma de la SRAM, así que esto

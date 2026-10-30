@@ -81,6 +81,52 @@
 #define WAN_FRAME_BUFFER_SIZE       512U
 
 /*------------------------------------------------------------------------------
+ * EL HUSO HORARIO, en cuartos de hora, tal como lo informa el `AT+CCLK?` del
+ * módulo: **-12 = UTC-3**, que es Uruguay.
+ *
+ * `wan_cclk_parsear()` DESCARTA la hora si el módulo informa otro huso, porque
+ * entonces no se sabe qué está mandando. Ver allá el episodio de campo del
+ * 2026-10-26, que es la razón por la que este chequeo existe.
+ *
+ * ⚠ Un despliegue en otro huso cambia esta constante. No se deduce de nada ni
+ * se toma del módulo a propósito: si se tomara del módulo, un módulo que informa
+ * mal el huso sería indistinguible de uno que informa bien, y el chequeo no
+ * serviría para nada.
+ */
+#define WAN_CCLK_HUSO_CUARTOS       ( -12 )
+
+/*
+ * El salto máximo que se le acepta al reloj del módulo cuando el equipo YA tiene
+ * una hora confiable: **1 hora**.
+ *
+ * ⭐ El número no es arbitrario, es la separación entre dos causas: la deriva de
+ * un cristal es de decenas de segundos por día, así que un salto de una hora no
+ * puede ser el reloj del equipo yéndose — es el módulo el que está equivocado.
+ *
+ * ⚠ Con la hora NO confiable (arranque en frío, pila cambiada) se acepta
+ * cualquier salto: ahí el RTC está en 2001 y poner el equipo en hora sin que
+ * nadie vaya al sitio es justamente para lo que esta fuente existe.
+ */
+#define WAN_CCLK_SALTO_MAX_SEG      3600L
+
+/*
+ * El techo de lo que puede ser DERIVA DE UN CRISTAL, en ppm. Por encima de esto
+ * lo que se midió no es un cristal corriendo mal: es un SALTO de hora que entró
+ * al cálculo, y hay que mirar quién puso esa hora.
+ *
+ * ⭐ El número sale de una medición, no de una estimación: la placa R001 con el
+ * cristal `Y1` **sin sus condensadores de carga** —el peor caso realista— dio
+ * **+400 ppm** sostenidos durante nueve días de campo. 5000 deja veinte veces
+ * ese margen y sigue estando tres órdenes de magnitud por debajo de un salto de
+ * hora, así que las dos causas no se pueden confundir.
+ *
+ * ⏳ Con el PCB nuevo, que SÍ lleva los condensadores, la deriva tiene que caer
+ * a pocas ppm — y ahí el aviso de ±20 ppm pasa de estar siempre encendido (y por
+ * lo tanto no informar nada) a ser una alarma con significado.
+ */
+#define WAN_DERIVA_MAX_CRISTAL_PPM  5000L
+
+/*------------------------------------------------------------------------------
  * Arma el frame de datos en `pcBuf`. Devuelve los bytes escritos (sin el NUL), o
  * 0 si no entró — y en ese caso lo avisa por consola en vez de mandar un frame
  * truncado, que del otro lado sería un registro con campos perdidos.
@@ -392,6 +438,19 @@ wan_data_rta_t wan_frame_data_rta( const char *pcRta, wan_data_ordenes_t *pxOrde
  * parseo y no dos copias.
  *----------------------------------------------------------------------------*/
 bool wan_cclk_parsear( const char *pcRta, RtcTimeType_t *pxHora );
+
+/*------------------------------------------------------------------------------
+ * Pone el RTC en hora desde el reloj del MÓDULO, con el filtro de cordura que
+ * el servidor no necesita: descarta un salto mayor a `WAN_CCLK_SALTO_MAX_SEG`
+ * cuando el equipo ya tiene una hora confiable. Ver el cuerpo.
+ */
+bool wan_rtc_sincronizar_ntp( const RtcTimeType_t *pxNueva );
+
+/*------------------------------------------------------------------------------
+ * La diferencia en segundos entre dos horas (`pxA - pxB`). Expuesta para que
+ * nadie reimplemente la aritmética de fechas, que está validada aparte.
+ */
+int32_t wan_rtc_salto_seg( const RtcTimeType_t *pxA, const RtcTimeType_t *pxB );
 
 bool wan_rtc_sincronizar( const RtcTimeType_t *pxNueva, const char *pcOrigen,
                           bool bSiempre );

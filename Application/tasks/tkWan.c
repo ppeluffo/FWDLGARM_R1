@@ -1180,7 +1180,7 @@ static bool wan_sesion_identificar( void )
 
         if( wan_cclk_parsear( pcRta, &xHora ) )
         {
-            ( void ) wan_rtc_sincronizar( &xHora, "el modulo (NTP)", false );
+            ( void ) wan_rtc_sincronizar_ntp( &xHora );
         }
     }
 

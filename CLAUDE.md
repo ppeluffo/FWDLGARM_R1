@@ -2044,6 +2044,12 @@ el watchdog enciende el **LSI**, ~200 nA.
 | ⛔ **El pote del riel de 3V3 → una FIJA** | se corrió al manipular la placa el 2026-10-09 y nadie lo notó hasta que el ADC lo delató. ⚠ Hacia arriba llega a los 3,45-3,59 V que **hacen fallar el flasheo** |
 | ⏳ *opcional* | un **TVS (SMAJ18A)** en la entrada: el TPS22810 cuelga de la batería 24 h con el mismo máximo absoluto de 20 V que el chip que murió dos veces |
 
+⭐ **Y los que se agregaron el 2026-10-29**, con su propia sección más abajo: el **SHT-40**, el
+**detector de agua** en PB2/PC5, el **`TERM_PWR_ENABLE` en PA11** para el bluetooth de las cajas
+IP68, el footprint del opto con los pines 3/4 cambiados, el relé con 1/12 invertidos (*el datasheet
+los da en **BOTTOM VIEW***) y las `NBIOT5/6` movidas a los pines 9 y 15 del módem. ⚠ La lista viva
+está en **`Hardware/Modificaciones R001.txt`**, que es de Pablo — acá va sólo lo que toca al firmware.
+
 ##### ⚠ La ÚNICA duda que puede obligar a un cambio después de fabricar
 
 **El contador de pulsos.** `R40` drena **312 µA mientras el contacto esté cerrado**, y el ciclo de
@@ -2314,7 +2320,9 @@ confirmación de que algo esté montado ni cableado**. `Hardware/interfases_pine
 | Rieles conmutados (TPS22819, EN=1 prende, pull-down de 100 K) | PC6 `EN_PWR_RS485`, PC7 `EN_PWR_QMBUS`, PB15 `EN_PWR_CPRES` |
 | Fuente lineal de los sensores 4-20 mA | **PB12 `EN_PWR_SENS420`** (EN=1 prende) |
 | Medida del riel de 12 V (TPS22810, EN=1 prende, pull-down) | **PC4 `EN_SENS12V`**, divisor 56K/10K → seguidor TLV8801 → **PB0 `ADC1_IN15`** |
-| Medida del riel de 3,3 V | **existe pero NO se usa** (`EN_SENS3V3` PB2, divisor 56K/56K, PC5): el riel sale de `VREFINT` |
+| ~~Medida del riel de 3,3 V~~ | ⛔ **ELIMINADA en la revisión nueva** (2026-10-29): salía de `VREFINT` y su circuito —load switch en PB2, divisor 56K/56K, un canal del TLV8802— no medía nada. ⭐ Eso **libera PB2 y PC5** |
+| **Sensor de humedad y temperatura** (cajas IP68) | **SHT-40 en el I2C2**, dirección `0x44` — libre contra los 7 dispositivos del bus |
+| **Detector de agua en el gabinete** (cajas IP68) | peine de 2 electrodos: uno por una R a **PB2** (GPIO de excitación), el otro por una red RC a **PC5** (ADC). ⚠ Ver la sección propia: **no dejar el GPIO excitado** |
 | I2C | PB13 SCL, PB14 SDA → **I2C2** (poblado; pull-up de 10 kΩ) |
 | microSD | PA15 `SD_SS`, PC10 `SD_SCK`, PC11 `SD_MISO`, PC12 `SD_MOSI` → **SPI3** (NSS por software), **PD2 `SD_DET`** (a GND con tarjeta, pull-up interno), **PB3 `EN_PWR_SD`** ⚠ **0 = prende** (SI2301 canal P, pull-up de 100 K) |
 | Contador de pulsos CNT0 | **PA12 `CNT0`**, EXTI por flanco de **bajada**, **sin pull interno**. Contacto seco → opto (open-collector con pull-up de 10K a 3V3) → RC de 4K7 / 1 µF → **74AUP2G17** (Schmitt, no inversor) |
@@ -6745,6 +6753,287 @@ desvío queda tapado para siempre*.
 ℓ **Y una arruga menor del mismo tipo**: `reset pedido por la consola` se imprime también cuando el
 reset lo pidió **el servidor** —la línea anterior lo dice—. Un mensaje fijo que nombra al actor
 equivocado manda a buscar al lado equivocado, que es la lección del `help` que mentía sobre el parser.
+
+## ✅ LA PRIMERA INSTALACIÓN DE CAMPO: 188 h, y los tres arreglos que dejó (2026-10-30)
+
+El equipo estuvo instalado del **20 al 28 de octubre**, 188 h de operación, y dejó un
+`EVENTOS.TXT` de 454 líneas. ⭐ **El informe completo está en
+`Informe_campo_2026-10-20_28.pdf`** (y su fuente `.md` al lado); acá va sólo lo que cambia el
+firmware.
+
+| ⭐ Lo que VALIDÓ | |
+|---|---|
+| **188 h sin un reinicio**, con `ARRANCA_WDG = 1` | ⭐⭐ **cero falsos positivos del watchdog**, que era lo único que un banco no puede demostrar |
+| **heap 2992 B en las 41 lecturas, invariable** | ni fuga ni fragmentación en nueve días |
+| Stacks estabilizados en las primeras horas | el peor es `tkSys` al 28 %, en Debug (el peor caso) |
+| `pisados 0` en todo el archivo | **no se perdió un registro** |
+| 60 sesiones OK de 63 (**95,2 %**) | 2.190 registros entregados; las 3 fallas son de red |
+| ⭐ **La curva de batería**: 12,546 → 12,157 V en 7,6 días | **−51 mV/día**, monótona y suave. Primera medida real del consumo del equipo completo |
+| El riel de 3,3 V | **3,284..3,364 V** nueve días: cierra el episodio del pote del 2026-10-09 |
+
+⭐ **Y los tres agregados del 2026-10-20 se pagaron solos**: sin la línea del reloj, sin los
+descartes con delta y sin el resumen cada 6 h, ninguno de los hallazgos de abajo existiría.
+
+### ✅ Los dos casos que se CERRARON sin tocar firmware
+
+| | |
+|---|---|
+| **El modem dejó de registrarse el 28/10 a las 12:39** | ⭐ **era el RETIRO del equipo: le sacaron la antena** (Pablo, 2026-10-30). La fecha coincide |
+| **El RTC deriva +400 ppm (34 s/día)** | el cristal `Y1` **sin sus condensadores de carga**, conocido desde septiembre. ⭐ **El PCB nuevo los lleva** |
+
+⭐⭐ **Y el tramo sin antena VALIDÓ un camino que no se había probado**: 21,5 h sin enlace,
+midiendo y almacenando, sin perder un dato. La ventana fue de 34 a 243 de 1984 — **habría
+aguantado 6 días más**. Los ocho intentos abortaron en **19 s** cada uno porque el chequeo de
+`AT+CIP?` corta antes del PING: la decisión del 5d, ejercitada en campo.
+
+⭐ **La firma de "antena desconectada", que no se puede ver a ojo**: el equipo informó `CSQ 113`,
+que es `rssi = 0` —el piso de la escala—, **y que ese valor llegue prueba que el módulo estaba
+contestando**. O sea: falta la RED, no el módulo ni su alimentación. Distinto de `CSQ 0`, que
+significa que `wan_csq_set()` no llegó a llamarse.
+
+### ✅ ARREGLO 1 de 3 — el cálculo de ppm DESBORDABA (`wan_frame.c`)
+
+```
+26/10/26  RELOJ deriva: +11127 s en 30 h  ->   -15791 ppm      <- son +103.028
+26/10/26  RELOJ deriva: -11125 s en  3 h  ->  +158022 ppm      <- son -1.030.093
+```
+
+`lDesvio * 1000000L` con `long` de **32 bits** desborda a partir de **|desvío| > 2147 s**, y no da
+un número grande sino **uno chico y con el signo cambiado**. Arreglado con `int64_t`.
+
+⭐ **Reproducido en el host antes y después**: la aritmética vieja da **−15791 exacto**, el mismo
+número que informó el equipo en campo. Eso es lo que prueba que la causa es ésta y no una
+plausible. Y el borde cae donde tenía que caer: **2147 s anda, 2148 s desborda**.
+
+⚠ Los tres casos que **no** desbordaban (91, 92, 93 s) dan idéntico en las dos versiones: el
+arreglo no cambia nada donde ya funcionaba.
+
+### ✅ ARREGLO 2 de 3 — el reloj del MÓDULO entregó una hora errada en 3 h, y se aplicó
+
+```
+t=521175  RTC 20:30:47  SESION OK                                    <- reloj bueno
+t=531995  RTC 23:35:50  RELOJ puesto en hora desde el MODULO: -11127 s
+t=532007  RTC 20:30:35  RELOJ puesto en hora desde el SERVIDOR: +11125 s
+```
+
+⛔ **El parser ignoraba el campo del huso.** El comentario decía *"la hora viene en LOCAL, con el
+huso ya aplicado — confirmado en banco el 2026-09-21"*: **una observación de un solo día elevada a
+invariante**, y el campo la refutó.
+
+Lo que entró, en tres piezas:
+
+| | |
+|---|---|
+| `wan_cclk_parsear()` | **lee el huso y exige `WAN_CCLK_HUSO_CUARTOS` (−12 = UTC-3)**. Sin huso, con otro huso o con basura: se descarta |
+| `wan_rtc_sincronizar_ntp()` | ⭐ **descarta un salto > 1 h sobre un reloj ya CONFIABLE**: un cristal no deriva una hora, eso es el módulo equivocado. Con la hora **no** confiable acepta cualquier salto — es el arranque en frío, para lo que esta fuente existe |
+| `lte clock set` | **avisa pero aplica**: ahí hay alguien mirando y lo pidió a propósito |
+
+⭐ **Por qué `wan_rtc_sincronizar_ntp()` es una función aparte y no un parámetro**: a las dos
+fuentes **no se les cree igual**. El servidor es la autoridad del contrato —indexa por fecha—; el
+módulo es una comodidad que ya se demostró que se equivoca. Y **rechazar no cuesta nada**: el
+`CLOCK=` del servidor llega en la misma sesión.
+
+⚠ **El huso se COMPARA, no se aplica.** El campo dice cuál es el huso del lugar, **no si el módulo
+ya lo aplicó** a la hora que manda. Aplicarlo por nuestra cuenta sería adivinar, y adivinar mal
+corre los registros 3 h — el daño que esto viene a evitar.
+
+ℹ️ De yapa, el aviso de deriva **distingue por magnitud**: por encima de
+`WAN_DERIVA_MAX_CRISTAL_PPM` (5000) dice *"esto NO es deriva de cristal, es un SALTO de hora"* y
+manda a mirar quién puso la hora. Con eso el 26/10 se habría cerrado en el acto.
+
+### 🔨 ARREGLO 3 de 3 — el tick atrasa 2,31 %, y ⚠ LA ARITMÉTICA NO CIERRA
+
+```
+el RTC avanzó 185,21 h   mientras el tick contó 180,95 h     (60 intervalos de 3 h)
+el RTC adelanta +430 ppm (lo dice el servidor) ->  EL TICK ATRASA 2,31 %
+```
+
+⛔ **El `dT` del caudal se mide en ticks**, así que eso es **+2,3 % de caudal** en un dato que viaja
+al servidor. **El doble del 1,14 % que se midió en banco**, y la causa es la carga de pulsos:
+
+| | Pulsos/h | Atraso |
+|---|---|---|
+| Test de 48 h (banco) | ~300 | 1,14 % |
+| **Esta instalación** | **~3.950** | **2,31 %** |
+
+⚠ **Y eso debilita el argumento con que se difirió el 2026-10-19** (*"1,1 % es menos que la
+incertidumbre de un caudalímetro"*): **el error crece con el caudal que la instalación mide**.
+
+⛔⛔ **PERO EL ARREGLO DISEÑADO NO ALCANZA, Y HAY QUE DECIRLO.** `LPTIM_COUNTS_POR_TICK` son **2**,
+así que el resto de la división vale 0 ó 1 cuenta —0,488 ms en promedio—:
+
+```
+4800 despertadas/h x 0,488 ms = 2,3 s/h = 651 ppm      de los 23.504 medidos
+```
+
+⭐ **Arrastrar el resto corrige el 3 % del problema.** Está hecho —es correcto y es gratis— pero
+**quien afirme que con eso se arregló se va a equivocar**.
+
+#### ⭐⭐ Por eso entró el INSTRUMENTO, y no un segundo arreglo a ciegas
+
+Es la regla que costó tres días con el ADC: **cuatro "arreglos" guiados por un volcado que mentía
+rompieron código sano**. Acá primero va la medición.
+
+⭐ **El RTC INTERNO del STM32 es el testigo perfecto, y estaba ahí desde `v0.0.3`**: corre del
+**mismo LSE** que el LPTIM del tick —así que el cristal se cancela y lo que queda es exactamente
+lo que pierde el mecanismo—, sigue contando en Stop 2, y nadie lo toca. Antes hacían falta tres
+instrumentos (el log, el MCP79410 y el servidor) para medir una cosa.
+
+```
+cmd>status
+atraso tick : +23504 ppm  (RTC interno 12000 s contra tick 11718 s)
+              4312 sueños, resto rescatado 2106 cuentas = 2056 ms
+```
+
+| Qué entró | Dónde |
+|---|---|
+| El arrastre del resto | `vPortSuppressTicksAndSleep()` |
+| `port_tickless_stats()` — ciclos, cuentas y **el resto rescatado** | `port_lptim_tick.c` |
+| ⭐ `port_tick_vs_rtc()` — el tick contra el RTC interno | ídem |
+| La línea en `status` y otra en el `RESUMEN` del registro | `tkCmd.c`, `tkSys.c` |
+| **`port_lptim_tick.h`**, nuevo | y `PORT_SIN_TICKLESS` **se mudó ahí**: lo necesitan dos unidades de compilación, igual que `ARRANCA_WDG` en `main.h` |
+
+⚠ **`port_tick_vs_rtc()` se llama desde el POLEO, no desde el resumen**, y no es un detalle:
+acumula **diferencias cortas** entre llamadas, que es lo que le permite corregir el cruce de
+medianoche sin conocer la fecha. Llamándola sólo cada 6 h, cada intervalo caería fuera del filtro
+de cordura y no acumularía nunca.
+
+#### ⏳ El sospechoso que queda, SIN CONFIRMAR
+
+Cada ciclo de sueño para y rearranca el LPTIM **dos veces**, y `LPTIM_Disable()` de la HAL no es
+barato: hace `__HAL_RCC_LPTIM1_FORCE_RESET()` y después reprograma esperando **`CMPOK`, `ARROK` y
+`REPOK`** —tres flags de ~92 µs—. ⛔ **Durante todo eso el contador está reseteado y el tiempo real
+corre sin contarse.** Para explicar 83 s/h harían falta ~20 ms por ciclo, así que esto por sí solo
+tampoco alcanza con las cuentas de arriba.
+
+⭐ **No se toca hasta que el instrumento hable.** El número que lo va a cerrar es
+`atraso_ppm / sueños`: los µs que se pierden por ciclo apuntan al lugar exacto.
+
+#### ⏳ Lo que falta del arreglo 3
+
+| | |
+|---|---|
+| **Correr el banco con el instrumento** y leer `status` | dice cuánto perdió el resto (ya corregido) y cuánto falta |
+| ⚠ **A la cadencia de campo**, ~4.000 pulsos/h | es donde el defecto se manifiesta al doble; con los 300/h del test de octubre se ve la mitad |
+| El arreglo de fondo, cuando el instrumento lo señale | toca el port, que está validado desde `v0.0.5`: va en un commit aparte |
+
+### ⏳ ARREGLO 4 — la deriva en el PCB nuevo: el instrumento está listo, falta la placa
+
+No es desarrollo: **es una medición que hace el propio equipo**. Lo que se dejó preparado:
+
+- el cálculo de ppm **ya no miente** (arreglo 1), que era la condición para poder creerle;
+- el aviso dice **qué esperar**: *"la placa SIN condensadores daba ~+400 ppm; el PCB nuevo SÍ los
+  lleva, y ahí esto tiene que caer a pocas ppm"*.
+
+⭐ **Criterio de aceptación del cambio de hardware**: leer el `EVENTOS.TXT` de la primera semana del
+PCB nuevo y ver la línea `RELOJ deriva`. Si sigue en cientos de ppm, los condensadores están mal
+puestos o no corresponden al `CL` del cristal.
+
+⭐⭐ **Y el arreglo de hardware convierte una alarma inútil en un detector**: hoy el aviso de
+±20 ppm salta en **cada** corrección —porque está siempre fuera— así que no informa nada. Con el
+cristal bueno, si salta es que algo cambió.
+
+### ⚠ Lo que esta corrida dice que NO hay que hacer
+
+| | |
+|---|---|
+| **No agrandar stacks, buffers ni heap** | nueve días de datos: heap invariable, peor stack al 28 %, y todo en Debug. Y los márgenes de hoy **son el detector**: con el doble de margen, una tarea que empiece a consumir el triple no se vería hasta tarde |
+| **No perseguir los descartes del contador** | 1.145 de los 1.208 cayeron el **22/10 entre 12:36 y 19:46**, con pico de ~10/min; otro episodio chico el 28/10. `imposibles = 0` siempre. ⭐ Episodio acotado, no defecto permanente — pero vale observarlo en la próxima instalación |
+
+## ⏳ SENSOR DE HUMEDAD Y DETECTOR DE AGUA — diseñado, el PCB todavía no existe (2026-10-29)
+
+Para los equipos que van en **cajas IP68**: un **SHT-40** de temperatura y humedad en el I2C2, y un
+**peine de 2 electrodos** que detecta si está entrando agua al gabinete. La lista completa de
+modificaciones de hardware la lleva Pablo en **`Hardware/Modificaciones R001.txt`**; acá va sólo lo
+que toca al firmware.
+
+⚠ **No hay una línea de firmware escrita, y es a propósito**: la regla del bring-up es **no escribir
+código para hardware que no está montado**. Lo que sigue es lo verificado y lo que queda por decidir,
+para llegar al PCB con las decisiones tomadas.
+
+### ✅ PB2 y PC5 quedan libres, y lo que los libera es la modificación 2 de Pablo
+
+```
+Modificaciones R001.txt, 2- ANALOG INPUTS
+"...eliminamos el load switch y el op-amp que mide el 3V3.
+ Reemplazamos el operacional TLV8802 por un TLV8801 (1 solo canal)"
+```
+
+⭐ **Eso es exactamente lo que ocupaba los dos pines**: el load switch era `EN_SENS3V3` en **PB2**, y
+**PC5** era la salida del segundo canal del TLV8802.
+
+⚠⚠ **Y que el opamp se vaya no es un detalle, es lo que hace viable el diseño.** Si ese canal hubiera
+quedado, PC5 estaría atado a una **salida de baja impedancia**: un electrodo de decenas o cientos de
+kΩ no puede mover ese nodo, y el ADC habría leído al TLV8802 en vez del agua — una medida perfecta de
+la cosa equivocada, que es el modo de falla favorito de este proyecto.
+
+✅ En el firmware también están libres, verificado en el **`.c` generado** y no en el `.ioc`:
+
+```
+GPIOA: PA5 PA6 PA7 PA12 PA15     GPIOB: PB3 PB5 PB9 PB12 PB15
+GPIOC: PC4 PC6 PC7 PC13          GPIOD: PD2          <- ni PB2 ni PC5
+```
+
+### ✅ PB2 NO es BOOT1 en el L4 — se verificó porque en otras familias SÍ lo es
+
+```
+DS11585 : "BOOT0 value may come from the PH3-BOOT0 pin or from an option bit"
+RM0351  : "The BOOT1 value is the opposite of the nBOOT1 Option Bit"
+```
+
+⭐ **BOOT0 es un pin dedicado (`PH3`) y BOOT1 es un bit de `FLASH_OPTR`**, así que PB2 es un GPIO
+común y su nivel al arrancar no decide nada. En un F1 o un F4 esto habría sido un problema real: el
+peine dejaría el pin en un nivel u otro según hubiera agua, y el micro arrancaría del bootloader.
+
+### ⏳ El canal de ADC de PC5 NO está confirmado
+
+**`PB0 = ADCx_IN15`** sí lo está, en dos `.ioc` del proyecto. Pero PC5 nunca se asignó en ninguno y
+la tabla de *additional functions* del datasheet no sobrevivió a la extracción del PDF.
+
+⚠ Por la secuencia `PC4=13, PC5=14, PB0=15` debería ser **`ADC1_IN14`**, y eso cierra con el IN15
+verificado — **pero no está comprobado**. ⭐ **Lo resuelve CubeMX al asignar el pin**, que es la fuente
+que vale. Es la lección del volcado de `ADC_CR` mal decodificado: las posiciones no se ponen de
+memoria.
+
+⭐ **Y el ADC ya está configurado para una fuente de alta impedancia**: el `.ioc` tiene
+`ADC_SAMPLETIME_640CYCLES_5` (~43 µs), elegido en su momento por el TLV8801 *nanopower*. Es justo lo
+que un electrodo de cientos de kΩ necesita para cargar el capacitor de muestreo del ADC.
+⚠ **Ese tiempo se configura POR CANAL**: si PC5 entra con el default, la conversión corta antes de que
+el nodo se asiente y la lectura sale **baja** — o sea, parecería *menos agua*, que es el error que no
+se quiere.
+
+### ⛔⛔ Lo que puede arruinar el detector: la ELECTRÓLISIS
+
+Es el punto de diseño de esta etapa, y **no se arregla en el PCB sino en el firmware**. Si el GPIO de
+excitación queda en alto de forma permanente:
+
+| | |
+|---|---|
+| **Consumo** | con agua de red entre los electrodos (~10-50 kΩ) y una R de 100 kΩ son **20-30 µA permanentes**: cuatro o cinco veces el reposo de 6 µA del equipo entero |
+| ⛔ **Electrólisis** | corriente **continua** por un electrolito descompone el agua y **corroe el electrodo positivo**. En semanas el peine se pasiva, la medida deriva, y **no hay ningún síntoma hasta que el sensor miente** |
+
+⭐ **Las dos se resuelven con el patrón que la placa ya usa en todos lados** —`EN_PWR_SENS420`, el
+divisor de 12 V, el pull-up de `SD_DET`—: **excitar sólo durante la medición**. El GPIO en analógico
+o Hi-Z el resto del tiempo, alto unos pocos ms en cada poleo. Con 1 ms cada 5 minutos el ciclo de
+trabajo es del 0,0003 % y los dos problemas desaparecen.
+
+⭐⭐ **Y para que el peine dure años: alternar la POLARIDAD entre medidas.** Una vez excitando desde
+el GPIO, la siguiente al revés; la carga neta queda en cero y la electrólisis se cancela sola. Es lo
+que hace cualquier sensor de conductividad serio y cuesta unas pocas líneas.
+
+⚠ **Consecuencia que el PCB sí tiene que contemplar**: con el GPIO en Hi-Z el nodo del ADC **flota**,
+así que hace falta un **pull-down físico** que defina el *"sin agua = 0 V"*. Y ése, junto con el C de
+la red RC, fija cuánto hay que esperar entre excitar y convertir.
+
+### ⏳ Lo que queda por decidir antes de fabricar
+
+| | |
+|---|---|
+| ⭐ **El dimensionado** | R de excitación, pull-down y C. Depende de **qué tiene que disparar la alarma**: distinguir *condensación* de *agua acumulada* es el requisito que fija los umbrales |
+| ⚠ La conductividad **varía 100×** con la pureza del agua | así que el umbral no puede ser absoluto; conviene pensarlo como *"más conductivo que X"* y no como un valor de volts |
+| El SHT-40 | dirección **`0x44`**, libre contra los 7 del bus (`0x41`, `0x50`, `0x51`, `0x57`, `0x58`, `0x59`, `0x6F`). ⚠ Confirmar la variante: `-AD1B` es 0x44 y `-BD1B` es 0x45 |
+| ⚠ El calefactor del SHT-40 | son decenas de mA: no usarlo salvo a demanda, y nunca en el poleo |
+| ⏳ Los campos nuevos en el frame | el `dataRcd` está en **62 de 64 bytes**: agregar humedad, temperatura y el nivel de agua **no entra**, y el `_Static_assert` lo va a decir. Hay que decidir entre subir el registro a 72 B (1763 registros en vez de 1984) o sacar algo — ⚠ y **antes de que haya equipos con datos guardados**, porque cambiar el tamaño invalida lo grabado |
 
 ## ⏸ ACTUALIZAR EL FIRMWARE DESDE LA microSD — diseñado, DIFERIDO al post-soak (2026-10-12)
 
