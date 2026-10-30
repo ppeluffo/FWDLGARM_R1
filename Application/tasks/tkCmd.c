@@ -6056,12 +6056,22 @@ static void cmdFw( void )
     fw_info_t   xInfo;
     fw_result_t xRes;
     /*
+     * ⛔⛔ `FRTOS_CMD_makeArgv()` HAY QUE LLAMARLO: `argv` NO se llena solo.
+     *
+     * Sin esta línea `argv[1]` devuelve **lo que dejó el comando anterior** —no
+     * NULL, no basura: el argumento de OTRA invocación—. Compila perfecto y en
+     * el banco se vio como que el nombre de archivo "no llegaba", cuando en
+     * realidad llegaba el de antes. Es la familia del `init` que falta y no
+     * rompe el link.
+     *
      * ⭐ El nombre es OPCIONAL, y no es sólo para el banco: en campo, poder
      * examinar un archivo concreto —uno que un técnico dejó con otro nombre, o
-     * el `.OK` de una actualización anterior— sin tener que renombrarlo con una
-     * PC al lado, vale. Por omisión, el que el equipo aplicaría solo.
+     * el `.OK` de una actualización anterior— sin renombrarlo con una PC al
+     * lado, vale. Por omisión, el que el equipo aplicaría solo.
      */
-    const char *pcArchivo = ( argv[ 1 ] != NULL ) ? argv[ 1 ] : FW_UPDATE_ARCHIVO;
+    uint8_t     ucArgs    = FRTOS_CMD_makeArgv();
+    const char *pcArchivo = ( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) )
+                            ? argv[ 1 ] : FW_UPDATE_ARCHIVO;
     /* ⚠ En TICKS, y la conversión a ms al final sobre la DIFERENCIA.
        `configTICK_RATE_HZ / 1000` es 512/1000 = **0** en aritmética entera, o
        sea una división por cero — el compilador la caza, que es exactamente
@@ -6071,7 +6081,7 @@ static void cmdFw( void )
     xprintf( "\r\nFW:: el que esta CORRIENDO\r\n" );
     xprintf( "  version    : %s  (%s)\r\n", FW_VERSION, FW_FECHA );
     xprintf( "  hardware   : %s\r\n", FW_HW );
-    xprintf( "  banco      : 512 KB por banco; esta imagen son %lu KB\r\n",
+    xprintf( "  banco      : %lu KB (la flash son 2 bancos de ese tamaño)\r\n",
              ( unsigned long ) ( FW_UPDATE_BANCO_BYTES / 1024UL ) );
 
     xprintf( "\r\nFW:: mirando la microSD (%s)...\r\n", pcArchivo );

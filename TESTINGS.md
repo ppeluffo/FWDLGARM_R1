@@ -485,3 +485,67 @@ espera a que el instrumento hable. Es la regla que costó tres días con el ADC.
 | **Medir el consumo del modem** | el 82 % del presupuesto de energía, y el único dato estimado |
 | El PCB nuevo | leer `RELOJ deriva` en la primera semana: criterio de aceptación de los condensadores de `Y1` |
 | Observar los descartes del contador | 1.145 en un episodio de 7 h el 22/10; si reaparece, mirar el contacto y el filtro |
+
+---
+
+## Test 5 — El autoupdate, etapa 2: examinar la tarjeta (2026-10-30, banco)
+
+Los 8 casos del comando `fw`, con los archivos que fabrica `Tools/mkfw_casos.py` a partir del
+binario **que estaba flasheado** (Debug, 249.512 B de imagen).
+
+### ✅ Resultado: 8 de 8
+
+| Caso | Qué ejercita | Resultado | ms |
+|---|---|---|---|
+| `fw` | ⭐ el camino **por omisión**, el que usará el arranque | misma versión | 1667 |
+| `fw FWOK.BIN` | el binario que corre | misma versión | 1664 |
+| `fw FWNUEVO.BIN` | versión distinta | **hay un firmware nuevo y válido** | 1654 |
+| ⭐⭐ `fw FWIMGMAL.BIN` | **1 byte cambiado en 249.512** | la imagen está CORRUPTA | 1664 |
+| ⭐ `fw FWHDRMAL.BIN` | header tocado sin rehacer su CRC | el header está CORRUPTO | 541 |
+| ⭐ `fw FWOTROHW.BIN` | firmware de otro producto | es el firmware de OTRO producto | 574 |
+| `fw FWBASURA.BIN` | texto plano | no es un firmware de este mecanismo | 580 |
+| `fw FWCORTO.BIN` | largo declarado 8 B menor | el largo no cierra | 560 |
+
+### ⭐⭐ Lo que vale: el CRC cazó UN byte en 249.512
+
+```
+CRC : declarado 0xF4F85A35 / leido 0x4D922858   <- NO COINCIDEN
+```
+
+El header de ese archivo estaba **perfecto** —versión, hardware y largo correctos— así que la única
+defensa era el CRC. **Es el caso que justifica todo el mecanismo**: si fallara, la etapa 3
+escribiría basura en la flash con total confianza.
+
+⭐ Y el caso bueno dio **`0xF4F85A35`, el mismo que calculó `zlib` en la PC**: la cadena cierra de
+punta a punta —Python → archivo → microSD → FatFs → el C del firmware— sobre 249 KB reales.
+
+### ⭐ Los TIEMPOS prueban que el orden de las validaciones es el correcto
+
+| | |
+|---|---|
+| Los 4 que **leen la imagen entera** | **1654-1667 ms** |
+| Los 4 que **rechazan por el header** | **541-580 ms** |
+
+Lo barato primero: un archivo que no es nuestro, que es de otro producto o que tiene el header roto
+se rechaza **sin leer 249 KB**. La lectura completa se paga sólo cuando el header dice que vale la
+pena.
+
+### ⛔ Los dos bugs que costó llegar acá, y los dos son del MISMO tipo
+
+**1. `argv` NO se llena solo: hay que llamar a `FRTOS_CMD_makeArgv()`.** Sin esa llamada `argv[1]`
+devuelve **el argumento del comando anterior** —no NULL, no basura—. Compila perfecto, y en el banco
+se vio como *"el nombre de archivo no llega"*.
+
+**2. Y el mensaje de `fwNO_HAY` nombra el archivo EQUIVOCADO**: dice *"la tarjeta no tiene
+FIRMWARE.BIN"* aunque se haya pedido otro. ⛔ **Eso me costó una vuelta entera**: leí ese texto y
+supuse que el argumento seguía sin llegar, cuando lo que pasaba era que los archivos no estaban
+copiados. El firmware tenía razón; el mensaje mentía sobre cuál.
+
+⚠ Es la familia del `help` que mentía sobre el parser y del *"reset pedido por la consola"* cuando
+lo pedía el servidor: **un diagnóstico que nombra la cosa equivocada manda a buscar al lado
+equivocado**. Pendiente de corregir con la etapa 3.
+
+### ⏳ Lo que este test NO probó
+
+Nada de flash: **la etapa 2 no escribe un solo byte**. Lo que queda es escribir el banco 2 (etapa 3),
+el commit por `BFB2` (4) y el rollback (5).
