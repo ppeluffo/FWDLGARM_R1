@@ -2265,11 +2265,31 @@ build — pero:
   (`/home/pablo/Spymovil/.../FWDLGARM_R1/STM32L496RGTX_FLASH.ld`). Mover el árbol rompe el build
   hasta regenerarlo desde el IDE.
 
-### Flasheo — lo hace Pablo
+### ⭐ Flasheo: lo hace CLAUDE desde el 2026-10-30
 
-**Flashea Pablo, no Claude**, desde la GUI de **STM32CubeIDE** o de **STM32CubeProgrammer**. No
-lanzar comandos de programación por cuenta propia; si hace falta un binario nuevo, compilarlo y
-avisar. Con ese flujo **el firmware arranca solo al terminar el download**, sin ciclo de
+**Cambio de regla, decidido por Pablo** durante la etapa 4 del autoupdate: *"¿por qué no usás vos el
+programador?"* → **opción C: Claude flashea y escribe option bytes sin preguntar, avisando antes de
+algo irreversible.**
+
+El motivo fue la fricción medida, no una preferencia: el ciclo compilar → bajar → probar → corregir
+se repetía muchas veces por sesión y **cada vuelta costaba una intervención manual**. Con el
+procedimiento ya probado y el equipo en el banco, el costo superaba al riesgo.
+
+```bash
+P=~/st/stm32cubeide_2.2.0/plugins/com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.linux64_*/tools/bin
+$P/STM32_Programmer_CLI -c port=SWD freq=950 mode=UR -w Debug/FWDLGARM_R1.elf   # flashear
+$P/STM32_Programmer_CLI -c port=SWD freq=950 mode=UR -ob BFB2=0                 # option bytes
+```
+
+⚠ **`freq=950` SIEMPRE, nunca `Auto`** (ver el punto 4 de la sección del programador), y **`mode=UR`
+cuando el firmware puede estar colgado o durmiendo**: con el tickless el micro vive en Stop 2 y en
+`Normal` la conexión pierde la carrera.
+
+⚠ **Lo que sigue siendo de Pablo**: medir el consumo, mover hardware, y poner o sacar la microSD.
+
+> **(histórico)** La regla anterior era *"flashea Pablo, no Claude"*. Se respetó hasta el
+> 2026-10-30, y bajo ella Claude ya usaba la CLI **para diagnóstico** —leer registros por SWD—, que
+> la propia regla permitía: la frontera era **leer sí, escribir no**. Con ese flujo **el firmware arranca solo al terminar el download**, sin ciclo de
 alimentación.
 
 El archivo a cargar en CubeProgrammer es el **`.elf`** (`Debug/FWDLGARM_R1.elf`): lleva las
@@ -7309,6 +7329,72 @@ están en el árbol**, que es el error confuso de siempre.
 
 ℓ Verificado acá linkeando a mano con el `.o` agregado: **Debug queda en 248.084 B de text**, o sea
 **+2.792 bytes** por las dos etapas.
+
+### ⛔⛔ ETAPA 4 NO FUNCIONA: con `BFB2=1` el micro NO EJECUTA (2026-10-30)
+
+Tres hipótesis mías refutadas en fila, y recién la cuarta medición dio un dato que no admite otra
+lectura. **Lo que sigue son hechos medidos**, no interpretación:
+
+```
+BL Version : 0x93                 <- el bootloader del chip es V9.3
+0x00000000 : 20003060  == 0x1FFF0000   <- el alias de boot ES la system memory
+0x00000004 : 1FFF5237  == 0x1FFF0004      (los cuatro words coinciden)
+RCC_CR     : 0x00000063   MSI 4 MHz, ⛔ HSI APAGADO
+RCC_CFGR   : 0x00000000   ⛔ reset PURO: SW=MSI, sin PLL
+RCC_CSR    : 0x16000600   OBL + PIN + SFT   — ✅ SIN IWDG
+banco 1 (0x08000000) SP = 0x2003FFF8      banco 2 (0x08080000) SP = 0x2003FFF8
+```
+
+⭐⭐ **`RCC_CFGR = 0` y el HSI apagado son la prueba**: la Tabla 172 del AN2606 dice que el
+bootloader *"usa el HSI como fuente del system clock configurado a **72 MHz**"*, y nuestro firmware
+deja `SYSCLK = PLL`. **Ninguno de los dos corrió.** El micro arranca en la system memory y **se
+detiene ahí sin ejecutar una instrucción**.
+
+⛔ Y no es el watchdog: `RCC_CSR` no tiene `IWDGRSTF`.
+
+#### ⛔⛔ Y la Figura 102 dice LO CONTRARIO de lo que yo había extraído
+
+Leída **como imagen** (pág. 414) y no como texto, la rama `Boot0 = 0` —la nuestra— es:
+
+```
+If value of first address of Bank2 is within int. SRAM address?
+   si  -> Set Bank Swap to Bank2 -> Jump to user code in Bank2
+   no  -> lo mismo con Bank1 -> Jump to user code in Bank1
+             no -> Protection level2? -> no -> Continue Bootloader execution
+```
+
+⚠ **Con los dos bancos en `SP = 0x2003FFF8` —dentro de SRAM1— el bootloader TENDRÍA que saltar al
+banco 2.** No lo hace, y además ni siquiera llega a configurar su propio reloj.
+
+⭐ La llamada `(1)` que define *"within int. SRAM address"* **no está definida en ninguna parte del
+AN2606**: es una nota al pie sin texto. Verificado por búsqueda en las 553 páginas.
+
+#### ⛔ Lo que quedó DESCARTADO, cada uno con su medición
+
+| Sospechoso | Cómo se descartó |
+|---|---|
+| El binario del banco 2 | se escribió una **copia bit a bit del banco 1** y tampoco arranca |
+| `mkfw.py` y `fw grabar` | el banco 2 releído por SWD coincide con el archivo: **0 bytes distintos en 256.080** |
+| ⚠ **`_estack = 0x20040000`** (fuera de SRAM1 por 1 byte) | corregido a **`0x2003FFF8`** y **sigue sin arrancar**. ⭐ El cambio **se conserva igual**: el criterio de ST es correcto y cuesta 8 bytes |
+| El reloj que deja el bootloader (HSI 72 MHz) | **no alcanza a configurarlo**: `RCC_CR` lo muestra apagado |
+| NRST trabado | un `-hardRst` no cambió nada, y Pablo cicló la alimentación |
+| El watchdog | `RCC_CSR` sin `IWDGRSTF` |
+
+✅ **Y el equipo se recupera SIEMPRE con `-ob BFB2=0`**, las cuatro veces — el banco 1 nunca se tocó,
+que era justamente la premisa del diseño atómico. Las etapas 1, 2 y 3 **siguen validadas**.
+
+#### ⏳ El sospechoso que queda, y por qué no lo puedo cerrar solo
+
+**`PH3-BOOT0`**: con `nSWBOOT0 = 1` el BOOT0 sale **del pin**, no de un bit. Si en R001 ese pin no
+está cableado y flota, el Pattern 6 pasa a ser indeterminado — y su **primera** condición
+(`Boot0(pin) = 1, nBoot1 = 1 y nBoot0_SW = 1`) manda al bootloader.
+
+⚠ Con `BFB2 = 0` eso no se nota, porque ahí el micro arranca de la flash igual. **Hay que mirar PH3
+en el esquemático de R001** antes de seguir.
+
+⭐⭐ **Y hay una salida que NO depende de nada de esto**, para cuando se decida: poner `nSWBOOT0 = 0`
+y `nBOOT0 = 1`, con lo que BOOT0 pasa a ser un **bit** y deja de depender del pin. Es un option byte
+más, del mismo riesgo y la misma reversibilidad que `BFB2`.
 
 ### ⏳ Lo que falta, por riesgo creciente
 

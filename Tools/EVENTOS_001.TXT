@@ -1,0 +1,251 @@
+26/10/19 14:40:36 t=10 ==== ARRANQUE fw 0.0.19 (Oct 19 2026 14:31:44) | reset por BOR/POR (alimentacion) | modo CONTINUO | timerpoll 60 s, timerdial 3600 s
+26/10/19 14:40:37 t=11 RESUMEN: up 0 h | heap 2992 B | stack libre (palabras) sys 793/1024 wan 1927/2048 cmd 821/1024 ctl 359/384 cpres 485/512
+26/10/19 14:40:37 t=11 RESUMEN: ventana 1/1984, pisados 0 | wan: vaciados ok 0, sesiones fallidas 0, registros enviados 0 | sd postergadas 0 | rtu descartados 0
+26/10/19 14:40:37 t=11 RESUMEN: cnt total 0, cortos 0, imposibles 0
+26/10/19 14:40:37 t=11 RESUMEN: bt3v3 3.299..3.299 V | bt12v 10.381..10.381 V (en 1 poleos)
+26/10/19 14:40:46 t=20 ENLACE en 10 s: CSQ -57 dBm, 1 PING(s)
+26/10/19 14:40:47 t=21 CONF_ALL: el servidor pide reconfigurar: BASE
+26/10/19 14:40:51 t=25 el servidor pide RESET: reiniciando
+26/10/19 14:40:51 t=25 reset pedido por la consola
+26/10/19 14:41:02 t=10 ==== ARRANQUE fw 0.0.19 (Oct 19 2026 14:31:44) | reset por SOFT (consola o servidor) | modo DISCRETO | timerpoll 60 s, timerdial 900 s
+26/10/19 14:41:03 t=11 RESUMEN: up 0 h | heap 2992 B | stack libre (palabras) sys 793/1024 wan 1927/2048 cmd 870/1024 ctl 359/384 cpres 485/512
+26/10/19 14:41:03 t=11 RESUMEN: ventana 1/1984, pisados 0 | wan: vaciados ok 0, sesiones fallidas 0, registros enviados 0 | sd postergadas 0 | rtu descartados 0
+26/10/19 14:41:03 t=11 RESUMEN: cnt total 0, cortos 0, imposibles 0
+26/10/19 14:41:03 t=11 RESUMEN: bt3v3 3.284..3.284 V | bt12v 10.553..10.553 V (en 1 poleos)
+26/10/19 14:41:13 t=21 ENLACE en 10 s: CSQ -77 dBm, 1 PING(s)
+26/10/19 14:41:14 t=22 CONF_ALL: CONFIG=OK
+26/10/19 14:41:15 t=23 SESION OK en 13 s: 1 registros enviados, quedan 0
+26/10/19 14:42:39 t=10 ==== ARRANQUE fw 0.0.19 (Oct 19 2026 14:31:44) | reset por BOR/POR (alimentacion) | modo DISCRETO | timerpoll 60 s, timerdial 900 s
+26/10/19 14:42:41 t=11 RESUMEN: up 0 h | heap 2992 B | stack libre (palabras) sys 793/1024 wan 1927/2048 cmd 870/1024 ctl 359/384 cpres 485/512
+26/10/19 14:42:41 t=11 RESUMEN: ventana 2/1984, pisados 0 | wan: vaciados ok 0, sesiones fallidas 0, registros enviados 0 | sd postergadas 0 | rtu descartados 0
+26/10/19 14:42:41 t=11 RESUMEN: cnt total 0, cortos 0, imposibles 0
+26/10/19 14:42:41 t=11 RESUMEN: bt3v3 3.304..3.304 V | bt12v 10.454..10.454 V (en 1 poleos)
+26/10/19 14:42:50 t=20 ENLACE en 10 s: CSQ -77 dBm, 1 PING(s)
+26/10/19 14:42:51 t=22 CONF_ALL: CONFIG=OK
+26/10/19 14:42:53 t=24 SESION OK en 14 s: 2 registros enviados, quedan 0
+26/10/19 14:58:18 t=940 ENLACE en 15 s: CSQ -65 dBm, 1 PING(s)
+26/10/19 14:58:19 t=941 CONF_ALL: CONFIG=OK
+26/10/19 14:58:35 t=957 SESION OK en 33 s: 15 registros enviados, quedan 0
+26/10/19 15:13:55 t=1868 ENLACE en 10 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 15:13:56 t=1869 CONF_ALL: CONFIG=OK
+26/10/19 15:14:12 t=1885 SESION OK en 28 s: 15 registros enviados, quedan 1
+26/10/19 15:29:37 t=2801 ENLACE en 15 s: CSQ -65 dBm, 1 PING(s)
+26/10/19 15:29:38 t=2802 CONF_ALL: CONFIG=OK
+26/10/19 15:29:55 t=2819 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 15:45:15 t=3730 ENLACE en 10 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 15:45:16 t=3731 CONF_ALL: CONFIG=OK
+26/10/19 15:45:33 t=3749 SESION OK en 29 s: 16 registros enviados, quedan 0
+26/10/19 16:00:58 t=4665 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 16:00:59 t=4666 CONF_ALL: CONFIG=OK
+26/10/19 16:01:15 t=4682 SESION OK en 33 s: 15 registros enviados, quedan 0
+26/10/19 16:16:35 t=5593 ENLACE en 10 s: CSQ -57 dBm, 1 PING(s)
+26/10/19 16:16:36 t=5594 CONF_ALL: CONFIG=OK
+26/10/19 16:16:53 t=5611 SESION OK en 29 s: 16 registros enviados, quedan 0
+26/10/19 16:32:13 t=6522 ENLACE en 10 s: CSQ -79 dBm, 1 PING(s)
+26/10/19 16:32:14 t=6523 CONF_ALL: CONFIG=OK
+26/10/19 16:32:30 t=6539 SESION OK en 28 s: 15 registros enviados, quedan 0
+26/10/19 16:47:50 t=7450 ENLACE en 10 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 16:47:51 t=7451 CONF_ALL: CONFIG=OK
+26/10/19 16:48:08 t=7468 SESION OK en 29 s: 16 registros enviados, quedan 0
+26/10/19 17:03:28 t=8379 ENLACE en 10 s: CSQ -79 dBm, 1 PING(s)
+26/10/19 17:03:29 t=8380 CONF_ALL: CONFIG=OK
+26/10/19 17:03:45 t=8397 SESION OK en 28 s: 15 registros enviados, quedan 0
+26/10/19 17:19:10 t=9313 ENLACE en 15 s: CSQ -69 dBm, 1 PING(s)
+26/10/19 17:19:11 t=9314 CONF_ALL: CONFIG=OK
+26/10/19 17:19:28 t=9331 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 17:34:53 t=10247 ENLACE en 15 s: CSQ -65 dBm, 1 PING(s)
+26/10/19 17:34:54 t=10248 CONF_ALL: CONFIG=OK
+26/10/19 17:35:10 t=10264 SESION OK en 33 s: 15 registros enviados, quedan 0
+26/10/19 17:50:35 t=11180 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 17:50:36 t=11181 CONF_ALL: CONFIG=OK
+26/10/19 17:50:53 t=11198 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 18:06:18 t=12114 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 18:06:19 t=12115 CONF_ALL: CONFIG=OK
+26/10/19 18:06:35 t=12132 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/19 18:21:55 t=13043 ENLACE en 10 s: CSQ -63 dBm, 1 PING(s)
+26/10/19 18:21:56 t=13044 CONF_ALL: CONFIG=OK
+26/10/19 18:22:13 t=13061 SESION OK en 29 s: 16 registros enviados, quedan 0
+26/10/19 18:37:38 t=13977 ENLACE en 15 s: CSQ -79 dBm, 1 PING(s)
+26/10/19 18:37:39 t=13978 CONF_ALL: CONFIG=OK
+26/10/19 18:37:55 t=13994 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/19 18:53:20 t=14910 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 18:53:21 t=14911 CONF_ALL: CONFIG=OK
+26/10/19 18:53:38 t=14928 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 19:09:03 t=15844 ENLACE en 15 s: CSQ -79 dBm, 1 PING(s)
+26/10/19 19:09:04 t=15845 CONF_ALL: CONFIG=OK
+26/10/19 19:09:20 t=15861 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/19 19:24:45 t=16777 ENLACE en 15 s: CSQ -79 dBm, 1 PING(s)
+26/10/19 19:24:46 t=16778 CONF_ALL: CONFIG=OK
+26/10/19 19:25:03 t=16796 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 19:40:28 t=17712 ENLACE en 15 s: CSQ -65 dBm, 1 PING(s)
+26/10/19 19:40:29 t=17713 CONF_ALL: CONFIG=OK
+26/10/19 19:40:46 t=17730 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 19:56:05 t=18641 ENLACE en 10 s: CSQ -73 dBm, 1 PING(s)
+26/10/19 19:56:06 t=18642 CONF_ALL: CONFIG=OK
+26/10/19 19:56:23 t=18658 SESION OK en 28 s: 15 registros enviados, quedan 0
+26/10/19 20:11:42 t=19569 ENLACE en 10 s: CSQ -77 dBm, 1 PING(s)
+26/10/19 20:11:43 t=19570 CONF_ALL: CONFIG=OK
+26/10/19 20:12:00 t=19586 SESION OK en 28 s: 15 registros enviados, quedan 1
+26/10/19 20:27:24 t=20502 ENLACE en 15 s: CSQ -77 dBm, 1 PING(s)
+26/10/19 20:27:25 t=20503 CONF_ALL: CONFIG=OK
+26/10/19 20:27:43 t=20521 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 20:43:07 t=21437 ENLACE en 15 s: CSQ -77 dBm, 1 PING(s)
+26/10/19 20:43:08 t=21438 CONF_ALL: CONFIG=OK
+26/10/19 20:43:26 t=21455 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 20:58:50 t=22371 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 20:58:51 t=22372 CONF_ALL: CONFIG=OK
+26/10/19 20:59:08 t=22388 SESION OK en 33 s: 15 registros enviados, quedan 0
+26/10/19 21:14:32 t=23304 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 21:14:33 t=23305 CONF_ALL: CONFIG=OK
+26/10/19 21:14:51 t=23322 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 21:30:15 t=24238 ENLACE en 15 s: CSQ -79 dBm, 1 PING(s)
+26/10/19 21:30:16 t=24239 CONF_ALL: CONFIG=OK
+26/10/19 21:30:33 t=24255 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/19 21:45:57 t=25171 ENLACE en 15 s: CSQ -63 dBm, 1 PING(s)
+26/10/19 21:45:58 t=25173 CONF_ALL: CONFIG=OK
+26/10/19 21:46:16 t=25190 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 22:01:40 t=26106 ENLACE en 15 s: CSQ -77 dBm, 1 PING(s)
+26/10/19 22:01:41 t=26107 CONF_ALL: CONFIG=OK
+26/10/19 22:01:58 t=26123 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/19 22:17:22 t=27039 ENLACE en 15 s: CSQ -75 dBm, 1 PING(s)
+26/10/19 22:17:23 t=27040 CONF_ALL: CONFIG=OK
+26/10/19 22:17:41 t=27057 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 22:33:05 t=27973 ENLACE en 15 s: CSQ -73 dBm, 1 PING(s)
+26/10/19 22:33:06 t=27974 CONF_ALL: CONFIG=OK
+26/10/19 22:33:24 t=27991 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 22:48:48 t=28907 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 22:48:49 t=28908 CONF_ALL: CONFIG=OK
+26/10/19 22:49:06 t=28925 SESION OK en 33 s: 15 registros enviados, quedan 0
+26/10/19 23:04:30 t=29841 ENLACE en 15 s: CSQ -65 dBm, 1 PING(s)
+26/10/19 23:04:31 t=29842 CONF_ALL: CONFIG=OK
+26/10/19 23:04:48 t=29859 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 23:20:13 t=30775 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/19 23:20:14 t=30776 CONF_ALL: CONFIG=OK
+26/10/19 23:20:30 t=30792 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/19 23:35:55 t=31708 ENLACE en 15 s: CSQ -75 dBm, 1 PING(s)
+26/10/19 23:35:56 t=31709 CONF_ALL: CONFIG=OK
+26/10/19 23:36:13 t=31726 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/19 23:51:38 t=32642 ENLACE en 15 s: CSQ -65 dBm, 1 PING(s)
+26/10/19 23:51:39 t=32643 CONF_ALL: CONFIG=OK
+26/10/19 23:51:55 t=32660 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/20 00:00:52 t=33191 RESUMEN: up 9 h | heap 2992 B | stack libre (palabras) sys 726/1024 wan 1780/2048 cmd 870/1024 ctl 353/384 cpres 389/512
+26/10/20 00:00:52 t=33191 RESUMEN: ventana 10/1984, pisados 0 | wan: vaciados ok 36, sesiones fallidas 0, registros enviados 545 | sd postergadas 0 | rtu descartados 0
+26/10/20 00:00:52 t=33191 RESUMEN: cnt total 0, cortos 0, imposibles 0
+26/10/20 00:00:52 t=33191 RESUMEN: bt3v3 3.295..3.348 V | bt12v 10.170..10.659 V (en 553 poleos)
+26/10/20 00:07:20 t=33576 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 00:07:21 t=33577 CONF_ALL: CONFIG=OK
+26/10/20 00:06:07 t=33594 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 00:21:31 t=34510 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 00:21:33 t=34511 CONF_ALL: CONFIG=OK
+26/10/20 00:21:49 t=34527 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/20 00:37:13 t=35443 ENLACE en 15 s: CSQ -73 dBm, 1 PING(s)
+26/10/20 00:37:14 t=35444 CONF_ALL: CONFIG=OK
+26/10/20 00:37:32 t=35461 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 00:52:56 t=36377 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 00:52:57 t=36378 CONF_ALL: CONFIG=OK
+26/10/20 00:53:14 t=36395 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 01:08:39 t=37311 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 01:08:40 t=37313 CONF_ALL: CONFIG=OK
+26/10/20 01:08:56 t=37329 SESION OK en 33 s: 15 registros enviados, quedan 0
+26/10/20 01:24:16 t=38240 ENLACE en 10 s: CSQ -79 dBm, 1 PING(s)
+26/10/20 01:24:17 t=38241 CONF_ALL: CONFIG=OK
+26/10/20 01:24:34 t=38258 SESION OK en 29 s: 16 registros enviados, quedan 0
+26/10/20 01:39:54 t=39169 ENLACE en 10 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 01:39:55 t=39170 CONF_ALL: CONFIG=OK
+26/10/20 01:40:11 t=39186 SESION OK en 28 s: 15 registros enviados, quedan 0
+26/10/20 01:55:31 t=40097 ENLACE en 10 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 01:55:32 t=40098 CONF_ALL: CONFIG=OK
+26/10/20 01:55:49 t=40115 SESION OK en 29 s: 16 registros enviados, quedan 0
+26/10/20 02:11:14 t=41031 ENLACE en 15 s: CSQ -77 dBm, 1 PING(s)
+26/10/20 02:11:15 t=41032 CONF_ALL: CONFIG=OK
+26/10/20 02:11:31 t=41049 SESION OK en 33 s: 15 registros enviados, quedan 0
+26/10/20 02:26:56 t=41965 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 02:26:57 t=41966 CONF_ALL: CONFIG=OK
+26/10/20 02:27:14 t=41983 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 02:42:34 t=42894 ENLACE en 10 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 02:42:35 t=42895 CONF_ALL: CONFIG=OK
+26/10/20 02:42:51 t=42911 SESION OK en 28 s: 15 registros enviados, quedan 0
+26/10/20 02:58:16 t=43827 ENLACE en 15 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 02:58:17 t=43828 CONF_ALL: CONFIG=OK
+26/10/20 02:58:34 t=43845 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 03:13:59 t=44761 ENLACE en 15 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 03:14:00 t=44763 CONF_ALL: CONFIG=OK
+26/10/20 03:14:16 t=44779 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/20 03:29:41 t=45695 ENLACE en 15 s: CSQ -79 dBm, 1 PING(s)
+26/10/20 03:29:42 t=45696 CONF_ALL: CONFIG=OK
+26/10/20 03:29:59 t=45713 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 03:45:23 t=46629 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 03:45:24 t=46630 CONF_ALL: CONFIG=OK
+26/10/20 03:45:40 t=46646 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/20 04:01:00 t=47557 ENLACE en 10 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 04:01:01 t=47558 CONF_ALL: CONFIG=OK
+26/10/20 04:01:18 t=47575 SESION OK en 29 s: 16 registros enviados, quedan 0
+26/10/20 04:16:38 t=48486 ENLACE en 10 s: CSQ -79 dBm, 1 PING(s)
+26/10/20 04:16:39 t=48487 CONF_ALL: CONFIG=OK
+26/10/20 04:16:55 t=48504 SESION OK en 28 s: 15 registros enviados, quedan 1
+26/10/20 04:32:15 t=49415 ENLACE en 10 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 04:32:16 t=49416 CONF_ALL: CONFIG=OK
+26/10/20 04:32:33 t=49433 SESION OK en 29 s: 16 registros enviados, quedan 0
+26/10/20 04:47:58 t=50349 ENLACE en 15 s: CSQ -79 dBm, 1 PING(s)
+26/10/20 04:47:59 t=50350 CONF_ALL: CONFIG=OK
+26/10/20 04:48:15 t=50366 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/20 05:03:40 t=51282 ENLACE en 15 s: CSQ -81 dBm, 1 PING(s)
+26/10/20 05:03:41 t=51283 CONF_ALL: CONFIG=OK
+26/10/20 05:03:58 t=51300 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 05:19:23 t=52216 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 05:19:24 t=52217 CONF_ALL: CONFIG=OK
+26/10/20 05:19:41 t=52235 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 05:35:06 t=53150 ENLACE en 15 s: CSQ -65 dBm, 1 PING(s)
+26/10/20 05:35:07 t=53152 CONF_ALL: CONFIG=OK
+26/10/20 05:35:23 t=53168 SESION OK en 33 s: 15 registros enviados, quedan 0
+26/10/20 05:50:43 t=54079 ENLACE en 10 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 05:50:44 t=54080 CONF_ALL: CONFIG=OK
+26/10/20 05:51:01 t=54097 SESION OK en 29 s: 16 registros enviados, quedan 0
+26/10/20 06:06:25 t=55013 ENLACE en 15 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 06:06:27 t=55014 CONF_ALL: CONFIG=OK
+26/10/20 06:06:43 t=55030 SESION OK en 33 s: 15 registros enviados, quedan 0
+26/10/20 06:22:07 t=55946 ENLACE en 15 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 06:22:08 t=55947 CONF_ALL: CONFIG=OK
+26/10/20 06:22:26 t=55964 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 06:37:45 t=56875 ENLACE en 10 s: CSQ -79 dBm, 1 PING(s)
+26/10/20 06:37:46 t=56877 CONF_ALL: CONFIG=OK
+26/10/20 06:38:02 t=56893 SESION OK en 28 s: 15 registros enviados, quedan 1
+26/10/20 06:53:27 t=57809 ENLACE en 15 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 06:53:28 t=57810 CONF_ALL: CONFIG=OK
+26/10/20 06:53:45 t=57827 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 07:09:10 t=58743 ENLACE en 15 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 07:09:11 t=58744 CONF_ALL: CONFIG=OK
+26/10/20 07:09:27 t=58760 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/20 07:24:52 t=59676 ENLACE en 15 s: CSQ -63 dBm, 1 PING(s)
+26/10/20 07:24:53 t=59677 CONF_ALL: CONFIG=OK
+26/10/20 07:25:10 t=59694 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 07:40:35 t=60610 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 07:40:36 t=60611 CONF_ALL: CONFIG=OK
+26/10/20 07:40:53 t=60629 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 07:56:12 t=61540 ENLACE en 10 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 07:56:14 t=61541 CONF_ALL: CONFIG=OK
+26/10/20 07:56:30 t=61557 SESION OK en 28 s: 15 registros enviados, quedan 0
+26/10/20 08:11:54 t=62473 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 08:11:55 t=62474 CONF_ALL: CONFIG=OK
+26/10/20 08:12:13 t=62491 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 08:27:37 t=63407 ENLACE en 15 s: CSQ -79 dBm, 1 PING(s)
+26/10/20 08:27:38 t=63408 CONF_ALL: CONFIG=OK
+26/10/20 08:27:54 t=63424 SESION OK en 33 s: 15 registros enviados, quedan 0
+26/10/20 08:43:19 t=64340 ENLACE en 15 s: CSQ -67 dBm, 1 PING(s)
+26/10/20 08:43:20 t=64341 CONF_ALL: CONFIG=OK
+26/10/20 08:43:37 t=64358 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 08:59:02 t=65274 ENLACE en 15 s: CSQ -65 dBm, 1 PING(s)
+26/10/20 08:59:03 t=65276 CONF_ALL: CONFIG=OK
+26/10/20 08:59:19 t=65292 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/20 09:00:01 t=66213 ENLACE en 20 s: CSQ -59 dBm, 1 PING(s)
+26/10/20 09:00:02 t=66214 CONF_ALL: CONFIG=OK
+26/10/20 09:15:07 t=66231 SESION OK en 39 s: 16 registros enviados, quedan 0
+26/10/20 09:30:32 t=67147 ENLACE en 15 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 09:30:33 t=67148 CONF_ALL: CONFIG=OK
+26/10/20 09:30:49 t=67164 SESION OK en 33 s: 15 registros enviados, quedan 1
+26/10/20 09:46:14 t=68080 ENLACE en 15 s: CSQ -65 dBm, 1 PING(s)
+26/10/20 09:46:15 t=68081 CONF_ALL: CONFIG=OK
+26/10/20 09:46:32 t=68098 SESION OK en 34 s: 16 registros enviados, quedan 0
+26/10/20 10:01:57 t=69014 ENLACE en 15 s: CSQ -69 dBm, 1 PING(s)
+26/10/20 10:01:58 t=69015 CONF_ALL: CONFIG=OK
+26/10/20 10:02:15 t=69033 SESION OK en 34 s: 16 registros enviados, quedan 0

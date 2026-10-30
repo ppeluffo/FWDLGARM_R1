@@ -463,3 +463,115 @@ bool fw_update_grabar( const char *pcArchivo, fw_info_t *pxInfo, fw_result_t *px
 
     return true;
 }
+
+/*------------------------------------------------------------------------------*/
+void fw_update_estado_banco2( fw_banco2_t *pxEstado )
+{
+    const uint32_t *pulB1 = ( const uint32_t * ) FLASH_BASE;
+    const uint32_t *pulB2 = ( const uint32_t * ) FW_BANCO2_BASE;
+
+    if( pxEstado == NULL )
+    {
+        return;
+    }
+
+    pxEstado->ulSpBanco1    = pulB1[ 0 ];
+    pxEstado->ulSpBanco2    = pulB2[ 0 ];
+    pxEstado->ulResetBanco2 = pulB2[ 1 ];
+    pxEstado->bEnBlanco     = ( pulB2[ 0 ] == 0xFFFFFFFFUL );
+
+    /*
+     * ⭐ El criterio: que el stack pointer del banco 2 caiga **en la misma
+     * región** que el del banco 1.
+     *
+     * ⚠ Y se compara contra el banco 1 en vez de contra un rango de SRAM
+     * escrito a mano, a propósito: el banco 1 **es el que está corriendo**, así
+     * que su stack pointer es, por definición, uno que el bootloader aceptó. Un
+     * rango inventado por nosotros podría no ser el que mira ST —el `_estack`
+     * de este proyecto cae en 0x20040000, que es el borde superior de SRAM1 y
+     * el comienzo de SRAM2— y ahí un chequeo "propio" diría que está mal
+     * cuando está bien, o al revés.
+     *
+     * Se comparan los 16 bits altos: misma región de 64 KB.
+     */
+    pxEstado->bPlausible = ( !pxEstado->bEnBlanco ) &&
+                           ( ( pxEstado->ulSpBanco2 & 0xFFFF0000UL ) ==
+                             ( pxEstado->ulSpBanco1 & 0xFFFF0000UL ) );
+}
+
+/*==============================================================================
+ * ETAPA 4 — EL COMMIT
+ *============================================================================*/
+
+uint8_t fw_update_banco_activo( void )
+{
+    /* FB_MODE = 1 -> el banco 2 está mapeado en 0x08000000, o sea que estamos
+       corriendo de él. Lo pone el bootloader al hacer el swap. */
+    return ( ( SYSCFG->MEMRMP & SYSCFG_MEMRMP_FB_MODE ) != 0UL ) ? 2U : 1U;
+}
+
+uint8_t fw_update_banco_de_arranque( void )
+{
+    return ( ( FLASH->OPTR & FLASH_OPTR_BFB2 ) != 0UL ) ? 2U : 1U;
+}
+
+bool fw_update_arrancar_de( uint8_t ucBanco )
+{
+    FLASH_OBProgramInitTypeDef xOb;
+
+    if( ( ucBanco != 1U ) && ( ucBanco != 2U ) )
+    {
+        return false;
+    }
+
+    memset( &xOb, 0, sizeof( xOb ) );
+    xOb.OptionType = OPTIONBYTE_USER;
+    xOb.USERType   = OB_USER_BFB2;      /* ⭐ SÓLO este bit: la HAL usa una
+                                           máscara, así que IWDG_SW, BOR_LEV y
+                                           los demás quedan como están */
+    xOb.USERConfig = ( ucBanco == 2U ) ? OB_BFB2_ENABLE : OB_BFB2_DISABLE;
+
+    if( HAL_FLASH_Unlock() != HAL_OK )
+    {
+        xprintf( "FW:: ERROR: no se pudo desbloquear la flash\r\n" );
+        return false;
+    }
+
+    if( HAL_FLASH_OB_Unlock() != HAL_OK )
+    {
+        ( void ) HAL_FLASH_Lock();
+        xprintf( "FW:: ERROR: no se pudieron desbloquear los option bytes\r\n" );
+        return false;
+    }
+
+    if( HAL_FLASHEx_OBProgram( &xOb ) != HAL_OK )
+    {
+        xprintf( "FW:: ERROR escribiendo BFB2 (err 0x%08lX)\r\n",
+                 ( unsigned long ) HAL_FLASH_GetError() );
+        ( void ) HAL_FLASH_OB_Lock();
+        ( void ) HAL_FLASH_Lock();
+        return false;
+    }
+
+    /*
+     * ⛔ A PARTIR DE ACÁ NO SE VUELVE. `HAL_FLASH_OB_Launch()` recarga los
+     * option bytes con un RESET DEL SISTEMA.
+     *
+     * ⚠ El `vTaskDelay()` no es cortesía: la consola es por interrupción con un
+     * buffer, así que sin esperar, el mensaje de arriba se pierde en el reset y
+     * desde afuera el equipo "se reinicia solo sin decir nada" — que es
+     * exactamente el síntoma que uno NO quiere ver en el comando más delicado
+     * del firmware.
+     */
+    xprintf( "\r\nFW:: BFB2 escrito. Reiniciando para arrancar del BANCO %u...\r\n",
+             ( unsigned ) ucBanco );
+    vTaskDelay( pdMS_TO_TICKS( 500 ) );
+
+    ( void ) HAL_FLASH_OB_Launch();
+
+    /* No se llega. Si se llegara, el launch falló y hay que dejar todo cerrado. */
+    ( void ) HAL_FLASH_OB_Lock();
+    ( void ) HAL_FLASH_Lock();
+    xprintf( "FW:: ⛔ el OB_Launch no reinicio: los option bytes NO se recargaron\r\n" );
+    return false;
+}

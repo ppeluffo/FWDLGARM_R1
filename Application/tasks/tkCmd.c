@@ -5904,6 +5904,7 @@ static void prvEventosUso( void )
     xprintf( "  eventos               estado del registro\r\n" );
     xprintf( "  fw [archivo]        hay un firmware nuevo en la microSD? (no lo aplica)\r\n" );
     xprintf( "  fw grabar [arch]    lo escribe en el BANCO 2 y lo verifica releyendo\r\n" );
+    xprintf( "  fw boot 1|2         de que banco arranca el equipo (RESETEA)\r\n" );
     xprintf( "                      (el equipo sigue arrancando del banco 1)\r\n" );
     xprintf( "  eventos volcar        escribe ya lo acumulado en %s\r\n", EVENTOS_ARCHIVO );
     xprintf( "  eventos nota <texto>  deja una marca (UNA palabra: el parser corta\r\n" );
@@ -6074,11 +6075,13 @@ static void cmdFw( void )
     uint8_t     ucArgs    = FRTOS_CMD_makeArgv();
     bool        bGrabar   = ( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) &&
                               ( strcmp( argv[ 1 ], "grabar" ) == 0 ) );
+    bool        bBoot     = ( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) &&
+                              ( strcmp( argv[ 1 ], "boot" ) == 0 ) );
     const char *pcArchivo = FW_UPDATE_ARCHIVO;
 
-    if( bGrabar )
+    if( bGrabar || bBoot )
     {
-        /* `fw grabar [archivo]` */
+        /* `fw grabar [archivo]`  /  `fw boot 1|2` */
         if( argv[ 2 ] != NULL ) { pcArchivo = argv[ 2 ]; }
     }
     else if( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) )
@@ -6096,6 +6099,98 @@ static void cmdFw( void )
     xprintf( "  hardware   : %s\r\n", FW_HW );
     xprintf( "  banco      : %lu KB (la flash son 2 bancos de ese tamaño)\r\n",
              ( unsigned long ) ( FW_UPDATE_BANCO_BYTES / 1024UL ) );
+
+    /*
+     * ⭐⭐ EL ESTADO DEL BANCO 2, y se imprime SIEMPRE.
+     *
+     * Es lo único que decide si el commit de la etapa 4 va a hacer algo: el
+     * bootloader arranca del banco 2 sólo si su primer word apunta a SRAM, y si
+     * no, **cae al banco 1 sin decir nada**. Verlo antes evita el diagnóstico
+     * más confuso posible — "puse BFB2 y el equipo no cambió de banco" —, que
+     * en realidad sería el silicio protegiendo al equipo.
+     */
+    {
+        fw_banco2_t xB2;
+
+        fw_update_estado_banco2( &xB2 );
+
+        uint8_t ucActivo  = fw_update_banco_activo();
+        uint8_t ucArranque = fw_update_banco_de_arranque();
+
+        xprintf( "\r\nFW:: LOS BANCOS\r\n" );
+        xprintf( "  corriendo de  : BANCO %u\r\n", ( unsigned ) ucActivo );
+        xprintf( "  arrancara de  : BANCO %u   (option byte BFB2)\r\n",
+                 ( unsigned ) ucArranque );
+
+        /*
+         * ⭐⭐ La comparación es el diagnóstico más útil del mecanismo: si el
+         * option byte dice 2 y estamos corriendo del 1, **el fallback del
+         * silicio actuó** — el bootloader no aceptó el banco 2 y cayó al 1.
+         * Sin esta línea eso es completamente invisible, y se vería como "puse
+         * BFB2 y no pasó nada".
+         */
+        if( ucArranque != ucActivo )
+        {
+            xprintf( "  ⛔ NO COINCIDEN: el bootloader NO acepto el banco %u\r\n",
+                     ( unsigned ) ucArranque );
+            xprintf( "     y cayo al banco %u. El fallback del silicio ACTUO.\r\n",
+                     ( unsigned ) ucActivo );
+        }
+
+        xprintf( "\r\nFW:: el BANCO 2 (el respaldo, en 0x%08lX)\r\n",
+                 ( unsigned long ) ( FLASH_BASE + FW_UPDATE_BANCO_BYTES ) );
+
+        if( xB2.bEnBlanco )
+        {
+            xprintf( "  esta EN BLANCO: el bootloader caeria al banco 1\r\n" );
+        }
+        else
+        {
+            xprintf( "  stack pointer : 0x%08lX   (el del banco 1: 0x%08lX)\r\n",
+                     ( unsigned long ) xB2.ulSpBanco2, ( unsigned long ) xB2.ulSpBanco1 );
+            xprintf( "  vector reset  : 0x%08lX\r\n",
+                     ( unsigned long ) xB2.ulResetBanco2 );
+            xprintf( "  %s\r\n", xB2.bPlausible
+                     ? "==> el bootloader LO ACEPTARIA (el SP cae donde el del banco 1)"
+                     : "==> ⛔ el bootloader NO lo aceptaria: caeria al banco 1" );
+        }
+    }
+
+    if( bBoot )
+    {
+        /*
+         * `fw boot 1|2`. ⛔ Si escribe, NO VUELVE: resetea el equipo.
+         *
+         * ⚠ Se exige el número y no hay valor por omisión: es el único comando
+         * del firmware que cambia de qué memoria arranca el equipo, y un
+         * `fw boot` a medio tipear no puede hacer nada.
+         */
+        if( ( argv[ 2 ] == NULL ) ||
+            ( ( argv[ 2 ][ 0 ] != '1' ) && ( argv[ 2 ][ 0 ] != '2' ) ) )
+        {
+            xprintf( "\r\nuso: fw boot 1|2    (de que banco arranca el equipo)\r\n" );
+            xprintf( "     ⛔ RESETEA el equipo. El banco 2 tiene que estar\r\n" );
+            xprintf( "        escrito y verificado ('fw grabar') o el bootloader\r\n" );
+            xprintf( "        caera al banco 1.\r\n" );
+            return;
+        }
+
+        {
+            uint8_t ucPedido = ( uint8_t ) ( argv[ 2 ][ 0 ] - '0' );
+
+            /* ⭐ Lo último que se hace antes de un reset: dejar el registro de
+               eventos en la tarjeta. El buffer vive en SRAM2 y sobrevive, pero
+               que la línea esté ANTES del reinicio es lo que permite leer
+               después qué pasó si el equipo no vuelve. */
+            eventos_log( "FW: cambiando el banco de arranque a %u (BFB2)", ucPedido );
+            eventos_volcar();
+
+            ( void ) fw_update_arrancar_de( ucPedido );
+            /* si vuelve, falló: ya lo dijo */
+        }
+
+        return;
+    }
 
     xprintf( "\r\nFW:: %s la microSD (%s)...\r\n",
              bGrabar ? "GRABANDO desde" : "mirando", pcArchivo );

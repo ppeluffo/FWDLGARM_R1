@@ -165,6 +165,90 @@ bool fw_update_grabar( const char *pcArchivo, fw_info_t *pxInfo,
 uint32_t fw_update_crc_banco2( uint32_t ulLargo );
 
 /*------------------------------------------------------------------------------
+ * ⭐⭐ ¿EL BOOTLOADER VA A ACEPTAR EL BANCO 2?
+ *
+ * El silicio decide con **una sola cosa** (AN2606, fig. 102 para el L496): si
+ * el primer word del banco 2 —el **stack pointer inicial**— apunta a SRAM,
+ * arranca de ahí; si no, **cae al banco 1**.
+ *
+ * ⛔ Y por eso esto existe ANTES que el commit: si el banco 2 no cumpliera,
+ * poner `BFB2 = 1` **no haría nada visible** —el fallback se dispararía en
+ * silencio— y quedaríamos mirando por qué "el equipo no cambia de banco"
+ * cuando en realidad el silicio lo está protegiendo. Un mecanismo de seguridad
+ * que actúa sin decirlo es indistinguible de uno roto.
+ *
+ * ⭐ El criterio fuerte NO es comparar contra un rango de SRAM inventado por
+ * nosotros: es **comparar el banco 2 contra el banco 1**. El banco 1 arranca
+ * —es el que está corriendo— así que si el banco 2 tiene un stack pointer
+ * equivalente, el bootloader lo va a tratar igual. Eso no depende de adivinar
+ * qué rango exacto mira ST.
+ */
+typedef struct {
+    uint32_t ulSpBanco1;    /* primer word del banco 1: el que SÍ arranca */
+    uint32_t ulSpBanco2;    /* primer word del banco 2                    */
+    uint32_t ulResetBanco2; /* su vector de reset, para el volcado        */
+    bool     bEnBlanco;     /* el banco 2 está sin escribir (0xFFFFFFFF)  */
+    bool     bPlausible;    /* el SP cae donde el del banco 1             */
+} fw_banco2_t;
+
+void fw_update_estado_banco2( fw_banco2_t *pxEstado );
+
+/*==============================================================================
+ * ETAPA 4 — EL COMMIT: de qué banco arranca el equipo
+ *============================================================================*/
+
+/*------------------------------------------------------------------------------
+ * ⭐⭐ DE QUÉ BANCO ESTÁ CORRIENDO AHORA MISMO.
+ *
+ * Lo dice el bit `FB_MODE` de `SYSCFG_MEMRMP`: el bootloader lo pone en 1
+ * cuando salta al banco 2 ("Set Bank Swap to Bank2", AN2606 fig. 102), y ahí el
+ * banco 2 queda mapeado en `0x08000000`.
+ *
+ * ⭐ **Es el único dato que no se puede deducir de otra cosa.** La versión del
+ * firmware no sirve —los dos bancos pueden tener la misma— y la dirección
+ * tampoco, porque con el swap el banco activo siempre se ve en `0x08000000`.
+ *
+ * Devuelve 1 ó 2.
+ */
+uint8_t fw_update_banco_activo( void );
+
+/*------------------------------------------------------------------------------
+ * De qué banco va a arrancar la PRÓXIMA vez: el option byte `BFB2`.
+ *
+ * ⚠ Comparar esto con `fw_update_banco_activo()` es el diagnóstico más útil de
+ * todo el mecanismo:
+ *
+ *   BFB2 dice 2  y  estoy en 2  ->  todo normal
+ *   BFB2 dice 2  y  estoy en 1  ->  ⛔ **EL FALLBACK ACTUÓ**: el bootloader no
+ *                                   aceptó el banco 2 y cayó al 1. Sin esta
+ *                                   comparación eso es invisible
+ *   BFB2 dice 1  y  estoy en 1  ->  normal
+ *
+ * Devuelve 1 ó 2.
+ */
+uint8_t fw_update_banco_de_arranque( void );
+
+/*------------------------------------------------------------------------------
+ * ⛔⛔ CAMBIA EL BANCO DE ARRANQUE. **RESETEA EL EQUIPO Y NO RETORNA.**
+ *
+ * Escribe el option byte `BFB2` y llama a `HAL_FLASH_OB_Launch()`, que recarga
+ * los option bytes **con un reset del sistema**. Todo lo que tenga que quedar
+ * guardado hay que guardarlo ANTES.
+ *
+ * ⭐ **La simetría es lo que hace segura esta etapa**: como el mismo binario
+ * corre en los dos bancos (el swap lo mapea en `0x08000000`), este comando
+ * existe también del otro lado. Si el banco 2 arranca y no convence, `fw boot
+ * 1` vuelve. Y si no arranca, el fallback del silicio trae el banco 1 — donde
+ * el comando también está.
+ *
+ * ⚠ `MODIFY_REG` con máscara: escribir `BFB2` **no toca** `IWDG_SW`, `BOR_LEV`
+ * ni el resto de los option bytes (verificado en `FLASH_OB_UserConfig()`).
+ *
+ * Devuelve false sólo si NO pudo escribir; si escribió, no vuelve.
+ */
+bool fw_update_arrancar_de( uint8_t ucBanco );
+
+/*------------------------------------------------------------------------------
  * El texto de un resultado, para la consola y el registro de eventos.
  */
 const char *fw_update_str( fw_result_t xRes );

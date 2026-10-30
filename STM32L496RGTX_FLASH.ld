@@ -37,7 +37,32 @@
 ENTRY(Reset_Handler)
 
 /* Highest address of the user mode stack */
-_estack = ORIGIN(RAM) + LENGTH(RAM); /* end of "RAM" Ram type memory */
+/* ⛔⛔ -8: EL TOPE DE LA PILA TIENE QUE CAER *DENTRO* DE SRAM1, NO EN SU BORDE.
+ *
+ * `ORIGIN(RAM) + LENGTH(RAM)` da 0x20040000, que es el PRIMER BYTE DESPUES de
+ * SRAM1 (que termina en 0x2003FFFF). Para el Cortex-M eso es correcto -- el
+ * stack decrece, asi que el primer push va a 0x2003FFFC -- y por eso el equipo
+ * funciono siempre.
+ *
+ * ⛔ PERO EL BOOTLOADER DE ROM NO LO ACEPTA. En el arranque dual-bank (BFB2=1)
+ * decide con una sola cosa (AN2606 fig. 102): arranca del banco si el primer
+ * word de la imagen -- el stack pointer inicial -- esta "within int. SRAM
+ * address". 0x20040000 NO esta DENTRO: queda justo afuera.
+ *
+ * ⭐ Y como los DOS bancos llevan el mismo _estack, el bootloader los juzga a
+ * los dos invalidos: "both banks do not contain valid code" = Pattern 7, y se
+ * queda ESPERANDO COMANDOS por USART1 (PA9/PA10), que en R001 no van a ningun
+ * lado. El sintoma es un equipo mudo con el LED apagado.
+ *
+ * ⚠ Nunca se noto porque con BFB2=0 el bootloader NI SE CONSULTA: el micro
+ * arranca directo de la flash y nadie mira el stack pointer. Ese chequeo SOLO
+ * existe en el camino del dual boot -- o sea, solo lo ve el autoupdate.
+ *
+ * Diagnosticado el 2026-10-30 leyendo 0x00000000 con el equipo "colgado": daba
+ * 0x20003060, que cae dentro de los 12 KB que el AN2606 dice que usa el
+ * bootloader para su propia pila. No estaba colgado: estaba en el bootloader.
+ */
+_estack = ORIGIN(RAM) + LENGTH(RAM) - 8; /* DENTRO de SRAM1, por el bootloader */
 
 _Min_Heap_Size = 0x200; /* required amount of heap */
 _Min_Stack_Size = 0x400; /* required amount of stack */
