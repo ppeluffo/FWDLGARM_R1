@@ -549,3 +549,55 @@ equivocado**. Pendiente de corregir con la etapa 3.
 
 Nada de flash: **la etapa 2 no escribe un solo byte**. Lo que queda es escribir el banco 2 (etapa 3),
 el commit por `BFB2` (4) y el rollback (5).
+
+---
+
+## Test 6 — El autoupdate, etapa 3: escribir el banco 2 (2026-10-30, banco)
+
+### ✅ Resultado: PASÓ
+
+```
+FW:: GRABANDO desde la microSD (FWNUEVO.BIN)...
+FW:: borrando el banco 2 (122 paginas de 2048 B)...
+FW:: escribiendo 249512 bytes...
+  ==> EL BANCO 2 QUEDO ESCRITO Y VERIFICADO
+      CRC releido de la flash: 0xF4F85A35  (igual al del archivo)
+      (el comando entero tardo 8,6 s)
+```
+
+| Criterio | Resultado |
+|---|---|
+| ⭐⭐ **El CRC RELEÍDO DE LA FLASH** | **`0xF4F85A35`** — el mismo del archivo, y el que calculó `zlib` en la PC |
+| El borrado | 122 páginas de **2048 B** ✅ — el `_Static_assert` de la página del L496 era correcto |
+| Tiempo | **8,6 s** (verificar el archivo, borrar, escribir 249 KB y releer) |
+| ⭐ **Se NIEGA a grabar lo corrupto** | `fw grabar FWIMGMAL.BIN` → *"no se grabo nada: la imagen esta CORRUPTA"* |
+| ⭐ **Y lo de otro producto** | `fw grabar FWOTROHW.BIN` → *"es el firmware de OTRO producto"* |
+| El equipo después | heap **2992 B** intacto, watchdog corriendo, las 4 tareas vigiladas, sin reset |
+
+### ⭐⭐ La cadena cierra en SEIS puntos
+
+```
+zlib (PC) -> archivo -> microSD -> FatFs -> RAM -> flash banco 2 -> relectura por el bus
+                                   0xF4F85A35 en TODOS
+```
+
+⭐ **El paso que vale es el último.** `HAL_FLASH_Program()` devolvió OK en las ~31.000 escrituras y
+**eso no prueba nada**: una celda que no tomó el dato, una página mal borrada o un bit débil
+devuelven OK igual. Lo único que prueba que el banco 2 tiene el firmware es **leerlo de vuelta**.
+
+### ⚠ Lo que esta etapa deliberadamente NO hace
+
+**No cambia el banco de arranque.** Al terminar, con éxito o sin él, el equipo sigue arrancando del
+banco 1 — y el `status` posterior lo confirma: mismo firmware, heap intacto, sin reset. Por eso el
+comando **no pide una palabra de confirmación** como `fs sd format borrar`: no hay nada que perder.
+
+### ⏳ Lo que falta verificar ANTES de la etapa 4
+
+⭐⭐ **Que el primer word del banco 2 apunte a SRAM.** Es *exactamente* el criterio que usa el
+bootloader de ST (AN2606 fig. 102) para decidir si arranca de ahí o cae al banco 1. Si no lo
+cumpliera, `BFB2=1` no haría nada visible —el fallback se dispararía— y el diagnóstico sería
+confuso. **Conviene que el comando `fw` lo imprima antes de que exista el commit.**
+
+⚠ Y para la etapa 4 conviene que el banco 2 tenga un firmware **distinguible** del banco 1: hoy
+tiene la imagen del binario de las 14:17, que reporta la misma versión `0.0.19`. Si arrancara de él,
+no habría forma de notarlo salvo por `FW_FECHA`.
