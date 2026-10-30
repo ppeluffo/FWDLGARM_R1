@@ -5905,6 +5905,7 @@ static void prvEventosUso( void )
     xprintf( "  fw [archivo]        hay un firmware nuevo en la microSD? (no lo aplica)\r\n" );
     xprintf( "  fw grabar [arch]    lo escribe en el BANCO 2 y lo verifica releyendo\r\n" );
     xprintf( "  fw boot 1|2         de que banco arranca el equipo (RESETEA)\r\n" );
+    xprintf( "  fw commit aplicar   copia el BANCO 2 al BANCO 1 y RESETEA\r\n" );
     xprintf( "                      (el equipo sigue arrancando del banco 1)\r\n" );
     xprintf( "  eventos volcar        escribe ya lo acumulado en %s\r\n", EVENTOS_ARCHIVO );
     xprintf( "  eventos nota <texto>  deja una marca (UNA palabra: el parser corta\r\n" );
@@ -6077,11 +6078,13 @@ static void cmdFw( void )
                               ( strcmp( argv[ 1 ], "grabar" ) == 0 ) );
     bool        bBoot     = ( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) &&
                               ( strcmp( argv[ 1 ], "boot" ) == 0 ) );
+    bool        bCommit   = ( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) &&
+                              ( strcmp( argv[ 1 ], "commit" ) == 0 ) );
     const char *pcArchivo = FW_UPDATE_ARCHIVO;
 
-    if( bGrabar || bBoot )
+    if( bGrabar || bBoot || bCommit )
     {
-        /* `fw grabar [archivo]`  /  `fw boot 1|2` */
+        /* `fw grabar [archivo]`  /  `fw boot 1|2`  /  `fw commit aplicar` */
         if( argv[ 2 ] != NULL ) { pcArchivo = argv[ 2 ]; }
     }
     else if( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) )
@@ -6154,6 +6157,79 @@ static void cmdFw( void )
                      ? "==> el bootloader LO ACEPTARIA (el SP cae donde el del banco 1)"
                      : "==> ⛔ el bootloader NO lo aceptaria: caeria al banco 1" );
         }
+    }
+
+    if( bCommit )
+    {
+        /*
+         * `fw commit aplicar` — pone en marcha el firmware del banco 2
+         * copiándolo al banco 1. ⛔⛔ NO VUELVE si sale bien.
+         *
+         * ⚠ La palabra `aplicar` es OBLIGATORIA y va a propósito, con el mismo
+         * criterio que `fs sd format borrar`: esto BORRA EL BANCO 1 ENTERO, o
+         * sea el firmware que está corriendo, y un tipeo apurado no puede
+         * disparar eso. El parser ya exige el comando completo; ésta es la
+         * segunda red.
+         */
+        fw_banco2_t xB2;
+        fw_commit_t xCmt;
+
+        if( ( argv[ 2 ] == NULL ) || ( strcmp( argv[ 2 ], "aplicar" ) != 0 ) )
+        {
+            xprintf( "\r\nuso: fw commit aplicar\r\n" );
+            xprintf( "     copia el BANCO 2 al BANCO 1 y RESETEA. No vuelve.\r\n" );
+            xprintf( "     ⚠ BORRA el firmware que esta corriendo: antes hay que\r\n" );
+            xprintf( "       haber hecho 'fw grabar' y que diga que verifico OK.\r\n" );
+            return;
+        }
+
+        fw_update_estado_banco2( &xB2 );
+        if( xB2.bEnBlanco )
+        {
+            xprintf( "\r\nFW:: ⛔ el BANCO 2 esta EN BLANCO: no hay nada que aplicar.\r\n" );
+            xprintf( "     primero 'fw grabar'\r\n" );
+            return;
+        }
+
+        /* ⚠ Avisa pero NO impide, que es el criterio de este firmware: en el
+           banco a veces se quiere aplicar algo raro a proposito. Lo que no
+           puede pasar es que no se diga. */
+        if( !xB2.bPlausible )
+        {
+            xprintf( "\r\nFW:: ⚠ el SP del banco 2 (0x%08lX) NO cae donde el del\r\n",
+                     ( unsigned long ) xB2.ulSpBanco2 );
+            xprintf( "     banco 1 (0x%08lX). Eso no parece un firmware valido.\r\n",
+                     ( unsigned long ) xB2.ulSpBanco1 );
+        }
+
+        xprintf( "\r\nFW:: COMMIT — el banco 2 pasa a ser el firmware del equipo\r\n" );
+        xprintf( "  banco 2  : SP 0x%08lX  reset 0x%08lX\r\n",
+                 ( unsigned long ) xB2.ulSpBanco2, ( unsigned long ) xB2.ulResetBanco2 );
+        xprintf( "  secuencia: borrar banco 1 (22 ms) -> copiar (~2,7 s)\r\n" );
+        xprintf( "             -> el primer doubleword (82 us) -> reset\r\n" );
+        xprintf( "  ⭐ el primer doubleword va ULTIMO: si se corta la alimentacion\r\n" );
+        xprintf( "    en el medio, arranca el BOOTLOADER de ST y se recupera por\r\n" );
+        xprintf( "    SWD o por serie. La ventana mala son 82 us.\r\n" );
+        xprintf( "\r\n  aplicando... (la consola se corta aca)\r\n" );
+
+        /* ⭐ El registro de eventos, VOLCADO antes de tocar la flash: si el
+           equipo no vuelve, esta linea es lo unico que va a quedar para saber
+           que fue un commit y no una falla espontanea. Es el mismo criterio
+           que en `fw boot`. */
+        eventos_log( "FW: COMMIT banco2->banco1 (SP 0x%08lX)", ( unsigned long ) xB2.ulSpBanco2 );
+        eventos_volcar();
+
+        /* que el ultimo caracter salga por la UART antes de cortar las
+           interrupciones: a 9600, un byte son 1042 us */
+        vTaskDelay( pdMS_TO_TICKS( 200 ) );
+
+        xCmt = fw_update_commit( 0UL );
+
+        /* ⚠ Solo se llega aca con `fwCMT_SIN_IMAGEN`, que se detecta ANTES de
+           tocar nada. Los demas errores resetean desde RAM, porque para
+           entonces el codigo de esta funcion ya no existe. */
+        xprintf( "\r\nFW:: ⛔ NO se aplico: %s\r\n", fw_update_commit_str( xCmt ) );
+        return;
     }
 
     if( bBoot )

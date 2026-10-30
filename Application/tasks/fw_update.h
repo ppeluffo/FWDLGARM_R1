@@ -112,6 +112,45 @@ typedef enum {
     fwMISMA_VERSION     /* es la que ya está corriendo: no hay nada que hacer  */
 } fw_result_t;
 
+/*------------------------------------------------------------------------------
+ * El resultado del COMMIT (copiar el banco 2 al banco 1).
+ *
+ * ⭐ Dice QUÉ falló, no sólo que falló — mismo criterio que `mb_result_t` y
+ *    que los `lteESC_*`: en el banco, saber si falló el borrado o la
+ *    verificación manda a mirar lugares distintos.
+ *
+ * ⚠ En TODOS los caminos de error el banco 1 queda SIN su primer doubleword a
+ *   propósito, así que el equipo arranca el bootloader de ST en vez de ejecutar
+ *   un firmware a medias. Es feo y es recuperable; lo otro no.
+ */
+typedef enum {
+    fwCMT_OK = 0,        /* no se ve nunca: si sale bien, resetea y no vuelve  */
+    fwCMT_SIN_IMAGEN,    /* el banco 2 está vacío o su CRC no cierra           */
+    fwCMT_BORRADO,       /* falló el mass erase del banco 1                     */
+    fwCMT_ESCRITURA,     /* falló programando un doubleword                     */
+    fwCMT_VERIFICACION,  /* ⛔ se escribió y al releer NO coincide              */
+    fwCMT_NO_EN_RAM      /* ⛔ una funcion del commit NO quedo en RAM          */
+} fw_commit_t;
+
+const char *fw_update_commit_str( fw_commit_t xRes );
+
+/*------------------------------------------------------------------------------
+ * Pone en marcha el firmware del banco 2 COPIÁNDOLO al banco 1, y resetea.
+ *
+ * ⛔⛔ NO RETORNA si sale bien.
+ *
+ * ⭐ Por qué copiar y no saltar con `BFB2` o con `FB_MODE`: el salto mete código
+ *    en el camino de ARRANQUE, que es lo único que validaron las 188 h de campo,
+ *    y la asimetría decide — si falla el commit son 82 µs y un estado
+ *    recuperable; si falla el arranque, el equipo no arranca, y eso pasa en
+ *    campo a 300 km. (`BFB2` además NO funciona en esta placa: ver CLAUDE.md.)
+ *
+ * ⚠ `ulLargo` son los bytes a copiar, múltiplo de 8. Con 0 copia el banco
+ *   entero salteándose lo que ya está borrado, que da lo mismo en tiempo y no
+ *   depende de que el llamador sepa el largo.
+ */
+fw_commit_t fw_update_commit( uint32_t ulLargo );
+
 typedef struct {
     char     pcVersion[ FW_UPDATE_VER_LEN ];
     char     pcHw[ FW_UPDATE_HW_LEN ];

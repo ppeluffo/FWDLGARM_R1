@@ -575,3 +575,302 @@ bool fw_update_arrancar_de( uint8_t ucBanco )
     xprintf( "FW:: ⛔ el OB_Launch no reinicio: los option bytes NO se recargaron\r\n" );
     return false;
 }
+
+/*==============================================================================
+ * EL COMMIT: copiar el banco 2 al banco 1
+ *------------------------------------------------------------------------------
+ * ⛔⛔ TODO LO QUE SIGUE CORRE DESDE RAM, Y NO ES UNA PRECAUCION: se está
+ *     borrando el banco DESDE EL QUE SE EJECUTA. En el instante en que arranca
+ *     el mass erase, la flash del banco 1 deja de existir — y ahí viven la HAL,
+ *     `.rodata`, `xprintf` y la tabla de vectores. Una sola llamada a cualquiera
+ *     de ellos es un HardFault sin retorno.
+ *
+ *     Por eso acá NO se usa la HAL: los registros de flash se manejan a mano,
+ *     con los bits verificados en `stm32l496xx.h` (ver el commit). Es la lección
+ *     del volcado de `ADC_CR` mal decodificado — las posiciones no se ponen de
+ *     memoria.
+ *
+ * ⭐⭐ Y EL ORDEN ES EL DISEÑO: el PRIMER DOUBLEWORD —el `SP` inicial y el
+ *     `Reset_Handler`— se escribe AL FINAL. Mientras no esté, `0x08000000` lee
+ *     `0xFFFFFFFF` y entra el mecanismo del silicio (DS11585 §3.8):
+ *
+ *        "if the first flash memory location is found empty, the flash empty
+ *         check mechanism forces boot from the system memory"
+ *
+ *     O sea que durante los ~2,65 s de la copia el equipo NO queda ladrillo:
+ *     arranca el bootloader de ST y se recupera por SWD o por serie.
+ *
+ *        antes del borrado     -> el firmware viejo, intacto
+ *        durante la copia      -> flash vacia -> bootloader de ST (recuperable)
+ *        los 82 us del final   -> ⛔ el unico caso malo
+ *        despues               -> el firmware nuevo
+ *
+ * ⚠ Ese empty check está activo PORQUE `nSWBOOT0 = 1`. El datasheet dice que
+ *   ponerlo en 0 lo desactiva: NO CAMBIARLO (y ver la nota de `BFB2` en
+ *   CLAUDE.md, donde eso ya se probó y se revirtió).
+ *
+ * Los tiempos salen del DS11585, no de una estimación:
+ *      tME        borrar un banco entero   22,13 ms tip   <- no 128 x tERASE
+ *      tPROG_PAGE 2 KB                     20,91 ms tip
+ *      tPROG      un doubleword            81,69 us tip
+ *============================================================================*/
+
+/* Las dos llaves que destraban `FLASH->CR`. Van literales y no por el define de
+   la HAL: este código no puede depender de nada que viva en flash. */
+#define FW_CMT_KEY1             0x45670123UL
+#define FW_CMT_KEY2             0xCDEF89ABUL
+
+/* Todos los flags de error de `FLASH_SR`, juntos. Verificados en el header:
+   OPERR(1) PROGERR(3) WRPERR(4) PGAERR(5) SIZERR(6) PGSERR(7) MISERR(8) FASTERR(9) */
+#define FW_CMT_SR_ERRORES       ( FLASH_SR_OPERR   | FLASH_SR_PROGERR | FLASH_SR_WRPERR  | \
+                                  FLASH_SR_PGAERR  | FLASH_SR_SIZERR  | FLASH_SR_PGSERR  | \
+                                  FLASH_SR_MISERR  | FLASH_SR_FASTERR )
+
+/*------------------------------------------------------------------------------
+ * Espera a que la flash termine, pateando el perro.
+ *
+ * ⛔⛔ VA EN `.RamFunc`, Y NO ALCANZA CON `inline`: con `-O0` —que es como se
+ *    compila todo el bring-up— **GCC NO INLINEA NADA**, el `inline` es una
+ *    sugerencia. La primera versión quedó en flash y `prvCommitEnRam()` la
+ *    llamaba por un *veneer*: con el banco 1 ya borrado eso es un HardFault y
+ *    el equipo muerto. Compila sin un warning y falla sólo al ejecutarse.
+ *    ⭐ Lo cazo `arm-none-eabi-nm`, y por eso el build lo verifica (ver abajo).
+ * ⭐ El kick no es cosmético: el IWDG tiene una ventana de ~32,8 s y sigue
+ *    contando acá. La copia son ~2,7 s, así que entra con margen — pero si
+ *    alguna espera se estirara, un reset a mitad del banco 1 es exactamente
+ *    el desenlace que este diseño evita.
+ */
+__attribute__( ( section( ".RamFunc" ), noinline ) )
+static uint32_t prvEsperarFlash( void )
+{
+    uint32_t ulSr;
+
+    do
+    {
+        IWDG->KR = 0x0000AAAAUL;
+        ulSr = FLASH->SR;
+    } while( ( ulSr & FLASH_SR_BSY ) != 0UL );
+
+    return ( ulSr & FW_CMT_SR_ERRORES );
+}
+
+/*------------------------------------------------------------------------------
+ * Programa UN doubleword. Es la unidad del L4: 64 bits, y la escritura la
+ * dispara el SEGUNDO word de 32.
+ */
+__attribute__( ( section( ".RamFunc" ), noinline ) )
+static uint32_t prvProgramarDw( uint32_t ulDir, uint32_t ulLo, uint32_t ulHi )
+{
+    uint32_t ulErr;
+
+    FLASH->SR  = FW_CMT_SR_ERRORES | FLASH_SR_EOP;
+    FLASH->CR |= FLASH_CR_PG;
+
+    *( volatile uint32_t * )( ulDir        ) = ulLo;
+    __ISB();
+    *( volatile uint32_t * )( ulDir + 4UL ) = ulHi;
+
+    ulErr = prvEsperarFlash();
+
+    FLASH->SR  = FLASH_SR_EOP;
+    FLASH->CR &= ~FLASH_CR_PG;
+
+    return ulErr;
+}
+
+/*------------------------------------------------------------------------------
+ * La copia entera, desde RAM. NO RETORNA si sale bien: resetea.
+ *
+ * Devuelve un `fw_commit_t` sólo en los caminos de error, y en ésos el banco 1
+ * quedó SIN su primer doubleword a propósito — o sea, el equipo arranca el
+ * bootloader de ST en vez de ejecutar un firmware a medias.
+ */
+__attribute__( ( section( ".RamFunc" ), noinline ) )
+static uint8_t prvCommitEnRam( uint32_t ulLargo )
+{
+    uint32_t ulPrimLo;
+    uint32_t ulPrimHi;
+    uint32_t ulOfs;
+    uint32_t ulErr;
+
+    /* ⭐ El primer doubleword se guarda ANTES de tocar nada: después del mass
+       erase seguiría siendo legible (vive en el banco 2), pero tenerlo en un
+       registro hace que el camino final no dependa de ninguna lectura. */
+    ulPrimLo = *( volatile uint32_t * )( FW_BANCO2_BASE        );
+    ulPrimHi = *( volatile uint32_t * )( FW_BANCO2_BASE + 4UL );
+
+    /* Las caches guardan lo que había ANTES de borrar: con ellas prendidas, la
+       verificación de abajo leería el firmware viejo y daría OK sobre un banco
+       que no se escribió. */
+    FLASH->ACR &= ~( FLASH_ACR_ICEN | FLASH_ACR_DCEN );
+    FLASH->ACR |=  ( FLASH_ACR_ICRST | FLASH_ACR_DCRST );
+    FLASH->ACR &= ~( FLASH_ACR_ICRST | FLASH_ACR_DCRST );
+
+    if( ( FLASH->CR & FLASH_CR_LOCK ) != 0UL )
+    {
+        FLASH->KEYR = FW_CMT_KEY1;
+        FLASH->KEYR = FW_CMT_KEY2;
+    }
+
+    ( void ) prvEsperarFlash();
+    FLASH->SR = FW_CMT_SR_ERRORES | FLASH_SR_EOP;
+
+    /*--- 1. borrar el BANCO 1 ENTERO: 22 ms, contra 2,8 s pagina por pagina ---*/
+    FLASH->CR |= FLASH_CR_MER1;
+    FLASH->CR |= FLASH_CR_STRT;
+    ulErr = prvEsperarFlash();
+    FLASH->CR &= ~FLASH_CR_MER1;
+
+    if( ulErr != 0UL )
+    {
+        FLASH->CR |= FLASH_CR_LOCK;
+        return fwCMT_BORRADO;
+    }
+
+    /*--- 2. copiar TODO MENOS el primer doubleword ---*/
+    for( ulOfs = 8UL; ulOfs < ulLargo; ulOfs += 8UL )
+    {
+        uint32_t ulLo = *( volatile uint32_t * )( FW_BANCO2_BASE + ulOfs        );
+        uint32_t ulHi = *( volatile uint32_t * )( FW_BANCO2_BASE + ulOfs + 4UL );
+
+        /* \u2b50 Saltear lo que ya est\u00e1 borrado es lo que permite copiar el banco
+           ENTERO sin pagarlo en tiempo: el banco 1 reci\u00e9n borrado ya vale
+           0xFF, as\u00ed que escribir ah\u00ed no cambia nada. Y de paso el llamador no
+           necesita saber el largo de la imagen. */
+        if( ( ulLo == 0xFFFFFFFFUL ) && ( ulHi == 0xFFFFFFFFUL ) )
+        {
+            IWDG->KR = 0x0000AAAAUL;
+            continue;
+        }
+
+        ulErr = prvProgramarDw( FLASH_BASE + ulOfs, ulLo, ulHi );
+        if( ulErr != 0UL )
+        {
+            FLASH->CR |= FLASH_CR_LOCK;
+            return fwCMT_ESCRITURA;
+        }
+    }
+
+    /*--- 3. VERIFICAR antes de armar el arranque -------------------------------
+       ⭐ Es lo que hace que un error no se descubra en el próximo reset. Si acá
+          falla, el primer doubleword NO se escribe y el equipo arranca el
+          bootloader: feo, pero recuperable y visible. */
+    for( ulOfs = 8UL; ulOfs < ulLargo; ulOfs += 4UL )
+    {
+        if( *( volatile uint32_t * )( FLASH_BASE     + ulOfs ) !=
+            *( volatile uint32_t * )( FW_BANCO2_BASE + ulOfs ) )
+        {
+            FLASH->CR |= FLASH_CR_LOCK;
+            return fwCMT_VERIFICACION;
+        }
+        IWDG->KR = 0x0000AAAAUL;
+    }
+
+    /*--- 4. y recién ahora, los 82 us que arman el arranque ---*/
+    ulErr = prvProgramarDw( FLASH_BASE, ulPrimLo, ulPrimHi );
+    FLASH->CR |= FLASH_CR_LOCK;
+
+    if( ulErr != 0UL )
+    {
+        return fwCMT_ESCRITURA;
+    }
+
+    /*--- 5. reset. No vuelve. ---*/
+    SCB->AIRCR = ( 0x5FAUL << SCB_AIRCR_VECTKEY_Pos ) | SCB_AIRCR_SYSRESETREQ_Msk;
+    __DSB();
+
+    for( ;; )
+    {
+        /* el reset tarda unos ciclos en llegar */
+    }
+}
+
+/*------------------------------------------------------------------------------*/
+const char *fw_update_commit_str( fw_commit_t xRes )
+{
+    switch( xRes )
+    {
+        case fwCMT_OK:           return "OK";
+        case fwCMT_SIN_IMAGEN:   return "el banco 2 no tiene un firmware valido";
+        case fwCMT_BORRADO:      return "fallo el borrado del banco 1";
+        case fwCMT_ESCRITURA:    return "fallo la escritura del banco 1";
+        case fwCMT_VERIFICACION: return "se escribio y al releer NO coincide";
+        case fwCMT_NO_EN_RAM:    return "BUG: una funcion del commit no quedo en RAM";
+        default:                 return "?";
+    }
+}
+
+/*------------------------------------------------------------------------------
+ * \u00bfEsa funcion vive en RAM?
+ *
+ * \u26a0 El bit 0 de un puntero a funcion de Thumb es el flag de modo, no parte de
+ *   la direccion: hay que limpiarlo o toda direccion par pareceria impar.
+ */
+static bool prvEnRam( const void *pvFn )
+{
+    uint32_t ulDir = ( ( uint32_t ) pvFn ) & ~1UL;
+
+    return ( ( ulDir >= SRAM1_BASE ) &&
+             ( ulDir <  ( SRAM1_BASE + ( 256UL * 1024UL ) ) ) );
+}
+
+/*------------------------------------------------------------------------------*/
+fw_commit_t fw_update_commit( uint32_t ulLargo )
+{
+    uint32_t ulPrimLo;
+    uint8_t  ucRes;
+
+    if( ( ulLargo == 0UL ) || ( ulLargo > FW_UPDATE_BANCO_BYTES ) )
+    {
+        ulLargo = FW_UPDATE_BANCO_BYTES;
+    }
+    ulLargo &= ~7UL;                      /* multiplo de 8: el L4 programa de a dw */
+
+    /* El banco 2 tiene que tener ALGO. No se valida el CRC aca --el commit no
+       sabe el largo de la imagen-- pero un banco borrado no tiene un SP, y con
+       eso alcanza para no borrar el banco 1 al divino boton. */
+    ulPrimLo = *( const volatile uint32_t * ) FW_BANCO2_BASE;
+    if( ( ulPrimLo == 0xFFFFFFFFUL ) || ( ulPrimLo == 0UL ) )
+    {
+        return fwCMT_SIN_IMAGEN;
+    }
+
+    /* \u26d4 Desde aca y hasta el reset no puede ejecutarse una sola instruccion
+       que viva en el banco 1. La tabla de vectores tambien esta ahi, asi que
+       una interrupcion seria fatal: por eso las interrupciones se CORTAN, no
+       se bajan de prioridad. */
+    /* \u2b50\u2b50 LA RED QUE NO DEPENDE DE MI MEMORIA: si alguna de las tres funciones
+       del commit no quedo en RAM, no se toca la flash. Es barato y convierte
+       un bug fatal --banco 1 borrado y HardFault-- en un mensaje.
+
+       \u26a0 Ya paso una vez: `static inline` no alcanza con -O0 (GCC no inlinea),
+       y dos de las tres quedaron en flash. Compilo sin un warning. */
+    if( !prvEnRam( ( const void * ) prvCommitEnRam ) ||
+        !prvEnRam( ( const void * ) prvProgramarDw ) ||
+        !prvEnRam( ( const void * ) prvEsperarFlash ) )
+    {
+        return fwCMT_NO_EN_RAM;
+    }
+
+    __disable_irq();
+    __DSB();
+    __ISB();
+
+    ucRes = prvCommitEnRam( ulLargo );
+
+    /* \u26a0 Solo se llega aca si la copia FALLO. El banco 1 quedo sin su primer
+       doubleword, asi que un reset manda al bootloader de ST --que es
+       recuperable-- en vez de ejecutar un firmware a medias. Se reponen las
+       interrupciones para poder informarlo por la consola, que todavia vive en
+       RAM... pero su codigo NO: el banco 1 esta borrado.
+
+       \u2b50 Por eso NO se intenta imprimir: se resetea y que el bootloader hable.
+          Intentar un xprintf aca seria saltar a flash borrada. */
+    ( void ) ucRes;
+
+    SCB->AIRCR = ( 0x5FAUL << SCB_AIRCR_VECTKEY_Pos ) | SCB_AIRCR_SYSRESETREQ_Msk;
+    __DSB();
+    for( ;; )
+    {
+    }
+}
