@@ -127,11 +127,11 @@ typedef struct {
  * segundos — y es a propósito: **un CRC que no se verifica no sirve de nada**,
  * y el único momento barato para verificarlo es antes de tocar la flash.
  *
- * `pxInfo` admite NULL. Se llena con lo que se haya podido leer, incluso
+ * `pcArchivo` admite NULL (usa `FIRMWARE.BIN`). `pxInfo` admite NULL. Se llena con lo que se haya podido leer, incluso
  * cuando el resultado no es `fwHAY_NUEVO`: en un archivo corrupto, ver la
  * versión que *dice* tener ya orienta.
  */
-fw_result_t fw_update_examinar( fw_info_t *pxInfo );
+fw_result_t fw_update_examinar( const char *pcArchivo, fw_info_t *pxInfo );
 
 /*------------------------------------------------------------------------------
  * El texto de un resultado, para la consola y el registro de eventos.

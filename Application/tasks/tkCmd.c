@@ -6055,6 +6055,13 @@ static void cmdFw( void )
 {
     fw_info_t   xInfo;
     fw_result_t xRes;
+    /*
+     * ⭐ El nombre es OPCIONAL, y no es sólo para el banco: en campo, poder
+     * examinar un archivo concreto —uno que un técnico dejó con otro nombre, o
+     * el `.OK` de una actualización anterior— sin tener que renombrarlo con una
+     * PC al lado, vale. Por omisión, el que el equipo aplicaría solo.
+     */
+    const char *pcArchivo = ( argv[ 1 ] != NULL ) ? argv[ 1 ] : FW_UPDATE_ARCHIVO;
     /* ⚠ En TICKS, y la conversión a ms al final sobre la DIFERENCIA.
        `configTICK_RATE_HZ / 1000` es 512/1000 = **0** en aritmética entera, o
        sea una división por cero — el compilador la caza, que es exactamente
@@ -6067,7 +6074,7 @@ static void cmdFw( void )
     xprintf( "  banco      : 512 KB por banco; esta imagen son %lu KB\r\n",
              ( unsigned long ) ( FW_UPDATE_BANCO_BYTES / 1024UL ) );
 
-    xprintf( "\r\nFW:: mirando la microSD (%s)...\r\n", FW_UPDATE_ARCHIVO );
+    xprintf( "\r\nFW:: mirando la microSD (%s)...\r\n", pcArchivo );
     xprintf( "     se lee el archivo ENTERO para verificar el CRC: tarda unos segundos\r\n" );
 
     /* ⚠ La prórroga del watchdog: leer 176 KB de la microSD puede pasarse del
@@ -6075,7 +6082,7 @@ static void cmdFw( void )
        medio. Es el mismo criterio que `f_mkfs()` y el volcado de la ventana. */
     wdg_kick_largo( 120000UL );
 
-    xRes = fw_update_examinar( &xInfo );
+    xRes = fw_update_examinar( pcArchivo, &xInfo );
 
     wdg_kick();
 

@@ -106,7 +106,7 @@ const char *fw_update_str( fw_result_t xRes )
  */
 static uint8_t pucBloque[ 512 ];
 
-fw_result_t fw_update_examinar( fw_info_t *pxInfo )
+fw_result_t fw_update_examinar( const char *pcArchivo, fw_info_t *pxInfo )
 {
     fw_header_t xHdr;
     uint32_t    ulTam = 0UL;
@@ -119,7 +119,12 @@ fw_result_t fw_update_examinar( fw_info_t *pxInfo )
         memset( pxInfo, 0, sizeof( fw_info_t ) );
     }
 
-    if( !fs_sd_fw_abrir( FW_UPDATE_ARCHIVO, &ulTam ) )
+    if( pcArchivo == NULL )
+    {
+        pcArchivo = FW_UPDATE_ARCHIVO;
+    }
+
+    if( !fs_sd_fw_abrir( pcArchivo, &ulTam ) )
     {
         /* `fs_sd_fw_abrir()` distingue los tres casos; acá se traducen. */
         return fs_sd_fw_ultimo_error();
