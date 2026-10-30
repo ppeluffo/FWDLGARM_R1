@@ -7383,18 +7383,46 @@ AN2606**: es una nota al pie sin texto. Verificado por búsqueda en las 553 pág
 ✅ **Y el equipo se recupera SIEMPRE con `-ob BFB2=0`**, las cuatro veces — el banco 1 nunca se tocó,
 que era justamente la premisa del diseño atómico. Las etapas 1, 2 y 3 **siguen validadas**.
 
-#### ⏳ El sospechoso que queda, y por qué no lo puedo cerrar solo
+#### ⛔ `PH3-BOOT0` también quedó REFUTADO, y de forma limpia
 
-**`PH3-BOOT0`**: con `nSWBOOT0 = 1` el BOOT0 sale **del pin**, no de un bit. Si en R001 ese pin no
-está cableado y flota, el Pattern 6 pasa a ser indeterminado — y su **primera** condición
-(`Boot0(pin) = 1, nBoot1 = 1 y nBoot0_SW = 1`) manda al bootloader.
+Era el último sospechoso: con `nSWBOOT0 = 1` el BOOT0 sale **del pin PH3**, que es el **pin 60** del
+LQFP64 —entre `PB7` (RX de la consola) y `PB8`— y **no figura ni en `interfases_pines.csv` ni en el
+`.ioc`**. Si flotara, el Pattern 6 sería indeterminado.
 
-⚠ Con `BFB2 = 0` eso no se nota, porque ahí el micro arranca de la flash igual. **Hay que mirar PH3
-en el esquemático de R001** antes de seguir.
+⭐ **El datasheet nombra la solución textualmente** (DS11585 §3.8): *"It is possible to disable this
+feature by configuring the option bytes (instead of BOOT0 pin) to **force boot from the main flash
+memory (`nSWBOOT0 = 0`, `nBOOT0 = 1`)**"*. Y `nBOOT0` ya valía 1, así que el cambio era **de un solo
+bit**.
 
-⭐⭐ **Y hay una salida que NO depende de nada de esto**, para cuando se decida: poner `nSWBOOT0 = 0`
-y `nBOOT0 = 1`, con lo que BOOT0 pasa a ser un **bit** y deja de depender del pin. Es un option byte
-más, del mismo riesgo y la misma reversibilidad que `BFB2`.
+| Prueba (2026-10-30) | |
+|---|---|
+| `nSWBOOT0 = 0`, `BFB2 = 0` | ✅ **el equipo arranca perfecto** — el cambio es inocuo |
+| `nSWBOOT0 = 0`, `BFB2 = 1` | ⛔ **idéntico al anterior**: `RCC_CR = 0x63`, `RCC_CFGR = 0` |
+
+⭐⭐ **O sea que BOOT0 NO es la causa**: con el pin fuera de la ecuación el síntoma es exactamente el
+mismo. Son cinco hipótesis refutadas, pero ésta elimina un sospechoso grande **de forma definitiva**.
+
+⚠ **`nSWBOOT0` se devolvió a 1**, su valor validado en las 188 h de campo: la razón para cambiarlo
+quedó refutada, y *cambiar un número validado sin una razón es exactamente lo que este proyecto no
+hace*. ⏳ Queda anotado como palanca conocida e inocua para la revisión nueva de R001 — **si PH3 no
+está cableado, `nSWBOOT0 = 0` es más determinista**, porque además desactiva el *empty check
+mechanism* que puede mandar al bootloader solo.
+
+#### ⏳ Dónde seguir, cuando se retome
+
+Lo que **no** se probó todavía, en orden de costo:
+
+| | |
+|---|---|
+| ⭐ **Otra placa** | con dos placas, la sana separa *"el chip"* de *"esta unidad"* en un minuto — es la regla que ya cerró lo del TPS62130 y lo del conector SWD |
+| El `(1)` de la Figura 102 | la nota **no existe** en el documento; el rango real de *"int. SRAM address"* del bootloader V9.3 sólo lo sabe ST |
+| ⚠ **Preguntarle a ST** | con los cuatro registros medidos y los dos bancos válidos, es un reporte corto y concreto |
+
+⭐⭐ **Y hay una salida que NO necesita `BFB2` ni el bootloader**: que el **firmware del banco 1 salte
+al banco 2 por software** —`SYSCFG_MEMRMP.FB_MODE` es escribible—. Cuesta la atomicidad perfecta
+(el banco 1 pasa a ser un bootloader mínimo que siempre corre primero), pero **conserva todo lo
+demás de las etapas 1 a 3, que están validadas**, y el riesgo real que el diseño quería evitar
+—un corte de alimentación a mitad de la escritura— lo sigue cubriendo.
 
 ### ⏳ Lo que falta, por riesgo creciente
 
