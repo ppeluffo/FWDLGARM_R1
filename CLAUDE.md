@@ -2037,11 +2037,13 @@ el watchdog enciende el **LSI**, ~200 nA.
 
 | | |
 |---|---|
-| ⛔ **Sacar `R2`, `R6`, `R7`** | 90 µA. Probado desoldándolas; el manual dice que esos pines van al aire |
+| ⛔ **`R2`, `R6`, `R7`: footprint SÍ, componente NO** | 90 µA. Decisión de Pablo (2026-10-30): quedan en el PCB **sin soldar**, para no cerrar la puerta. ⚠ **Tienen que figurar como DNP explícito en el BOM**: si quedan sin mención, el próximo que arme una tanda las puebla *"porque el footprint está"* y vuelven los 90 µA — que no tienen ningún síntoma salvo la autonomía. Y si algún día se pueblan: **a `3V8RAIL`, nunca a `3V3RAIL`** |
 | ⛔ **`Y1` con sus condensadores de carga** | sin ellos, **+332 ppm = 28 s/día** en la hora de las muestras |
 | ✅ Pines 21/22 de la SIM al aire | ya corregido en el esquemático del 2026-09-30 |
 | ⏳ PA4 sin función | sacarlo del ruteo |
 | ⛔ **El pote del riel de 3V3 → una FIJA** | se corrió al manipular la placa el 2026-10-09 y nadie lo notó hasta que el ADC lo delató. ⚠ Hacia arriba llega a los 3,45-3,59 V que **hacen fallar el flasheo** |
+| ⛔ **El contador: `R40`→100K, `R42`→47K, `C17`→100nF** | escalar las TRES juntas deja el filtro idéntico y baja de 330 a 33 µA con el contacto cerrado. Ver su sección |
+| ⏳ El pote del riel de **3,8 V** → una fija | ya estaba anotado: cae cerca de **35,7 kΩ**, que existe en E96 |
 | ⏳ *opcional* | un **TVS (SMAJ18A)** en la entrada: el TPS22810 cuelga de la batería 24 h con el mismo máximo absoluto de 20 V que el chip que murió dos veces |
 
 ⭐ **Y los que se agregaron el 2026-10-29**, con su propia sección más abajo: el **SHT-40**, el
@@ -2050,17 +2052,41 @@ IP68, el footprint del opto con los pines 3/4 cambiados, el relé con 1/12 inver
 los da en **BOTTOM VIEW***) y las `NBIOT5/6` movidas a los pines 9 y 15 del módem. ⚠ La lista viva
 está en **`Hardware/Modificaciones R001.txt`**, que es de Pablo — acá va sólo lo que toca al firmware.
 
-##### ⚠ La ÚNICA duda que puede obligar a un cambio después de fabricar
+##### ✅ El contador de pulsos: se resuelve ESCALANDO el filtro, no midiendo el reed (2026-10-30)
 
-**El contador de pulsos.** `R40` drena **312 µA mientras el contacto esté cerrado**, y el ciclo de
-trabajo del reed **no está medido**: al 5 % son 16 µA, **al 50 % son 156 µA**.
+Acá estaba anotado que `R40` drena **330 µA mientras el contacto esté cerrado** y que el ciclo de
+trabajo del reed no está medido —al 5 % son 16 µA, **al 50 % son 156 µA**—, con la propuesta de
+medirlo con un osciloscopio antes de fabricar.
 
-⭐ Se cierra **antes de fabricar** y sin firmware: un caudalímetro real o un reed girando y el
-osciloscopio midiendo cuánto queda cerrado el contacto respecto del período.
+⛔ **Pablo desarmó esa propuesta, y tiene razón** (2026-10-30): *"los caudalímetros pueden ser de
+varios tipos, por lo tanto medir el tiempo de cerrado en un modelo no nos protege de otros casos"*.
+Medir da el dato de **ese** caudalímetro, no un límite de diseño — y el peor caso (un reed que queda
+pegado) lo tiene cualquiera.
 
-⚠ Y si aprieta, **el arreglo no es subir `R40` a secas**: con `R42`/`C17` fija la carga del filtro, y
-a 100 K el techo cae de ~60 Hz a ~8 Hz. Es **rediseñar el filtro** — justo lo que no se quiere
-descubrir con las placas ya hechas.
+⭐⭐ **La salida es diseñar para el peor caso, y sale escalando el filtro ×10 sin tocar la
+topología:**
+
+```
+                 R40     R42    C17        tau_sub  tau_baj  t_cierre  t_apert   f_max
+ACTUAL           10K     4K7    1 uF        14,7ms   4,70ms    11,6ms    4,8ms   61,2 Hz
+x10             100K     47K    100nF       14,7ms   4,70ms    11,6ms    4,8ms   61,2 Hz
+```
+
+⭐ **El filtro queda IDÉNTICO** —mismas constantes de tiempo, mismo antirrebote, mismo techo de
+61 Hz— y el consumo con el contacto cerrado cae de **330 µA a 33 µA**. Contra un reposo de 6 µA,
+eso convierte "un reed pegado arruina la autonomía" en "se nota apenas", **sin depender del
+caudalímetro que toque**.
+
+⚠ **Las TRES se escalan juntas o no sirve.** Subir sólo `R40` a 100 K sin bajar `C17` lleva
+`tau_sub` de 14,7 a 104,7 ms y **el techo de frecuencia cae de 61 a 11,5 Hz** — que es justo lo que
+estaba anotado como "rediseñar el filtro". Escalando las tres, no hay rediseño.
+
+⭐ **Y de yapa el opto queda con diez veces más margen**: el CTR necesario para saturar baja de
+**5,92 % a 0,59 %**. Hasta la unidad fallada que costó el bring-up —la del 1,5 %— habría andado.
+
+⚠ Lo único a vigilar: con 147 kΩ de impedancia, la corriente de fuga de entrada del 74AUP2G17
+(±1 µA en el peor caso del datasheet, nA típico) daría hasta 147 mV de offset. Contra umbrales de
+1,2 y 1,8 V no molesta.
 
 #### ⛔ El consumo de la placa nueva: qué está descartado (2026-09-29)
 
@@ -7025,15 +7051,153 @@ que hace cualquier sensor de conductividad serio y cuesta unas pocas líneas.
 así que hace falta un **pull-down físico** que defina el *"sin agua = 0 V"*. Y ése, junto con el C de
 la red RC, fija cuánto hay que esperar entre excitar y convertir.
 
-### ⏳ Lo que queda por decidir antes de fabricar
+### ✅ EL CIRCUITO DEL PEINE, cerrado (2026-10-30)
+
+Diseño de Pablo en `Tools/circuito_peine_stm32.svg` (⚠ **el SVG dice PC2/PC0 y está
+desactualizado**: los pines son **PB2 y PC5**).
+
+```
+PB2 (GPIO) --[R1 10k]-- electrodo A ... peine (Rw) ... electrodo B --+--[R3 10k]--+-- PC5 (ADC)
+                                                                     |            |
+                                                                 [R2 470k]     [C1 10nF]
+                                                                     |            |
+                                                                    GND          GND
+
+  reposo: PB2 en BAJO -> R2 fija el nodo en 0 V. Sin flotacion y sin DC en el agua.
+  medida: PB2 en ALTO -> esperar ~25 ms -> convertir PC5 -> PB2 en BAJO
+```
+
+⭐ **La topología separa el divisor (R1/Rw/R2) del filtro del ADC (R3/C1)**, así cada uno se
+dimensiona por su lado. Es mejor que un divisor único con el ADC colgado del nodo.
+
+| | Valor | Por qué |
+|---|---|---|
+| **R1** | **10 kΩ** | ⚠ **protección, no limitación**: la corriente la fija R2. Con 1 kΩ, si el cable del peine toca los 12 V entran **8,2 mA al clamp del GPIO** y el máximo son 5 mA; con 10 kΩ quedan 0,8 mA. Y es despreciable frente a un peine de cientos de kΩ |
+| ⭐ **R2** | **470 kΩ** | pone el **punto medio del divisor en 470 kΩ**, o sea en plena zona de **condensación** — que es el fenómeno lento que corroe. Casi toda la escala del ADC se gasta entre "seco" y "condensación densa" |
+| **R3** | **10 kΩ** | protege el ADC: con 12 V en el peine, 817 µA de clamp contra los 5 mA admitidos |
+| **C1** | **10 nF** | ⛔ **1 nF choca con el oversampling 16× del ADC** — ver abajo |
+
+```
+que hay en el peine        R peine   V nodo  cuentas
+seco (aire)               1000000k   0,002        1
+humedad superficial         10000k   0,148      183
+rocio incipiente             2000k   0,628      778
+condensacion                  500k   1,597     1982
+condensacion densa            200k   2,311     2868
+pelicula de agua               50k   2,977     3694
+AGUA de red                    10k   3,225     4001
+```
+
+#### ⛔ Por qué C1 pasa de 1 nF a 10 nF: el OVERSAMPLING
+
+No se ve en el esquemático porque es una interacción con el `.ioc`. El ADC hace **16 conversiones
+en 0,7 ms** (el oversampling que entró el 2026-10-09 para bajar el ruido), y cada una le roba carga
+a C1 **a través de una impedancia de fuente de hasta 480 kΩ**, que no alcanza a reponerla entre
+conversión y conversión.
+
+| | error en la zona de condensación |
+|---|---|
+| C1 = 1 nF | 48 cuentas de 1982 — **2,4 %** |
+| ⭐ **C1 = 10 nF** | 14 cuentas — 0,7 % |
+| C1 = 100 nF | 2 cuentas — 0,1 % |
+
+⚠ Con 1 nF **igual funciona** —el error es sistemático y proporcional, así que no arruina la
+discriminación seco/húmedo/mojado— pero 10 nF lo elimina casi gratis.
+
+⚠ **El costo es el asentamiento, y hay que corregir la nota del SVG** (dice ~5 ms):
+
+```
+C1 =  1 nF   peine seco: esperar   2,4 ms
+C1 = 10 nF   peine seco: esperar    24 ms      <- el valor elegido
+C1 = 100 nF  peine seco: esperar   240 ms
+```
+
+Con 25 ms cada 5 minutos el ciclo de trabajo es del **0,008 %**, y el micro puede dormir.
+
+#### ✅ La electrólisis queda DESCARTADA, y no por suerte: la resuelve R2
+
+Estaba anotado acá como el riesgo del diseño —*"corriente continua por un electrolito corroe el
+electrodo positivo, y en semanas el peine se pasiva"*— con la propuesta de **alternar la polaridad**.
+
+⭐ **Con R2 = 470 kΩ no hace falta.** La corriente por el agua es de **3,4 µA**, y la cuenta cierra
+el caso:
+
+```
+peor caso: agua permanente, excitando 250 ms cada 5 min
+   180 mC/año  ->  para corroer 1 mg de cobre hacen falta ~3 C  ->  17 AÑOS por mg
+```
+
+⚠ **La objeción era válida para la otra propuesta** —`Rexc` 10 k / `Rpd` 100 k, con 30 µA— y Pablo
+la desactivó sin proponérselo al elegir 470 kΩ. Queda anotado porque **si alguien baja R2 para
+"ganar sensibilidad", la electrólisis vuelve**: es inversamente proporcional.
+
+#### ✅ Los pines, verificados y no inferidos
 
 | | |
 |---|---|
-| ⭐ **El dimensionado** | R de excitación, pull-down y C. Depende de **qué tiene que disparar la alarma**: distinguir *condensación* de *agua acumulada* es el requisito que fija los umbrales |
-| ⚠ La conductividad **varía 100×** con la pureza del agua | así que el umbral no puede ser absoluto; conviene pensarlo como *"más conductivo que X"* y no como un valor de volts |
-| El SHT-40 | dirección **`0x44`**, libre contra los 7 del bus (`0x41`, `0x50`, `0x51`, `0x57`, `0x58`, `0x59`, `0x6F`). ⚠ Confirmar la variante: `-AD1B` es 0x44 y `-BD1B` es 0x45 |
-| ⚠ El calefactor del SHT-40 | son decenas de mA: no usarlo salvo a demanda, y nunca en el poleo |
-| ⏳ Los campos nuevos en el frame | el `dataRcd` está en **62 de 64 bytes**: agregar humedad, temperatura y el nivel de agua **no entra**, y el `_Static_assert` lo va a decir. Hay que decidir entre subir el registro a 72 B (1763 registros en vez de 1984) o sacar algo — ⚠ y **antes de que haya equipos con datos guardados**, porque cambiar el tamaño invalida lo grabado |
+| **PB2** (excitación) | libre en el `.c` generado. ⭐ Y **NO es BOOT1** en el L4: BOOT0 es el pin dedicado `PH3` y BOOT1 es un bit de `FLASH_OPTR` (en un F1 o F4 esto habría sido un problema real) |
+| **PC5** (ADC) | ⭐⭐ **`ADC12_INP14` → `ADC_CHANNEL_14` en ADC1**, leído del **datasheet pág. 79**, no inferido. El control cruzado es que la misma tabla da `PB0 = ADC12_INP15`, que coincide con lo ya documentado |
+
+⚠ **PC5 es `USART3_RX` en AF7**, y USART3 es el RS485 — pero el RS485 usa PB10/PB11, así que no hay
+conflicto. Sólo hay que asegurarse de que CubeMX no se lo asigne. Ya hay precedente: **PC4 es
+`USART3_TX` y se usa como GPIO** (`EN_SENS12V`) desde el bring-up.
+
+#### ⚠ Tres cosas para cuando se escriba el firmware
+
+| | |
+|---|---|
+| ⛔ **El sample time va POR CANAL** | el canal del peine necesita `ADC_SAMPLETIME_640CYCLES_5` explícito. Con el default la conversión corta antes de que el nodo se asiente y la lectura sale **baja** — o sea *menos agua*, el error que no se quiere |
+| **El layout** | `C1` cerca del micro y `R1` cerca del conector del peine: el cable es una antena y el nodo es de alta impedancia |
+| **Al servidor va el valor CRUDO** | decisión de Pablo: el equipo no decide nada, manda el dato y el servidor pone los umbrales |
+
+### ⭐⭐ Los DOS sensores: uno predice y el otro confirma
+
+Dato de Pablo (2026-10-30): *"La detección tiene 2 componentes: el peine y un sensor SHT40"*. No
+son redundantes — miden cosas distintas y la combinación da algo que ninguno da solo:
+
+| Etapa | Quién la ve | Qué significa |
+|---|---|---|
+| El **punto de rocío** se acerca a la temperatura de la caja | ⭐ **SHT-40** | **va a condensar** — todavía no pasó nada |
+| Condensación en la superficie | **peine**, R alta | ya condensó: la corrosión arrancó |
+| Agua líquida | **peine**, R baja | ⛔ entró agua |
+
+```
+T aire   HR     T rocio    margen
+ 25 C    60     16,7 C      8,3 C
+ 25 C    80     21,3 C      3,7 C
+ 25 C    95     24,1 C      0,9 C   <- condensa ya
+ 15 C    95     14,2 C      0,8 C   <- condensa ya
+```
+
+⭐ **Y se validan mutuamente**: peine mojado con 40 % de HR es un falso positivo o una fuga de otra
+cosa; 100 % de HR con el peine seco es *está por condensar*.
+
+#### ⛔⛔ El requisito de layout del SHT-40: LEJOS de todo lo que caliente
+
+No es por la temperatura en sí: **la humedad relativa depende fuertemente de la temperatura a la que
+se mide**, y el aire es el mismo.
+
+```
+si el sensor lee de mas    informa HR      siendo la real 85 %
+      +1 C                   79,9 %          -5,1 puntos
+      +3 C                   70,7 %         -14,3 puntos
+      +5 C                   62,7 %         -22,3 puntos
+```
+
+⛔ **Tres grados de autocalentamiento arruinan la predicción**: la caja estaría por condensar y el
+equipo informaría 70 %. Va **al borde de la placa**, lejos de los rieles conmutados y del modem, y
+si se puede con un recorte o ranura que corte el camino térmico por el cobre.
+
+⚠ **Y su calefactor interno no se usa nunca en el poleo**: son decenas de mA, arruinaría su propia
+medida y la autonomía.
+
+#### ⏳ Lo que esto le pide al firmware
+
+| | |
+|---|---|
+| El SHT-40 | dirección **`0x44`**, libre contra los 7 del bus. ⚠ Confirmar la variante: `-AD1B` es 0x44 y `-BD1B` es 0x45 |
+| ⛔ **El `dataRcd`** | T + HR + nivel del peine son **4 bytes más** sobre **62 de 64 usados**. Hay que subir el registro a **72 B** (1763 registros en vez de 1984 — de 6,9 a 6,1 días de buffer, y con transmisión cada 3 h sobra). ⚠ **Antes de que haya equipos con datos guardados**, porque cambiar el tamaño invalida lo grabado |
+| El punto de rocío | **lo calcula el SERVIDOR**, no el equipo: evita meter logaritmos en el firmware y es coherente con que el servidor decide |
 
 ## ⏸ ACTUALIZAR EL FIRMWARE DESDE LA microSD — diseñado, DIFERIDO al post-soak (2026-10-12)
 
