@@ -7443,6 +7443,108 @@ que **el bank swap tampoco se aplicó**, que es lo primero que `BFB2` tendría q
 `_estack`, BOOT0, el empty check—: **ninguno de ellos puede impedir que el micro arranque el
 bootloader**, y el bootloader ni siquiera empieza.
 
+### ✅✅ ETAPA 4 RESUELTA: `fw commit` copia el banco 2 al banco 1 (`0.0.20`, 2026-10-30)
+
+⭐ **Se abandonó `BFB2` y se tomó el camino B.** El firmware nuevo se pone en marcha
+**copiándolo** al banco 1, no saltando a él — así el **camino de arranque no se toca**, que es lo
+único que validaron las 188 h de campo.
+
+```
+cmd>fw commit aplicar
+  banco 2  : SP 0x2003FFF8  reset 0x08018D51
+  aplicando... (la consola se corta aca)
+                                    <- 2,7 s
+FWDLGARM_R1 0.0.20 - consola TERM   <- ⭐ LA VERSION DEL BANCO 2
+compilado Oct 30 2026 20:54:30
+reset por    : SOFT PIN
+```
+
+| Criterio | Resultado |
+|---|---|
+| ⭐ **El equipo arranca con el firmware del banco 2** | ✅ `0.0.20`, contra el `0.0.19` que corría |
+| ⭐⭐ **La copia es EXACTA** | ✅ leídos los dos bancos **por SWD**: `md5` idéntico al archivo original, **258.672 bytes** |
+| La fecha de compilación | ✅ `20:54:30` contra `20:54:32` — el 0.0.20 se compiló **2 s antes**, que es el orden real |
+| El reset | ✅ `SOFT PIN`: el del propio commit |
+| El equipo queda **completo** | ✅ `tkSys`, `tkWan`, `tkCtlPres`, eventos, poleo y los 362 registros de la ventana |
+| La red del banco vacío | ✅ `⛔ el BANCO 2 esta EN BLANCO: no hay nada que aplicar` |
+
+⭐ **Las tres pruebas son independientes entre sí**: la versión la informa el firmware nuevo, el
+`md5` lo da el programador sin pasar por el firmware, y la fecha de compilación no se puede
+falsificar — sale de `__DATE__`/`__TIME__`.
+
+#### ⭐⭐ El orden ES el diseño: el primer doubleword va ÚLTIMO
+
+```
+1. borrar el banco 1 entero con MER1    22 ms     <- tME, no 128 x tERASE (2,8 s)
+2. copiar banco2 -> banco1, MENOS el primer doubleword
+3. VERIFICAR releyendo
+4. recien ahi el primer doubleword      82 us
+5. reset
+```
+
+Mientras ese doubleword —el `SP` y el `Reset_Handler`— no esté escrito, `0x08000000` lee
+`0xFFFFFFFF` y entra el mecanismo del silicio (DS11585 §3.8): *"if the first flash memory location
+is found empty, the flash empty check mechanism **forces boot from the system memory**"*.
+
+| Si se corta la alimentación… | Qué queda |
+|---|---|
+| antes del borrado | ⭐ el firmware viejo, intacto |
+| durante los ~2,7 s de la copia | ⚠ flash vacía → **bootloader de ST**: recuperable por SWD o por serie |
+| durante los **82 µs** finales | ⛔ el único caso malo |
+| después | ⭐ el firmware nuevo |
+
+⚠⚠ **Ese empty check está activo PORQUE `nSWBOOT0 = 1`** — el datasheet dice que ponerlo en 0 lo
+desactiva. **NO CAMBIARLO.**
+
+⭐ Y se saltean los doublewords ya borrados, así que copiar el banco **entero** cuesta lo mismo que
+copiar la imagen: el llamador no necesita saber el largo.
+
+#### ⛔⛔ EL BUG QUE CASI MATA EL EQUIPO: `static inline` NO alcanza con `-O0`
+
+Es la lección de la etapa, y el síntoma habría sido **el equipo muerto**, no un error.
+
+Las tres funciones del commit tienen que vivir en **RAM**, porque borran el banco desde el que se
+ejecutan. Dos de ellas se escribieron `static inline`… y **GCC con `-O0` NO INLINEA NADA**:
+
+```
+20000570  prvCommitEnRam       <- en RAM
+0800af3c  prvEsperarFlash      ⛔ EN FLASH, llamada por un veneer
+0800af78  prvProgramarDw       ⛔ idem
+```
+
+⛔ Con el banco 1 ya borrado, ese salto es un **HardFault sin retorno**. **Compiló sin un solo
+warning**, y el único síntoma habría sido un equipo que no vuelve a arrancar.
+
+⭐ **Lo cazó `arm-none-eabi-nm`**, y por eso quedó **`Tools/verificar_commit_en_ram.sh`**, que
+chequea las tres cosas que importan:
+
+| | |
+|---|---|
+| 1 | las tres funciones viven en `0x2000xxxx` |
+| 2 | ninguna llamada sale de RAM — *el compilador genera saltos que uno no escribió* |
+| 3 | ningún literal se lee de flash |
+
+⭐⭐ **Y está PROBADO que detecta**: sacándole el `.RamFunc` a `prvProgramarDw` a propósito,
+informa `⛔ prvProgramarDw 0x0800af3c <- EN FLASH` y sale con 1. Un verificador que nunca se vio
+disparar da falsa seguridad — es la regla del `_Static_assert` del watchdog.
+
+⭐ Además hay una **red en tiempo de ejecución**: `prvEnRam()` comprueba las tres direcciones
+**antes** de tocar la flash y devuelve `fwCMT_NO_EN_RAM` sin borrar nada.
+
+#### ⚠ Lo que el commit NO puede hacer: informar su propio error
+
+Si la copia falla, el código que tendría que imprimirlo **vive en el banco recién borrado**. Lo
+único posible es resetear, y por eso el equipo cae al bootloader de ST — que es el estado
+recuperable. ⏳ El único error que sí se informa es `fwCMT_SIN_IMAGEN`, porque se detecta **antes**
+de tocar nada.
+
+#### ⏳ Lo que falta (etapa 5)
+
+El **rollback**: la marca de *"en prueba"* y la vuelta atrás si el firmware nuevo no logra una
+sesión en N arranques. ⭐ Va en la **EEPROM**, en `0x00400` —hay 3 KB libres— con el patrón de
+checksum + `offsetof` de la FAT y el contador de lotes. ⚠ **No en los primeros bytes**: `0x00000` es
+el bloque `base` y moverlo invalidaría las configuraciones ya grabadas.
+
 #### ⏸ DÓNDE SE RETOMA: `BFB2` se abandona, y hay UNA decisión sin tomar
 
 ⭐ **Decidido con Pablo (2026-10-30): se abandona `BFB2`.** Seis hipótesis refutadas, y la última
