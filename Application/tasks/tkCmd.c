@@ -6191,7 +6191,7 @@ static void cmdFw( void )
 
         if( xB2.bEnBlanco )
         {
-            xprintf( "  esta EN BLANCO: el bootloader caeria al banco 1\r\n" );
+            xprintf( "  esta EN BLANCO: no hay nada para aplicar ('fw grabar')\r\n" );
         }
         else
         {
@@ -6200,8 +6200,8 @@ static void cmdFw( void )
             xprintf( "  vector reset  : 0x%08lX\r\n",
                      ( unsigned long ) xB2.ulResetBanco2 );
             xprintf( "  %s\r\n", xB2.bPlausible
-                     ? "==> el bootloader LO ACEPTARIA (el SP cae donde el del banco 1)"
-                     : "==> ⛔ el bootloader NO lo aceptaria: caeria al banco 1" );
+                     ? "==> PARECE un firmware: SP en SRAM1, reset en flash e impar"
+                     : "==> ⛔ NO parece un firmware: mirar el SP y el vector de arriba" );
         }
     }
 
@@ -6285,10 +6285,14 @@ static void cmdFw( void )
            puede pasar es que no se diga. */
         if( !xB2.bPlausible )
         {
-            xprintf( "\r\nFW:: ⚠ el SP del banco 2 (0x%08lX) NO cae donde el del\r\n",
-                     ( unsigned long ) xB2.ulSpBanco2 );
-            xprintf( "     banco 1 (0x%08lX). Eso no parece un firmware valido.\r\n",
-                     ( unsigned long ) xB2.ulSpBanco1 );
+            xprintf( "\r\nFW:: ⚠ el banco 2 no parece una tabla de vectores:\r\n" );
+            xprintf( "     SP    0x%08lX  (se espera dentro de SRAM1: 0x%08lX..0x%08lX)\r\n",
+                     ( unsigned long ) xB2.ulSpBanco2,
+                     ( unsigned long ) SRAM1_BASE,
+                     ( unsigned long ) ( SRAM1_BASE + ( 256UL * 1024UL ) ) );
+            xprintf( "     reset 0x%08lX  (se espera en la flash y IMPAR: el bit Thumb)\r\n",
+                     ( unsigned long ) xB2.ulResetBanco2 );
+            xprintf( "     se aplica igual: avisar es todo lo que corresponde aca.\r\n" );
         }
 
         xprintf( "\r\nFW:: COMMIT — el banco 2 pasa a ser el firmware del equipo\r\n" );
@@ -6419,10 +6423,17 @@ static void cmdFw( void )
 
     xprintf( "\r\n  resultado  : %s\r\n", fw_update_str( xRes ) );
 
-    if( ( xRes != fwSIN_TARJETA ) && ( xRes != fwNO_HAY ) )
+    if( ( xRes != fwSIN_TARJETA ) && ( xRes != fwNO_HAY ) && ( xRes != fwMAGIC ) )
     {
         /* ⭐ Se imprime lo leído AUNQUE el archivo no sirva: en uno corrupto,
-           ver la versión que *dice* tener ya orienta al que está mirando. */
+           ver la versión que *dice* tener ya orienta al que está mirando.
+         *
+         * ⛔ Pero NO con el magic fallado, y eso se vio en banco (2026-10-30):
+         * sobre un archivo de texto plano el comando informaba
+         * `version : 'es un firmware,'` e `imagen : 544175219 bytes`. En un
+         * archivo que NO es de este mecanismo no hay campos —hay bytes
+         * cualesquiera leídos en esas posiciones—, e imprimirlos con nombre
+         * invita a leer basura como dato. El veredicto solo alcanza. */
         xprintf( "  el archivo dice:\r\n" );
         xprintf( "    version  : '%s'\r\n", xInfo.pcVersion );
         xprintf( "    hardware : '%s'%s\r\n", xInfo.pcHw,

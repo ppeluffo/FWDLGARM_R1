@@ -482,22 +482,48 @@ void fw_update_estado_banco2( fw_banco2_t *pxEstado )
     pxEstado->bEnBlanco     = ( pulB2[ 0 ] == 0xFFFFFFFFUL );
 
     /*
-     * ⭐ El criterio: que el stack pointer del banco 2 caiga **en la misma
-     * región** que el del banco 1.
+     * ⭐⭐ EL CRITERIO ES "¿ESTO PARECE UNA TABLA DE VECTORES?", Y CAMBIÓ.
      *
-     * ⚠ Y se compara contra el banco 1 en vez de contra un rango de SRAM
-     * escrito a mano, a propósito: el banco 1 **es el que está corriendo**, así
-     * que su stack pointer es, por definición, uno que el bootloader aceptó. Un
-     * rango inventado por nosotros podría no ser el que mira ST —el `_estack`
-     * de este proyecto cae en 0x20040000, que es el borde superior de SRAM1 y
-     * el comienzo de SRAM2— y ahí un chequeo "propio" diría que está mal
-     * cuando está bien, o al revés.
+     * Hasta el 2026-10-30 se compara contra el banco 1 —los 16 bits altos del
+     * stack pointer—, razonando que el banco 1 **es el que está corriendo**, así
+     * que su SP es por definición uno que el bootloader del dual-bank boot
+     * aceptó. Eso tenía sentido mientras el arranque del banco 2 lo decidiera
+     * `BFB2`; con `BFB2` abandonado y el commit copiando bytes, el bootloader
+     * ya no mira nada y la pregunta dejó de ser la suya.
      *
-     * Se comparan los 16 bits altos: misma región de 64 KB.
+     * ⛔⛔ Y ADEMÁS DABA UN FALSO POSITIVO, MEDIDO EN BANCO (2026-10-30): el
+     * `0.0.20` tiene `_estack = 0x20040000` y el `0.0.21` `0x2003FFF8`, o sea
+     * `0x2004` contra `0x2003`. Con el ciclo completo desde la microSD, el
+     * comando declaró *"no parece un firmware valido"* sobre la imagen que
+     * arrancó y quedó corriendo perfecta. ⭐ Los **dos** valores son correctos:
+     * el stack **decrece** desde `_estack`, así que el tope de SRAM1 es un
+     * valor inicial legítimo —justo el borde donde los 16 bits altos cambian,
+     * que es el caso que el comentario viejo nombraba y el código no cubría—.
+     *
+     * ⚠ Un mensaje que manda a dudar de un archivo bueno cuesta más que no
+     * tener mensaje: es la familia del `help` que mentía sobre el parser y del
+     * `R1 = 0x00` que acusó a dos pistas sanas.
+     *
+     * Lo que se chequea ahora son las dos palabras que definen un arranque:
+     *
+     *   SP    en SRAM1, **con el tope inclusive** (`_estack` puede ser el tope)
+     *         y alineado —la AAPCS pide 8, se exige 4 para no rechazar de más—
+     *   reset dentro de la flash y **impar**: el bit 0 es el bit Thumb, y un
+     *         vector par en un Cortex-M es un HardFault al primer salto
      */
-    pxEstado->bPlausible = ( !pxEstado->bEnBlanco ) &&
-                           ( ( pxEstado->ulSpBanco2 & 0xFFFF0000UL ) ==
-                             ( pxEstado->ulSpBanco1 & 0xFFFF0000UL ) );
+    {
+        const uint32_t ulSramIni = SRAM1_BASE;
+        const uint32_t ulSramFin = SRAM1_BASE + ( 256UL * 1024UL );   /* inclusive */
+        const uint32_t ulSp      = pxEstado->ulSpBanco2;
+        const uint32_t ulRst     = pxEstado->ulResetBanco2;
+
+        pxEstado->bPlausible = ( !pxEstado->bEnBlanco )                     &&
+                               ( ulSp  >= ulSramIni ) && ( ulSp <= ulSramFin ) &&
+                               ( ( ulSp & 3UL ) == 0UL )                    &&
+                               ( ulRst >= FLASH_BASE )                      &&
+                               ( ulRst <  ( FLASH_BASE + ( 2UL * FW_UPDATE_BANCO_BYTES ) ) ) &&
+                               ( ( ulRst & 1UL ) == 1UL );
+    }
 }
 
 /*==============================================================================

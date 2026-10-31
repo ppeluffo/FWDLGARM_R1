@@ -7219,7 +7219,7 @@ medida y la autonomía.
 | ⛔ **El `dataRcd`** | T + HR + nivel del peine son **4 bytes más** sobre **62 de 64 usados**. Hay que subir el registro a **72 B** (1763 registros en vez de 1984 — de 6,9 a 6,1 días de buffer, y con transmisión cada 3 h sobra). ⚠ **Antes de que haya equipos con datos guardados**, porque cambiar el tamaño invalida lo grabado |
 | El punto de rocío | **lo calcula el SERVIDOR**, no el equipo: evita meter logaritmos en el firmware y es coherente con que el servidor decide |
 
-## 🔨 ACTUALIZAR EL FIRMWARE DESDE LA microSD — etapas 1 y 2 HECHAS (2026-10-30)
+## ✅ ACTUALIZAR EL FIRMWARE DESDE LA microSD — etapas 1 a 5 VALIDADAS (`0.0.22`, 2026-10-30)
 
 ⭐ **Retomado tras la instalación de campo.** El diseño de octubre quedó **confirmado contra los
 documentos**, y con una sorpresa a favor: el silicio aporta el fallback que faltaba.
@@ -7600,7 +7600,138 @@ razón por la que existe `rtc invalid`.
 ⏳ **Lo que falta probar**: la confirmación **automática** por `tkWan`, que necesita el modem con
 red.
 
-#### ⏸ DÓNDE SE RETOMA: `BFB2` se abandona, y hay UNA decisión sin tomar
+### ✅✅ EL CICLO COMPLETO DESDE LA microSD, VALIDADO (`0.0.22`, 2026-10-30)
+
+Hasta acá cada etapa se había probado por separado, y el commit con el banco 2 **escrito por el
+programador**. Esto es la cadena entera, de punta a punta, sin que el programador toque un byte:
+
+```
+cmd>fw grabar
+FW:: borrando el banco 2 (126 paginas de 2048 B)...
+FW:: escribiendo 256080 bytes...
+  ==> EL BANCO 2 QUEDO ESCRITO Y VERIFICADO
+      CRC releido de la flash: 0x24C473F4  (igual al del archivo)
+
+cmd>fw commit aplicar
+  aplicando... (la consola se corta aca)
+FWDLGARM_R1 0.0.20 - consola TERM          <- ⭐ LA VERSION DE LA TARJETA
+compilado Oct 30 2026 15:01:46
+reset por    : SOFT PIN
+```
+
+⭐⭐⭐ **Y UN SOLO NÚMERO CIERRA LA CADENA EN CUATRO PUNTOS INDEPENDIENTES**: `0x24C473F4` es el CRC
+que declara el header del archivo en la tarjeta, el que el firmware releyó **de la flash** tras
+grabar, y el de los 256.080 bytes leídos **por SWD** del banco 2 **y** del banco 1 — con los dos
+bancos en el mismo `md5` (`ffde6dc2…`). El programador y el firmware son instrumentos distintos y
+dicen lo mismo.
+
+| Criterio | Resultado |
+|---|---|
+| ⭐ **El equipo arranca con la imagen de la TARJETA** | ✅ `0.0.20`, contra el `0.0.21` que corría |
+| La fecha de compilación | ✅ `15:01:46` — no se puede falsificar: sale de `__DATE__`/`__TIME__` |
+| ⭐ **El CRC, en los cuatro puntos** | ✅ `0x24C473F4` |
+| `fw grabar` borra y escribe el banco 2 | ✅ 126 páginas, 256.080 B, verificado releyendo |
+| ⭐ **Los 7 casos de falla de la tarjeta** | ✅ ver abajo |
+| ⭐⭐ **El mismo archivo, DOS veredictos** | ✅ ver abajo |
+| La marca de la etapa 5 | ✅ se puso en el commit y sobrevivió al cambio de firmware |
+
+#### ⭐ Se bajó de `0.0.21` a `0.0.20`, o sea HACIA ATRÁS
+
+No fue casualidad: el archivo que había en la tarjeta era el del `0.0.20`. Y ejercita la decisión
+del diseño que decía *"cualquier versión distinta, no sólo mayor — si sólo acepta mayores, volver
+atrás obliga a fabricar un número falso, y volver atrás es justo lo que se necesita cuando algo
+sale mal"*. **El rollback por tarjeta quedó probado**, que era lo que la etapa 5 no podía prometer.
+
+⚠ **Lo que eso dejó a la vista**: el `0.0.20` es anterior a la etapa 5, así que **no conoce la
+marca**. El commit (corriendo el `0.0.21`) la escribió, el `0.0.20` la ignoró —ni la cuenta ni la
+anuncia— y al volver al `0.0.22` reapareció intacta: `arranques sin confirmar 1 de 5, version
+anterior 0.0.21`. Es inofensivo —cualquier sesión que llegue a `CONFIG=OK` la borra, y `fw prueba
+confirmar` también— pero conviene saberlo: **flashear con el programador no borra la marca**, así
+que un firmware bajado por SWD puede anunciarse "A PRUEBA" de una actualización que no hizo. Y no
+se puede arreglar desde el firmware: un binario no tiene forma de saber cómo llegó a la flash.
+
+#### ⭐⭐ LOS 7 CASOS DE FALLA, con los archivos de `mkfw_casos.py`
+
+Es lo que el mecanismo tiene que garantizar: **que NO escriba la flash con basura**.
+
+| Archivo | Veredicto |
+|---|---|
+| `FWBASURA.BIN` (texto plano) | `no es un firmware de este mecanismo (magic)` |
+| `FWHDRMAL.BIN` (1 byte del header) | `el header esta CORRUPTO` |
+| `FWCORTO.BIN` (largo 8 B menor) | `el largo no cierra, o no entra en el banco` |
+| `FWOTROHW.BIN` | `es el firmware de OTRO producto` + `<- NO es este equipo` |
+| ⭐ `FWIMGMAL.BIN` (**1 byte** de la imagen) | `la imagen esta CORRUPTA`: declarado `0xF4F85A35` / leído `0x4D922858` |
+| `FWNUEVO.BIN` (versión `9.9.99`) | `hay un firmware nuevo y valido` |
+| ⭐⭐ `FIRMWARE.BIN` **después** del commit | `es la misma version que ya esta corriendo` |
+
+⭐⭐ **La última fila es la más fuerte de todas, y salió gratis**: es **el mismo archivo** que 20
+minutos antes había dicho `hay un firmware nuevo y valido ('0.0.20' contra '0.0.21')`. Dos
+veredictos opuestos sobre bytes idénticos — eso prueba que la comparación de versión es real y no
+decorativa, que es algo que ningún archivo fabricado a propósito puede demostrar.
+
+#### ⛔⛔ Y EL HALLAZGO: el chequeo de "¿parece un firmware?" ACUSABA A UNA IMAGEN SANA
+
+El comando dijo, del banco 2 **recén escrito y verificado por CRC**:
+
+```
+==> ⛔ el bootloader NO lo aceptaria: caeria al banco 1
+FW:: ⚠ el SP del banco 2 (0x20040000) NO cae donde el del
+     banco 1 (0x2003FFF8). Eso no parece un firmware valido.
+```
+
+⛔ **Y esa imagen es la que arrancó y quedó corriendo perfecta.** El criterio compara **los 16 bits
+altos** del stack pointer contra el del banco 1: el `0.0.20` tiene `_estack = 0x20040000` y el
+`0.0.21` `0x2003FFF8`, o sea `0x2004` contra `0x2003`.
+
+⭐ **Los dos valores son correctos**: el stack **decrece** desde `_estack`, así que el tope de SRAM1
+es un valor inicial legítimo — y es justo el borde donde los 16 bits altos cambian. ⚠ **El
+comentario viejo nombraba ese caso** (*"el `_estack` de este proyecto cae en 0x20040000, que es el
+borde superior de SRAM1"*) y el código no lo cubría: la advertencia estaba escrita y el chequeo la
+contradecía.
+
+⭐ **Y la pregunta había dejado de ser la correcta**, que es lo de fondo: ese chequeo existía para
+`BFB2` —avisar que el bootloader caería al banco 1 **en silencio**—, y `BFB2` está abandonado. Con
+el camino B el commit sólo copia bytes y **el bootloader no decide nada**, así que lo único que
+importa es *¿esto parece una tabla de vectores?*:
+
+```
+SP    en SRAM1, con el TOPE INCLUSIVE, y alineado
+reset en la flash y IMPAR  <- el bit 0 es el bit Thumb; un vector par es
+                              un HardFault al primer salto
+```
+
+⭐⭐ **Validado con la forma más fuerte: los MISMOS bytes, el veredicto corregido.** Sobre el banco
+2 intacto —`SP 0x20040000`, `reset 0x08018A49`— el comando pasó de `⛔ el bootloader NO lo
+aceptaria` a `PARECE un firmware: SP en SRAM1, reset en flash e impar`.
+
+⚠ **La lección, y van varias**: un mensaje que manda a dudar de un archivo bueno cuesta más que no
+tener mensaje. Es la familia del `help` que mentía sobre el parser, del `R1 = 0x00` que acusó a dos
+pistas sanas y de la FAT que acusó a la pila del MCP79410. ⭐ Y es lo contrario de lo que suele
+pasar: acá **el camino B hizo irrelevante un modo de falla** que con `BFB2` habría sido fatal —un
+SP de `0x20040000` y el equipo cayendo al banco 1 sin decir nada—.
+
+#### ℹ️ De paso: con el magic fallado ya NO se imprimen "campos"
+
+Sobre `FWBASURA.BIN` el comando informaba `version : 'es un firmware,'` e
+`imagen : 544175219 bytes`. En un archivo que **no es de este mecanismo** no hay campos —hay bytes
+cualesquiera leídos en esas posiciones— e imprimirlos con nombre invita a leer basura como dato.
+El veredicto solo alcanza. ⭐ Para un header corrupto o un hardware ajeno **sí se siguen
+imprimiendo**, y eso no cambia: ahí la versión que el archivo *dice* tener orienta al que mira.
+
+#### ⏳ Lo que este ciclo NO probó
+
+| | |
+|---|---|
+| El renombrado a `FIRMWARE.OK` tras aplicar | `FW_UPDATE_APLICADO` existe pero el commit no lo hace: hoy el archivo queda y el equipo informa *"misma version"*, que alcanza para no reaplicarlo. Es la etapa que falta para que el ciclo sea **automático al arrancar** |
+| La confirmación **automática** por `tkWan` | sigue pendiente: necesita el modem con red |
+| La etapa 5b (`FWPREV.BIN`) | documentada, no construida |
+
+#### ⏸ (histórico) DÓNDE SE RETOMÓ: `BFB2` se abandona, y la decisión que se tomó
+
+✅ **La decisión de esta sección YA SE TOMÓ y está validada: fue el camino B**, implementado como
+`fw commit` (etapa 4-B) y ejercitado desde la tarjeta el 2026-10-30 — ver la sección de arriba. Lo
+que sigue se conserva por el razonamiento: es el único lugar donde queda escrito **por qué** el
+camino A se descartó, y ese argumento vuelve cada vez que alguien propone saltar al banco 2.
 
 ⭐ **Decidido con Pablo (2026-10-30): se abandona `BFB2`.** Seis hipótesis refutadas, y la última
 medición dice que el micro **no ejecuta nada** — no es algo que se arregle desde el firmware. Las
@@ -7690,18 +7821,23 @@ técnico presente. Es la misma lógica que los 10 s de la válvula.
 
 ⭐ Borrar el banco entero con `tME` son **22 ms**, contra los **2,8 s** de hacerlo página por página.
 
-### ⏳ Lo que falta, por riesgo creciente
+### ⏳ Lo que falta del autoupdate
 
-| Etapa | Qué | ¿Puede romper algo? |
+Las etapas 1 a 5 están **hechas y validadas en banco**, y el ciclo entero desde la microSD también
+(`0.0.22`, ver más arriba). Lo que queda:
+
+| | Qué | ¿Puede romper algo? |
 |---|---|---|
-| **3** | Borrar y escribir el **banco 2**, releerlo y verificar el CRC. Y **acotar el `.ld` a 512K** (hoy dice `1024K`, los dos bancos) | no: el equipo sigue arrancando del banco 1 |
-| **4** | El commit: `BFB2` por `HAL_FLASHEx_OBProgram()` y arrancar del banco 2 | ⚠ bajo, ahora que el fallback está confirmado — pero **la primera vez con el ST-LINK a mano** |
-| **5** | La marca *en prueba* en la SRAM del RTC, con rollback a los N resets sin confirmar. ⭐ El criterio de "funciona" ya existe: **una sesión que llega a `CONFIG=OK` y transmite** | medio |
+| ⏳ **6 — el disparo automático al arrancar** | hoy el ciclo lo tipea un técnico: `fw grabar` + `fw commit aplicar`. Que el equipo lo haga **solo al arrancar** es lo que falta para el caso de uso original, y necesita el renombrado a **`FIRMWARE.OK`** —`FW_UPDATE_APLICADO` ya existe en el header y nadie lo usa— o el equipo reaplicaría en cada arranque | ⚠⚠ **SÍ: toca el camino de ARRANQUE**, que es lo único que validaron las 188 h de campo. Ver abajo |
+| ⏳ La confirmación **automática** de la marca por `tkWan` | el código está puesto (`fw_prueba_confirmar()` antes de `wanONLINE_DATA`); falta el modem con red | no |
+| ⏳ **5b — `FWPREV.BIN`** | que `fw commit` guarde la imagen saliente en la tarjeta antes de copiar, y el rollback pase a ser el mismo `fw grabar` + `fw commit` ya validado | no |
+| ⏳ Acotar el `.ld` a **512K** | hoy dice `1024K`, o sea los dos bancos: nada impide que la aplicación crezca sobre su propio respaldo. Con 255 KB no se cruza, pero el linker no lo garantiza | no |
 
-⚠ **Y el argumento en contra sigue abierto**: esto toca el **camino de arranque**, que es lo que las
-188 h de campo validaron. Lo que lo mitiga es que sin archivo en la tarjeta todo el mecanismo es
-*montar → buscar → no está → apagar*. Recomendación: un soak **corto, de 24 h**, sobre el binario
-final — no repetir las 188.
+⚠ **El argumento en contra sigue abierto, y ahora apunta a un solo lugar: la etapa 6.** Lo que las
+188 h de campo validaron es el **arranque**, y las etapas 1 a 5 no lo tocan — todo corre dentro de
+un comando, con el técnico presente. El disparo automático sí. Lo que lo mitiga es que sin archivo
+en la tarjeta el mecanismo entero es *montar → buscar → no está → apagar*. Recomendación cuando se
+haga: un soak **corto, de 24 h**, sobre el binario final — no repetir las 188.
 
 ### (histórico) El diseño original, 2026-10-12
 

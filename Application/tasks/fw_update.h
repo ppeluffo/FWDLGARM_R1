@@ -263,30 +263,32 @@ bool fw_update_grabar( const char *pcArchivo, fw_info_t *pxInfo,
 uint32_t fw_update_crc_banco2( uint32_t ulLargo );
 
 /*------------------------------------------------------------------------------
- * ⭐⭐ ¿EL BOOTLOADER VA A ACEPTAR EL BANCO 2?
+ * ⭐⭐ ¿EL BANCO 2 PARECE UNA TABLA DE VECTORES?
  *
- * El silicio decide con **una sola cosa** (AN2606, fig. 102 para el L496): si
- * el primer word del banco 2 —el **stack pointer inicial**— apunta a SRAM,
- * arranca de ahí; si no, **cae al banco 1**.
+ * Es un chequeo de cordura ANTES del commit: con `fw grabar` el CRC ya
+ * garantizó que la flash tiene lo mismo que el archivo, pero no que el archivo
+ * sea un firmware. Esto mira las dos primeras palabras —el stack pointer
+ * inicial y el vector de reset—, que son lo único que un Cortex-M necesita
+ * para arrancar.
  *
- * ⛔ Y por eso esto existe ANTES que el commit: si el banco 2 no cumpliera,
- * poner `BFB2 = 1` **no haría nada visible** —el fallback se dispararía en
- * silencio— y quedaríamos mirando por qué "el equipo no cambia de banco"
- * cuando en realidad el silicio lo está protegiendo. Un mecanismo de seguridad
- * que actúa sin decirlo es indistinguible de uno roto.
+ * ⚠ **Avisa pero NO impide**, que es el criterio de todo este firmware.
  *
- * ⭐ El criterio fuerte NO es comparar contra un rango de SRAM inventado por
- * nosotros: es **comparar el banco 2 contra el banco 1**. El banco 1 arranca
- * —es el que está corriendo— así que si el banco 2 tiene un stack pointer
- * equivalente, el bootloader lo va a tratar igual. Eso no depende de adivinar
- * qué rango exacto mira ST.
+ * ⛔ LA PREGUNTA ERA OTRA HASTA EL 2026-10-30, y conviene saber por qué
+ * cambió: era *"¿el bootloader va a aceptar el banco 2?"*, porque con
+ * `BFB2 = 1` el silicio arrancaba del banco 2 sólo si su primer word apuntaba
+ * a SRAM (AN2606, fig. 102) y **caía al banco 1 en silencio** si no. Con `BFB2`
+ * abandonado y el commit copiando bytes, el bootloader ya no decide nada.
+ *
+ * ⭐ Y el cambio no fue cosmético: el criterio viejo —comparar el SP del banco
+ * 2 contra el del banco 1— dio un **falso positivo medido en banco**. Ver
+ * `fw_update_estado_banco2()` en el `.c`.
  */
 typedef struct {
     uint32_t ulSpBanco1;    /* primer word del banco 1: el que SÍ arranca */
     uint32_t ulSpBanco2;    /* primer word del banco 2                    */
     uint32_t ulResetBanco2; /* su vector de reset, para el volcado        */
     bool     bEnBlanco;     /* el banco 2 está sin escribir (0xFFFFFFFF)  */
-    bool     bPlausible;    /* el SP cae donde el del banco 1             */
+    bool     bPlausible;    /* SP en SRAM1 y reset en flash, impar       */
 } fw_banco2_t;
 
 void fw_update_estado_banco2( fw_banco2_t *pxEstado );
