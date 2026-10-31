@@ -7538,12 +7538,67 @@ Si la copia falla, el código que tendría que imprimirlo **vive en el banco rec
 recuperable. ⏳ El único error que sí se informa es `fwCMT_SIN_IMAGEN`, porque se detecta **antes**
 de tocar nada.
 
-#### ⏳ Lo que falta (etapa 5)
+### ✅ ETAPA 5: la marca de "A PRUEBA" (`0.0.21`, 2026-10-30)
 
-El **rollback**: la marca de *"en prueba"* y la vuelta atrás si el firmware nuevo no logra una
-sesión en N arranques. ⭐ Va en la **EEPROM**, en `0x00400` —hay 3 KB libres— con el patrón de
-checksum + `offsetof` de la FAT y el contador de lotes. ⚠ **No en los primeros bytes**: `0x00000` es
-el bloque `base` y moverlo invalidaría las configuraciones ya grabadas.
+```
+cmd>fw commit aplicar
+  aplicando...
+FWDLGARM_R1 0.0.21 - consola TERM
+[!] FIRMWARE A PRUEBA: arranque 1 de 5 sin confirmar
+    se confirma solo cuando una sesion llegue a CONFIG=OK
+    la version anterior era 0.0.20
+```
+
+| Criterio | Resultado |
+|---|---|
+| La marca se pone en el commit | ✅ y el equipo **se anuncia solo** en el banner |
+| ⭐ **El contador avanza** | ✅ arranque **1 → 2 → 3** en resets sucesivos |
+| La versión anterior persiste | ✅ `0.0.20` en los tres arranques |
+| `fw prueba confirmar` | ✅ `marca BORRADA` → y después `este firmware esta CONFIRMADO` |
+
+#### ⭐⭐ Qué problema resuelve, y cuál NO
+
+| | |
+|---|---|
+| ✅ **El firmware nuevo ARRANCA pero no FUNCIONA** | es el caso de campo: el técnico se fue, el equipo "anda", y nadie se entera por meses. Ahora **el equipo lo dice en cada arranque** |
+| ⛔ **El firmware nuevo NO ARRANCA** (HardFault antes del scheduler) | ahí no corre nada, así que ningún mecanismo en software ayuda: hace falta el ST-LINK o el bootloader de ST. **No se promete lo contrario** |
+
+⭐ **El criterio de "funciona" NO se inventó**: es una sesión que llega a `CONFIG=OK`, o sea el
+paso a `wanONLINE_DATA`. Eso ejercita el modem, el I2C, la EEPROM, el RTC y el ADC de un saque
+—mejor que cualquier autotest— y es trabajo que el equipo hace igual.
+
+#### ⚠ La marca vive en la EEPROM, y la razón es de Pablo
+
+| | |
+|---|---|
+| ⛔ SRAM del MCP79410 | si falla la pila el equipo revierte **en silencio**. Y esa SRAM **ya falló dos veces acá**: la FAT, y `LOTE9041`/`LOTE3682` |
+| ⭐ **EEPROM `0x00400`** | **ya es dependencia crítica** (la configuración está ahí), así que no agrega un punto de falla — y si fallara **se grita**: checksums malos, defaults, y el servidor pidiendo los cinco bloques |
+
+⚠ **NO en los primeros bytes**: `0x00000` es el bloque `base` y moverlo invalidaría las
+configuraciones ya grabadas. Hay 3 KB libres desde `0x00400`.
+
+⭐ El checksum va con **`offsetof`**, no con `sizeof - 1` — el bug que en el paso 4 hacía que la
+FAT se declarara inválida en cada arranque y encima acusaba a la pila del MCP79410.
+
+#### ⚠ AVISA pero NO revierte sola, y es a propósito
+
+Al pasarse de los 5 arranques el equipo lo grita, pero **no vuelve atrás**. El motivo es concreto:
+después del commit **los dos bancos tienen el firmware nuevo**, así que la imagen anterior **ya no
+existe en la flash**. Revertir sin tenerla sería prometer algo que no se puede cumplir.
+
+⏳ **La etapa 5b, si alguna vez hace falta**: que `fw commit` guarde la imagen saliente en la
+microSD como `FWPREV.BIN` antes de copiar. Son 256 KB en una tarjeta de GB, y el rollback pasa a ser
+el mismo `fw grabar` + `fw commit` que ya está validado. ⚠ Depende de que la tarjeta esté puesta,
+así que no sustituye al aviso: lo complementa.
+
+#### ⭐ `fw prueba confirmar` existe para poder PROBAR el camino
+
+En banco la sesión puede no cerrar por falta de red —pasó en esta misma validación: *"el modem no
+llego a registrarse"*— y entonces la confirmación automática quedaría sin ejercitar. Es la misma
+razón por la que existe `rtc invalid`.
+
+⏳ **Lo que falta probar**: la confirmación **automática** por `tkWan`, que necesita el modem con
+red.
 
 #### ⏸ DÓNDE SE RETOMA: `BFB2` se abandona, y hay UNA decisión sin tomar
 

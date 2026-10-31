@@ -587,6 +587,49 @@ void tkCmd( void *pvParameters )
     prvImprimirCausaReset();
 
     /*
+     * \u2b50\u2b50 \u00bfESTE FIRMWARE ESTA A PRUEBA? (etapa 5 del autoupdate)
+     *
+     * Si `fw commit` dejo la marca y todavia nadie la confirmo, el equipo lo
+     * DICE en cada arranque. Hoy eso seria invisible: un firmware nuevo que no
+     * funciona se ve igual que uno que si, y en campo pasan meses.
+     *
+     * \u26a0 Va DESPUES del banner y ANTES de todo lo demas, para que no se pierda
+     *   en el chorro del arranque -- la misma arruga que dejo a `reboot` sin
+     *   registrar en silencio cuando la tabla de comandos se lleno.
+     */
+    {
+        fw_prueba_t xPrb;
+
+        if( fw_prueba_leer( &xPrb ) )
+        {
+            uint8_t ucN = fw_prueba_contar();
+
+            xprintf( "\r\n[!] FIRMWARE A PRUEBA: arranque %u de %u sin confirmar\r\n",
+                     ( unsigned ) ucN, ( unsigned ) FW_PRUEBA_MAX_ARRANQUES );
+            xprintf( "    se confirma solo cuando una sesion llegue a CONFIG=OK\r\n" );
+            if( xPrb.pcVersionPrevia[ 0 ] != '\0' )
+            {
+                xprintf( "    la version anterior era %s\r\n", xPrb.pcVersionPrevia );
+            }
+
+            if( ucN >= FW_PRUEBA_MAX_ARRANQUES )
+            {
+                /* \u26a0 AVISA pero NO revierte solo, y es a proposito: para volver
+                   atras hace falta la imagen anterior, y despues del commit esa
+                   imagen YA NO EXISTE en la flash (los dos bancos tienen el
+                   nuevo). Revertir sin tenerla seria prometer algo que no se
+                   puede cumplir. Ver la etapa 5b en CLAUDE.md. */
+                xprintf( "    \u26d4 SE PASO DEL LIMITE: este firmware no logro una sesion.\r\n" );
+                xprintf( "       revisar el enlace, y si no es eso, volver al anterior\r\n" );
+                xprintf( "       con 'fw grabar' + 'fw commit aplicar' desde la tarjeta.\r\n" );
+            }
+
+            eventos_log( "FW: a prueba, arranque %u de %u sin confirmar",
+                         ( unsigned ) ucN, ( unsigned ) FW_PRUEBA_MAX_ARRANQUES );
+        }
+    }
+
+    /*
      * ⚠ Acá NO se mueve la válvula, y es a propósito (decidido por Pablo el
      * 2026-08-18).
      *
@@ -5906,6 +5949,7 @@ static void prvEventosUso( void )
     xprintf( "  fw grabar [arch]    lo escribe en el BANCO 2 y lo verifica releyendo\r\n" );
     xprintf( "  fw boot 1|2         de que banco arranca el equipo (RESETEA)\r\n" );
     xprintf( "  fw commit aplicar   copia el BANCO 2 al BANCO 1 y RESETEA\r\n" );
+    xprintf( "  fw prueba [confirmar]  la marca de firmware 'a prueba'\r\n" );
     xprintf( "                      (el equipo sigue arrancando del banco 1)\r\n" );
     xprintf( "  eventos volcar        escribe ya lo acumulado en %s\r\n", EVENTOS_ARCHIVO );
     xprintf( "  eventos nota <texto>  deja una marca (UNA palabra: el parser corta\r\n" );
@@ -6080,9 +6124,11 @@ static void cmdFw( void )
                               ( strcmp( argv[ 1 ], "boot" ) == 0 ) );
     bool        bCommit   = ( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) &&
                               ( strcmp( argv[ 1 ], "commit" ) == 0 ) );
+    bool        bPrueba   = ( ( ucArgs > 0U ) && ( argv[ 1 ] != NULL ) &&
+                              ( strcmp( argv[ 1 ], "prueba" ) == 0 ) );
     const char *pcArchivo = FW_UPDATE_ARCHIVO;
 
-    if( bGrabar || bBoot || bCommit )
+    if( bGrabar || bBoot || bCommit || bPrueba )
     {
         /* `fw grabar [archivo]`  /  `fw boot 1|2`  /  `fw commit aplicar` */
         if( argv[ 2 ] != NULL ) { pcArchivo = argv[ 2 ]; }
@@ -6159,6 +6205,49 @@ static void cmdFw( void )
         }
     }
 
+    if( bPrueba )
+    {
+        /*
+         * `fw prueba` \u2014 el estado de la marca de "a prueba".
+         * `fw prueba confirmar` \u2014 la borra A MANO.
+         *
+         * \u2b50 El confirmar manual existe para poder ejercitar ese camino SIN
+         *    depender del modem: en banco la sesion puede no cerrar por falta
+         *    de red, y entonces el mecanismo quedaria sin probar. Es la misma
+         *    razon por la que existe `rtc invalid`.
+         */
+        fw_prueba_t xPrb;
+
+        if( ( argv[ 2 ] != NULL ) && ( strcmp( argv[ 2 ], "confirmar" ) == 0 ) )
+        {
+            if( !fw_prueba_leer( NULL ) )
+            {
+                xprintf( "\r\nFW:: no hay ninguna marca que confirmar.\r\n" );
+                return;
+            }
+            fw_prueba_confirmar();
+            xprintf( "\r\nFW:: %s\r\n",
+                     fw_prueba_leer( NULL ) ? "\u26d4 la marca SIGUE ahi: fallo el borrado"
+                                            : "marca BORRADA: el firmware queda confirmado" );
+            return;
+        }
+
+        if( !fw_prueba_leer( &xPrb ) )
+        {
+            xprintf( "\r\nFW:: sin marca: este firmware esta CONFIRMADO\r\n" );
+            xprintf( "     (o nunca se aplico uno con 'fw commit')\r\n" );
+            return;
+        }
+
+        xprintf( "\r\nFW:: \u26a0 FIRMWARE A PRUEBA\r\n" );
+        xprintf( "  arranques sin confirmar : %u de %u\r\n",
+                 ( unsigned ) xPrb.ucArranques, ( unsigned ) FW_PRUEBA_MAX_ARRANQUES );
+        xprintf( "  version anterior        : %s\r\n",
+                 ( xPrb.pcVersionPrevia[ 0 ] != '\0' ) ? xPrb.pcVersionPrevia : "(no quedo)" );
+        xprintf( "  se confirma cuando una sesion llegue a CONFIG=OK\r\n" );
+        return;
+    }
+
     if( bCommit )
     {
         /*
@@ -6216,7 +6305,21 @@ static void cmdFw( void )
            equipo no vuelve, esta linea es lo unico que va a quedar para saber
            que fue un commit y no una falla espontanea. Es el mismo criterio
            que en `fw boot`. */
-        eventos_log( "FW: COMMIT banco2->banco1 (SP 0x%08lX)", ( unsigned long ) xB2.ulSpBanco2 );
+        /* \u2b50\u2b50 LA MARCA DE "A PRUEBA", y va ACA por dos razones:
+           - escribirla cuesta I2C, y adentro de `fw_update_commit()` las
+             interrupciones ya estan cortadas;
+           - si se pone y el commit despues falla, el unico costo es un aviso
+             de mas en el arranque siguiente. Al reves --commit hecho y marca
+             sin poner-- el firmware nuevo quedaria SIN vigilancia, que es
+             justo lo que la etapa 5 viene a evitar. La asimetria decide. */
+        if( !fw_prueba_poner( FW_VERSION ) )
+        {
+            xprintf( "  \u26a0 no se pudo dejar la marca de 'a prueba' en la EEPROM:\r\n" );
+            xprintf( "    el firmware nuevo NO va a quedar vigilado. Se aplica igual.\r\n" );
+        }
+
+        eventos_log( "FW: COMMIT banco2->banco1 (SP 0x%08lX), venia de %s",
+                     ( unsigned long ) xB2.ulSpBanco2, FW_VERSION );
         eventos_volcar();
 
         /* que el ultimo caracter salga por la UART antes de cortar las

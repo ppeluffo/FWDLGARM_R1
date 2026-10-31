@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "tkWan.h"
+#include "fw_update.h"
 #include "tkSys.h"
 #include "tkCmd.h"
 #include "wan_frame.h"
@@ -1651,6 +1652,16 @@ static void prvEstadoOnlineConfig( void )
      * La estructura del AVR ya lo tolera —sólo `conf_base` aborta su secuencia—
      * y acá se copia el criterio.
      */
+    /* \u2b50\u2b50 ACA SE DA POR BUENO UN FIRMWARE RECIEN APLICADO (etapa 5 del
+       autoupdate). Llegar a `ONLINE_DATA` quiere decir que el PING volvio y
+       que el `CONF_ALL` se proceso: eso ejercita el modem, el I2C, la EEPROM,
+       el RTC y el ADC de un saque -- mejor que cualquier autotest que
+       escribieramos, y es trabajo que el equipo hace igual.
+
+       \u26a0 Es idempotente: sin marca no hace nada, asi que no cuesta nada
+       llamarlo en cada sesion. */
+    fw_prueba_confirmar();
+
     eEstado = wanONLINE_DATA;
 }
 //------------------------------------------------------------------------------

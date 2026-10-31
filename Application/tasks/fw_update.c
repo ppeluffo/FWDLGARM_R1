@@ -6,6 +6,7 @@
  */
 
 #include "fw_update.h"
+#include "drv_eeprom.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -873,4 +874,128 @@ fw_commit_t fw_update_commit( uint32_t ulLargo )
     for( ;; )
     {
     }
+}
+
+/*==============================================================================
+ * LA MARCA DE "EN PRUEBA" (etapa 5)
+ *============================================================================*/
+
+/*------------------------------------------------------------------------------
+ * ⚠ El checksum cubre TODO LO QUE HAY ANTES del campo `ucChecksum`, y eso se
+ *   escribe con `offsetof` — NO con `sizeof - 1`.
+ *
+ *   Parecen lo mismo y sólo coinciden cuando el campo es literalmente el último
+ *   byte, o sea cuando no hay relleno al final: una propiedad del compilador, no
+ *   del diseño. Es el bug que en el paso 4 hacía que la FAT se declarara
+ *   inválida en CADA arranque, y que encima acusaba a la pila del MCP79410.
+ */
+static uint8_t prvPruebaChecksum( const fw_prueba_t *pxM )
+{
+    const uint8_t *puc = ( const uint8_t * ) pxM;
+    uint32_t       i;
+    uint8_t        ucSum = 0U;
+
+    for( i = 0UL; i < offsetof( fw_prueba_t, ucChecksum ); i++ )
+    {
+        ucSum = ( uint8_t ) ( ucSum + puc[ i ] );
+    }
+
+    return ucSum;
+}
+
+/*------------------------------------------------------------------------------*/
+static bool prvPruebaGrabar( fw_prueba_t *pxM )
+{
+    pxM->ucChecksum = prvPruebaChecksum( pxM );
+
+    return ( drv_eeprom_write( FW_PRUEBA_ADDR, ( const char * ) pxM,
+                               sizeof( fw_prueba_t ) ) == ( int32_t ) sizeof( fw_prueba_t ) );
+}
+
+/*------------------------------------------------------------------------------*/
+bool fw_prueba_leer( fw_prueba_t *pxM )
+{
+    fw_prueba_t xM;
+
+    if( drv_eeprom_read( FW_PRUEBA_ADDR, ( char * ) &xM, sizeof( xM ) )
+        != ( int32_t ) sizeof( xM ) )
+    {
+        return false;
+    }
+
+    if( ( xM.ulMagic != FW_PRUEBA_MAGIC ) ||
+        ( xM.ucChecksum != prvPruebaChecksum( &xM ) ) )
+    {
+        return false;
+    }
+
+    /* ⚠ Que el string esté terminado no se asume: viene de la EEPROM, y un
+       byte volado lo convertiría en una lectura fuera de rango. */
+    xM.pcVersionPrevia[ FW_UPDATE_VER_LEN - 1U ] = '\0';
+
+    if( pxM != NULL )
+    {
+        *pxM = xM;
+    }
+
+    return true;
+}
+
+/*------------------------------------------------------------------------------*/
+bool fw_prueba_poner( const char *pcVersionPrevia )
+{
+    fw_prueba_t xM;
+    uint32_t    i;
+
+    ( void ) memset( &xM, 0, sizeof( xM ) );
+    xM.ulMagic     = FW_PRUEBA_MAGIC;
+    xM.ucArranques = 0U;
+
+    if( pcVersionPrevia != NULL )
+    {
+        for( i = 0UL; ( i < ( FW_UPDATE_VER_LEN - 1U ) ) && ( pcVersionPrevia[ i ] != '\0' ); i++ )
+        {
+            xM.pcVersionPrevia[ i ] = pcVersionPrevia[ i ];
+        }
+    }
+
+    return prvPruebaGrabar( &xM );
+}
+
+/*------------------------------------------------------------------------------*/
+uint8_t fw_prueba_contar( void )
+{
+    fw_prueba_t xM;
+
+    if( !fw_prueba_leer( &xM ) )
+    {
+        return 0U;
+    }
+
+    /* ⚠ No se deja desbordar: con el contador dando la vuelta, un equipo que
+       nunca confirma volvería a "recién instalado" cada 256 arranques y el
+       aviso se apagaría solo. */
+    if( xM.ucArranques < 0xFFU )
+    {
+        xM.ucArranques++;
+        ( void ) prvPruebaGrabar( &xM );
+    }
+
+    return xM.ucArranques;
+}
+
+/*------------------------------------------------------------------------------*/
+void fw_prueba_confirmar( void )
+{
+    uint32_t ulCero = 0UL;
+
+    if( !fw_prueba_leer( NULL ) )
+    {
+        return;                 /* idempotente: sin marca no hay nada que hacer */
+    }
+
+    /* ⭐ Alcanza con romper la magia: son 4 bytes contra 22, y es una sola
+       escritura de página. El resto queda como basura que nadie va a leer,
+       porque sin magia la marca no valida. */
+    ( void ) drv_eeprom_write( FW_PRUEBA_ADDR, ( const char * ) &ulCero, sizeof( ulCero ) );
 }

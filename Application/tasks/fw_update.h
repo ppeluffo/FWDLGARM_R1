@@ -134,6 +134,65 @@ typedef enum {
 
 const char *fw_update_commit_str( fw_commit_t xRes );
 
+/*==============================================================================
+ * LA MARCA DE "EN PRUEBA" — el rollback (etapa 5)
+ *------------------------------------------------------------------------------
+ * ⛔ EL PROBLEMA QUE RESUELVE, Y EL QUE NO:
+ *
+ *   ✅ el firmware nuevo ARRANCA pero NO FUNCIONA — no transmite, se cuelga a
+ *      los diez minutos, no habla con un sensor. **Ese es el caso de campo**:
+ *      el técnico se fue, el equipo "anda", y nadie se entera por meses.
+ *
+ *   ⛔ el firmware nuevo NO ARRANCA en absoluto (HardFault antes del scheduler).
+ *      Ahí **no corre nada**, así que ningún mecanismo en software puede ayudar:
+ *      hace falta el ST-LINK o el bootloader de ST. No se promete lo contrario.
+ *
+ * ⭐ EL CRITERIO DE "FUNCIONA" YA EXISTE Y NO HAY QUE INVENTARLO: una sesión que
+ *    llega a `CONFIG=OK` y transmite. Eso ejercita el modem, el I2C, la EEPROM,
+ *    el RTC y el ADC de un saque — mejor que cualquier autotest que
+ *    escribiéramos, y es lo que el equipo tiene que hacer igual.
+ *
+ * ⚠ DÓNDE VIVE: EEPROM `0x00400`. Idea de Pablo, y es mejor que la SRAM del
+ *   MCP79410 por una razón concreta — la EEPROM **ya es dependencia crítica**
+ *   (la configuración está ahí), así que no agrega un punto de falla; y si
+ *   fallara **se grita**: checksums malos, defaults y el servidor pidiendo los
+ *   cinco bloques. La SRAM del RTC, en cambio, ya falló dos veces acá —la FAT
+ *   y `LOTE9041`— y su fallo es **silencioso**.
+ *
+ * ⚠ NO en los primeros bytes: `0x00000` es el bloque `base`, y moverlo
+ *   invalidaría las configuraciones ya grabadas en los equipos.
+ *============================================================================*/
+
+#define FW_PRUEBA_ADDR          0x00400UL
+#define FW_PRUEBA_MAGIC         0x42555250UL    /* "PRUB" en little-endian */
+
+/* Cuántos arranques sin confirmar se toleran antes de dar el firmware por malo.
+ * ⭐ Son ARRANQUES, no tiempo: un firmware que se cuelga da reset por watchdog y
+ *    los gasta rápido; uno que anda confirma en el primero. */
+#define FW_PRUEBA_MAX_ARRANQUES 5U
+
+typedef struct __attribute__( ( packed ) ) {
+    uint32_t ulMagic;
+    char     pcVersionPrevia[ FW_UPDATE_VER_LEN ];  /* a la que se volvería   */
+    uint8_t  ucArranques;                           /* sin confirmar          */
+    uint8_t  ucChecksum;                            /* ⚠ con offsetof         */
+} fw_prueba_t;
+
+/* La pone `fw commit` justo antes de copiar. `pcVersionPrevia` es la que se
+   está reemplazando, para poder nombrarla en los avisos. */
+bool fw_prueba_poner( const char *pcVersionPrevia );
+
+/* true si hay una marca válida. `pxM` puede ser NULL. */
+bool fw_prueba_leer( fw_prueba_t *pxM );
+
+/* Suma un arranque y lo graba. Devuelve cuántos van, o 0 si no hay marca. */
+uint8_t fw_prueba_contar( void );
+
+/* ⭐ El firmware se dio por bueno: borra la marca. Lo llama `tkWan` cuando una
+   sesión llega a `CONFIG=OK`. Es idempotente: sin marca no hace nada. */
+void fw_prueba_confirmar( void );
+
+
 /*------------------------------------------------------------------------------
  * Pone en marcha el firmware del banco 2 COPIÁNDOLO al banco 1, y resetea.
  *
