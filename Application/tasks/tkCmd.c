@@ -353,6 +353,7 @@ static void cmdKeys( void );
 static void cmdTag( void );
 static void cmdEventos( void );
 static void cmdFw( void );
+static void prvFwUso( void );
 static void prvEventosUso( void );
 static void prvTagUso( void );
 static void cmdReset( void );
@@ -630,6 +631,37 @@ void tkCmd( void *pvParameters )
     }
 
     /*
+     * \u2b50\u2b50 ETAPA 6 DEL AUTOUPDATE: EL EQUIPO SE ACTUALIZA SOLO.
+     *
+     * Si la microSD trae un `FIRMWARE.BIN` valido y distinto, esto lo graba, lo
+     * aplica y RESETEA: no vuelve. Sin tarjeta o sin ese archivo —el caso de
+     * todos los arranques— sale callado en ~0 ms. Todo lo demas lo explica
+     * `fw_update_auto()` en `fw_update.h`.
+     *
+     * \u26a0 VA EXACTAMENTE ACA, y las dos cotas importan:
+     *
+     *   DESPUES de  el bus I2C y la EEPROM (la marca de "a prueba"),
+     *               `drv_sd_init()` (la tarjeta), y el BANNER —si el equipo se
+     *               va a reprogramar, lo ultimo que tiene que haberse leido es
+     *               que version estaba corriendo—;
+     *   ANTES de    el prompt, porque despues de esta llamada puede no haber
+     *               prompt: el equipo resetea.
+     *
+     * \u26a0 Y va DESPUES del aviso de "a prueba" a proposito: ese aviso es sobre
+     *   el firmware que esta corriendo AHORA, asi que tiene que salir aunque
+     *   este arranque termine reemplazandolo. \u2b50 De paso eso deja el rollback
+     *   automatico gratis: marca pasada de limite + el firmware anterior en la
+     *   tarjeta, y el equipo vuelve solo.
+     *
+     * \u26a0 `tkSys` y `tkWan` ya estan corriendo para cuando esto ejecuta, asi
+     *   que un commit puede cortarle la alimentacion a un modem a mitad de su
+     *   arranque. Es el mismo riesgo que el comando a mano, que ya se corrio
+     *   varias veces sin consecuencias, y la alternativa —hacerlo antes de
+     *   crear las tareas— dejaria esto sin consola, sin EEPROM y sin tarjeta.
+     */
+    fw_update_auto();
+
+    /*
      * ⚠ Acá NO se mueve la válvula, y es a propósito (decidido por Pablo el
      * 2026-08-18).
      *
@@ -727,6 +759,7 @@ static const cmd_ayuda_t xAyuda[] = {
     { "wdg",    "estado del watchdog: el perro y el plazo de cada tarea", prvWdgUso     },
     { "tag",    "<rsp>/<log>/<end> para una app (default OFF)",          prvTagUso     },
     { "eventos","registro de eventos en la microSD (con EVENTOS.ON)",    prvEventosUso },
+    { "fw",     "actualizar el firmware desde la microSD",               prvFwUso      },
     { "reset",  "reset por NVIC_SystemReset (pulsa NRST)",               NULL          },
 };
 
@@ -5945,12 +5978,6 @@ static void prvEventosUso( void )
 {
     xprintf( "uso:\r\n" );
     xprintf( "  eventos               estado del registro\r\n" );
-    xprintf( "  fw [archivo]        hay un firmware nuevo en la microSD? (no lo aplica)\r\n" );
-    xprintf( "  fw grabar [arch]    lo escribe en el BANCO 2 y lo verifica releyendo\r\n" );
-    xprintf( "  fw boot 1|2         de que banco arranca el equipo (RESETEA)\r\n" );
-    xprintf( "  fw commit aplicar   copia el BANCO 2 al BANCO 1 y RESETEA\r\n" );
-    xprintf( "  fw prueba [confirmar]  la marca de firmware 'a prueba'\r\n" );
-    xprintf( "                      (el equipo sigue arrancando del banco 1)\r\n" );
     xprintf( "  eventos volcar        escribe ya lo acumulado en %s\r\n", EVENTOS_ARCHIVO );
     xprintf( "  eventos nota <texto>  deja una marca (UNA palabra: el parser corta\r\n" );
     xprintf( "                        en los espacios; usar_guiones_bajos)\r\n" );
@@ -6099,6 +6126,46 @@ static void cmdEventos( void )
  * archivo es confiable se puede validar sin ningún riesgo**, y una vez que
  * está validado, lo que queda es sólo mover bytes.
  */
+/*
+ * ⛔⛔ ESTA AYUDA VIVÍA DENTRO DE `prvEventosUso()`, Y POR ESO NO SE VEÍA.
+ *
+ * `help fw` contestaba *"'fw' no existe"* —el comando no estaba en la tabla de
+ * ayuda— y `help eventos` imprimía, en medio de lo suyo, las cinco líneas del
+ * `fw`. Encontrado el 2026-10-31 al agregar la etapa 6.
+ *
+ * ⚠ Es la MISMA arruga que ya costó `modbus` y `cpres` el 2026-09-22:
+ * **registrar un comando y agregarlo a la tabla de ayuda son dos pasos
+ * independientes**, y el segundo no tiene ningún síntoma —el comando funciona
+ * igual— salvo que alguien tipee `help <comando>`. Por eso la tabla y el
+ * `FRTOS_CMD_register()` conviene revisarlos juntos.
+ */
+static void prvFwUso( void )
+{
+    xprintf( "uso:\r\n" );
+    xprintf( "  fw [archivo]           hay un firmware nuevo en la microSD?\r\n" );
+    xprintf( "                         (lo examina y verifica el CRC; NO lo aplica)\r\n" );
+    xprintf( "  fw grabar [archivo]    lo escribe en el BANCO 2 y lo verifica\r\n" );
+    xprintf( "                         releyendo la flash (el equipo sigue\r\n" );
+    xprintf( "                         arrancando del banco 1)\r\n" );
+    xprintf( "  fw commit aplicar      copia el BANCO 2 al BANCO 1 y RESETEA\r\n" );
+    xprintf( "  fw prueba [confirmar]  la marca de firmware 'a prueba'\r\n" );
+    xprintf( "  fw boot 1|2            de que banco arranca el equipo (RESETEA)\r\n" );
+    xprintf( "     \u26d4 'fw boot 2' NO FUNCIONA EN ESTA PLACA: con BFB2=1 el micro\r\n" );
+    xprintf( "       no ejecuta nada y hay que rescatarlo con el programador\r\n" );
+    xprintf( "       ('-ob BFB2=0'). Ver CLAUDE.md.\r\n" );
+    xprintf( "\r\n" );
+#if ( FW_UPDATE_AUTO == 1 )
+    xprintf( "  \u2b50 AL ARRANCAR el equipo hace todo esto SOLO (etapa 6): si la\r\n" );
+    xprintf( "    tarjeta trae un %s valido y de OTRA version, lo\r\n", FW_UPDATE_ARCHIVO );
+    xprintf( "    graba, lo aplica y resetea. Despues lo renombra a %s,\r\n", FW_UPDATE_APLICADO );
+    xprintf( "    asi que se aplica UNA sola vez. Los comandos de arriba son\r\n" );
+    xprintf( "    para hacer lo mismo a mano.\r\n" );
+#else
+    xprintf( "  \u26a0 el disparo AUTOMATICO al arrancar esta APAGADO\r\n" );
+    xprintf( "    (FW_UPDATE_AUTO = 0 en fw_update.h): el ciclo se tipea a mano.\r\n" );
+#endif
+}
+//------------------------------------------------------------------------------
 static void cmdFw( void )
 {
     fw_info_t   xInfo;

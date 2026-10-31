@@ -17,6 +17,8 @@
 #include "main.h"
 #include "frtos-io.h"
 #include "fs_sd.h"
+#include "wdg.h"
+#include "eventos.h"
 
 /*------------------------------------------------------------------------------
  * CRC-32 por NIBBLE: 16 entradas en vez de 256.
@@ -1024,4 +1026,196 @@ void fw_prueba_confirmar( void )
        escritura de página. El resto queda como basura que nadie va a leer,
        porque sin magia la marca no valida. */
     ( void ) drv_eeprom_write( FW_PRUEBA_ADDR, ( const char * ) &ulCero, sizeof( ulCero ) );
+}
+
+/*==============================================================================
+ * ETAPA 6 — EL DISPARO AUTOMATICO AL ARRANCAR
+ *
+ * Ver `fw_update.h` para la secuencia y por que el orden es ese.
+ *============================================================================*/
+void fw_update_auto( void )
+{
+#if ( FW_UPDATE_AUTO == 1 )
+    fw_info_t   xInfo;
+    fw_result_t xRes;
+    fw_banco2_t xB2;
+    fw_commit_t xCmt;
+
+    /*
+     * ---- 1. examinar ----------------------------------------------------
+     *
+     * Lee el archivo ENTERO para verificar el CRC de la imagen: ~2 s con el
+     * riel de la microSD encendido. Es el precio de no escribir la flash con
+     * un archivo que nadie verifico, y se paga una sola vez por tarjeta
+     * —despues el archivo queda renombrado y este camino sale por `fwNO_HAY`—.
+     */
+    xRes = fw_update_examinar( FW_UPDATE_ARCHIVO, &xInfo );
+
+    /*
+     * ⭐ EL CASO DE TODOS LOS ARRANQUES DE TODOS LOS EQUIPOS, y se CALLA.
+     *
+     * Sin tarjeta, o con una tarjeta que no trae firmware, no hay nada que
+     * decir: el arranque ya imprime bastante y una linea mas por algo que
+     * nunca va a pasar es ruido que tapa lo que si importa.
+     */
+    if( ( xRes == fwSIN_TARJETA ) || ( xRes == fwNO_HAY ) )
+    {
+        return;
+    }
+
+    /*
+     * ⭐ MISMA VERSION: el archivo ya corre en el equipo, asi que se renombra.
+     *
+     * Es el caso que queda tras una actualizacion a mano —`fw grabar` + `fw
+     * commit aplicar` dejan el archivo como estaba— y sin esto el equipo
+     * pagaria los ~2 s de releer y verificar el CRC en CADA arranque, para
+     * siempre, para llegar a la misma conclusion.
+     *
+     * ⭐ Y deja una sola regla, facil de explicar a un tecnico: **`FIRMWARE.OK`
+     *    significa "este archivo ya es el que corre en el equipo"**.
+     */
+    if( xRes == fwMISMA_VERSION )
+    {
+        xprintf( "\r\nFW:: la tarjeta trae la version que ya corre (%s)\r\n", FW_VERSION );
+
+        if( fs_sd_renombrar( FW_UPDATE_ARCHIVO, FW_UPDATE_APLICADO ) )
+        {
+            xprintf( "     renombrado a %s: no se vuelve a leer en cada arranque\r\n",
+                     FW_UPDATE_APLICADO );
+        }
+        return;
+    }
+
+    /*
+     * ⚠ CUALQUIER OTRA COSA SE DICE Y NO SE APLICA.
+     *
+     * Archivo corrupto, de otro producto, imagen con el CRC mal: el equipo
+     * arranca normal y el banco 1 no se toca, pero **quedar callado seria lo
+     * peor**. Un tecnico que dejo una tarjeta y se fue creyendo que el equipo
+     * se iba a actualizar no tiene otra forma de enterarse — y el renglon
+     * queda en el registro de eventos, que es lo que se lee despues.
+     */
+    if( xRes != fwHAY_NUEVO )
+    {
+        xprintf( "\r\nFW:: ⛔ hay un %s en la tarjeta y NO se puede aplicar: %s\r\n",
+                 FW_UPDATE_ARCHIVO, fw_update_str( xRes ) );
+        xprintf( "     el equipo arranca normal. Mirar con 'fw'\r\n" );
+        eventos_log( "FW: %s NO aplicable: %s", FW_UPDATE_ARCHIVO, fw_update_str( xRes ) );
+        return;
+    }
+
+    /* ---- 2. a partir de aca SI se va a escribir la flash ---------------- */
+    xprintf( "\r\n" );
+    xprintf( "FW:: ⭐ ACTUALIZACION AUTOMATICA DESDE LA microSD\r\n" );
+    xprintf( "  corriendo  : %s\r\n", FW_VERSION );
+    xprintf( "  la tarjeta : %s  (%lu bytes, CRC 0x%08lX verificado)\r\n",
+             xInfo.pcVersion, ( unsigned long ) xInfo.ulLargo,
+             ( unsigned long ) xInfo.ulCrcLeido );
+    xprintf( "  ⚠ graba el banco 2 y RESETEA. No desconectar la alimentacion.\r\n\r\n" );
+
+    /*
+     * ⚠ LA PRORROGA DEL WATCHDOG, y es necesaria aunque el plazo sean 90 s.
+     *
+     * Grabar el banco 2 son ~13 s —borrar 126 paginas, escribir 250 KB de a
+     * 64 bits y releerlos— y por dentro no hay ningun lugar donde reportar.
+     * Entra con margen en los 90 s del plazo, pero depender de eso seria
+     * depender de un numero que esta puesto para otra cosa: si manana el plazo
+     * baja, esto se rompe por un motivo que no se parece a su causa. Es el
+     * mismo criterio que `f_mkfs()` y el volcado de la ventana.
+     */
+    wdg_kick_largo( 60000UL );
+
+    /* ---- 3. grabar el banco 2, y verificarlo releyendo la flash --------- */
+    if( !fw_update_grabar( FW_UPDATE_ARCHIVO, &xInfo, &xRes ) )
+    {
+        xprintf( "\r\nFW:: ⛔ NO se pudo grabar el banco 2: %s\r\n", fw_update_str( xRes ) );
+        xprintf( "     ⭐ el banco 1 NO se toco: el equipo sigue en %s\r\n", FW_VERSION );
+        eventos_log( "FW: fallo el grabado del banco 2: %s", fw_update_str( xRes ) );
+        return;
+    }
+
+    xprintf( "  ==> banco 2 escrito y VERIFICADO (CRC 0x%08lX releido de la flash)\r\n",
+             ( unsigned long ) xInfo.ulCrcLeido );
+
+    /* ---- 4. ¿parece una tabla de vectores? ------------------------------ */
+    /*
+     * ⚠ Avisa pero NO impide, igual que en el comando: el CRC ya probo que la
+     * flash tiene lo mismo que el archivo, y lo que esto mira es si el archivo
+     * parece un firmware. Rechazar por este chequeo seria peor —ya dio un
+     * falso positivo medido en banco, ver `fw_update_estado_banco2()`—.
+     */
+    fw_update_estado_banco2( &xB2 );
+
+    if( !xB2.bPlausible )
+    {
+        xprintf( "  ⚠ el banco 2 no parece una tabla de vectores:\r\n" );
+        xprintf( "    SP 0x%08lX  reset 0x%08lX  (se aplica igual)\r\n",
+                 ( unsigned long ) xB2.ulSpBanco2, ( unsigned long ) xB2.ulResetBanco2 );
+    }
+
+    /*
+     * ---- 5. ⭐⭐ RENOMBRAR, Y SI FALLA NO SE COMMITEA --------------------
+     *
+     * Va ANTES del commit porque el commit **no vuelve**, y es obligatorio
+     * porque es lo unico que corta el bucle de reprogramacion: la version se
+     * compara contra la del HEADER, y nada garantiza que el header diga la
+     * verdad sobre la imagen que trae. Con un archivo cuyo header miente
+     * —`mkfw_casos.py` fabrica uno asi— la comparacion no se satisface nunca y
+     * el equipo se reprogramaria en cada arranque. Ver `fs_sd_renombrar()`.
+     *
+     * ⭐ Abortar es barato y deja todo en un estado conocido: el banco 1
+     * intacto, el banco 2 con la imagen ya verificada, y `fw commit aplicar`
+     * termina el trabajo a mano.
+     */
+    if( !fs_sd_renombrar( FW_UPDATE_ARCHIVO, FW_UPDATE_APLICADO ) )
+    {
+        xprintf( "\r\nFW:: ⛔ NO se pudo renombrar %s a %s, asi que NO se aplica.\r\n",
+                 FW_UPDATE_ARCHIVO, FW_UPDATE_APLICADO );
+        xprintf( "     Sin el renombrado el equipo se reprogramaria en CADA arranque:\r\n" );
+        xprintf( "     la version sale del header del archivo, que puede no decir la\r\n" );
+        xprintf( "     verdad sobre la imagen. El banco 2 YA quedo escrito y verificado,\r\n" );
+        xprintf( "     asi que para aplicarlo igual: 'fw commit aplicar'\r\n" );
+        eventos_log( "FW: fallo el renombrado a %s: NO se aplico", FW_UPDATE_APLICADO );
+        return;
+    }
+
+    xprintf( "  ==> %s renombrado a %s\r\n", FW_UPDATE_ARCHIVO, FW_UPDATE_APLICADO );
+
+    /* ---- 6. la marca de "a prueba" y el registro, volcado --------------- */
+    /*
+     * ⚠ La marca se pone ANTES del commit y no despues, porque despues no hay
+     * despues. Si se pone y el commit falla, el costo es un aviso de mas en el
+     * arranque siguiente; al reves —commit hecho y marca sin poner— el
+     * firmware nuevo quedaria SIN vigilancia, que es justo lo que la etapa 5
+     * viene a evitar. La asimetria decide.
+     */
+    if( !fw_prueba_poner( FW_VERSION ) )
+    {
+        xprintf( "  ⚠ no se pudo dejar la marca de 'a prueba' en la EEPROM:\r\n" );
+        xprintf( "    el firmware nuevo NO va a quedar vigilado. Se aplica igual.\r\n" );
+    }
+
+    /* ⭐ Volcado ANTES de tocar la flash: si el equipo no vuelve, esta linea es
+       lo unico que va a quedar para saber que fue una actualizacion y no una
+       falla espontanea. (El buffer vive en la SRAM2 y sobrevive al reset, pero
+       la tarjeta esta encendida aca mismo: no hay razon para no escribirlo.) */
+    eventos_log( "FW: AUTO %s -> %s, aplicando (SP 0x%08lX)",
+                 FW_VERSION, xInfo.pcVersion, ( unsigned long ) xB2.ulSpBanco2 );
+    ( void ) eventos_volcar();
+
+    xprintf( "\r\n  aplicando... (la consola se corta aca)\r\n" );
+
+    /* que el ultimo caracter salga por la UART antes de cortar las
+       interrupciones: a 9600, un byte son 1042 us */
+    vTaskDelay( pdMS_TO_TICKS( 200 ) );
+
+    /* ---- 7. el commit. NO VUELVE si sale bien. -------------------------- */
+    xCmt = fw_update_commit( 0UL );
+
+    /* ⚠ Solo se llega aca con `fwCMT_SIN_IMAGEN` o `fwCMT_NO_EN_RAM`, que se
+       detectan ANTES de tocar nada. Los demas errores resetean desde RAM,
+       porque para entonces el codigo de esta funcion ya no existe. */
+    xprintf( "\r\nFW:: ⛔ NO se aplico: %s\r\n", fw_update_commit_str( xCmt ) );
+    eventos_log( "FW: AUTO fallo el commit: %s", fw_update_commit_str( xCmt ) );
+#endif /* FW_UPDATE_AUTO */
 }

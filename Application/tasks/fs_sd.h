@@ -196,12 +196,28 @@ uint32_t fs_sd_postergadas( void );
  * `fs_sd_crear()` / `fs_sd_borrar()`: para `eventos activar|desactivar`. Crear
  * un archivo que ya existe no lo toca y devuelve true; borrar uno que no existe
  * también devuelve true — en los dos casos el estado pedido ya es el que hay.
+ *
+ * `fs_sd_renombrar()`: lo usa la etapa 6 del autoupdate para dejar el
+ * `FIRMWARE.BIN` que ya aplicó como `FIRMWARE.OK`.
+ *
+ * ⭐ **Y ahí no es una comodidad: es lo único que evita reprogramar en bucle.**
+ * La versión que se compara vive en el HEADER del archivo, y nada garantiza que
+ * coincida con la imagen que el archivo trae —`mkfw_casos.py` fabrica justamente
+ * eso: un header que dice `9.9.99` sobre la imagen del `0.0.22`—. Con uno así en
+ * la tarjeta, la comparación de versión **nunca** se satisface: el equipo
+ * aplicaría, arrancaría, volvería a ver "hay firmware nuevo" y repetiría los
+ * ~13 s de grabado y el reset para siempre. El renombrado corta eso por el
+ * nombre, que no depende de que el header diga la verdad.
+ *
+ * ⚠ `f_rename()` **falla si el destino existe**, así que se borra antes. Es el
+ * mismo patrón que la rotación de `fs_sd_agregar()`.
  *----------------------------------------------------------------------------*/
 bool fs_sd_existe ( const char *pcNombre );
 bool fs_sd_crear  ( const char *pcNombre );
 bool fs_sd_borrar ( const char *pcNombre );
 bool fs_sd_agregar( const char *pcNombre, const char *pcViejo,
                     const char *pcTexto, uint32_t ulLargo, uint32_t ulMax );
+bool fs_sd_renombrar( const char *pcDe, const char *pcA );
 
 /*------------------------------------------------------------------------------
  * EL FIRMWARE DE LA microSD (ver `fw_update.h` para qué se hace con él).

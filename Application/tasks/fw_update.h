@@ -79,6 +79,30 @@
 #define FW_UPDATE_ARCHIVO       "FIRMWARE.BIN"
 #define FW_UPDATE_APLICADO      "FIRMWARE.OK"
 
+/*------------------------------------------------------------------------------
+ * ⭐⭐ ETAPA 6 — EL DISPARO AUTOMÁTICO AL ARRANCAR. Su interruptor.
+ *
+ * En 1 el equipo se actualiza solo: lee la tarjeta al arrancar y, si hay un
+ * firmware válido y distinto, lo graba, lo aplica y resetea. En 0 el código
+ * entra al binario pero `fw_update_auto()` **sale en su primera línea**, y el
+ * ciclo sigue siendo el que tipea un técnico (`fw grabar` + `fw commit
+ * aplicar`).
+ *
+ * ⚠ TIENE INTERRUPTOR PROPIO, COMO EL WATCHDOG, Y POR LA MISMA RAZÓN. Las
+ * etapas 1 a 5 no tocan el camino de ARRANQUE —todo corre dentro de un comando,
+ * con el técnico presente— y ésta sí. El arranque es **lo único que validaron
+ * las 188 h de campo**, así que la bajada que TRAE este código no cambia nada y
+ * encenderlo es una decisión aparte. Es la misma asimetría del `ARRANCA_WDG`:
+ * una vez que el equipo se reprograma solo, un error ahí se ve desde afuera
+ * como *"la placa no arranca"*.
+ *
+ * ⭐ Y el `#if` vive en el `.c`, no en el llamador: así `tkCmd` no necesita
+ * ningún preprocesador y no se puede repetir la trampa de un `#if` sobre un
+ * define cuyo `#include` está más abajo —que en este proyecto ya mordió TRES
+ * veces, y una fue justamente con `main.h` en `tkCtl.c`—.
+ */
+#define FW_UPDATE_AUTO          1
+
 #define FW_UPDATE_MAGIC         0x46515053UL    /* "SPQF" en little-endian   */
 #define FW_UPDATE_HDR_VER       1U
 #define FW_UPDATE_HDR_LEN       64U
@@ -352,6 +376,43 @@ bool fw_update_arrancar_de( uint8_t ucBanco );
  * El texto de un resultado, para la consola y el registro de eventos.
  */
 const char *fw_update_str( fw_result_t xRes );
+
+/*==============================================================================
+ * ETAPA 6 — EL CICLO COMPLETO, SOLO, AL ARRANCAR
+ *============================================================================*/
+
+/*------------------------------------------------------------------------------
+ * Mira la tarjeta y, si hay un firmware válido y distinto, lo aplica.
+ *
+ * ⛔⛔ **NO RETORNA si aplica**: termina en `fw_update_commit()`, que resetea.
+ *
+ * Es la secuencia que hasta ahora tipeaba un técnico, con el orden que importa:
+ *
+ *     1. examinar            <- el CRC del archivo ENTERO, antes de tocar flash
+ *     2. prórroga del watchdog
+ *     3. grabar el banco 2   <- y verificarlo RELEYENDO la flash
+ *     4. ¿parece una tabla de vectores?
+ *     5. ⭐ RENOMBRAR a FIRMWARE.OK   <- ANTES del commit, y es obligatorio
+ *     6. la marca de "a prueba" + el registro de eventos, volcado
+ *     7. commit  ->  no vuelve
+ *
+ * ⭐⭐ EL PASO 5 VA ANTES DEL 7 PORQUE EL 7 NO VUELVE. Y si el renombrado
+ * falla, **NO se commitea**: sin él no hay nada que corte el bucle de
+ * reprogramación (ver `fs_sd_renombrar()`). Abortar deja el equipo exactamente
+ * como estaba —el banco 1 intacto, el banco 2 con la imagen ya verificada— y el
+ * técnico completa a mano con `fw commit aplicar`. La asimetría decide: un
+ * aviso contra un equipo que se reprograma en cada arranque.
+ *
+ * ⚠ Se CALLA cuando no hay tarjeta o la tarjeta no tiene `FIRMWARE.BIN`, que es
+ * el caso de todos los arranques de todos los equipos. Cualquier otra cosa
+ * —archivo corrupto, de otro producto, imagen con el CRC mal— **se dice y no se
+ * aplica**: es información de campo que de otro modo nadie vería.
+ *
+ * ⭐ Y de yapa sale gratis el rollback automático: si la marca de "a prueba" se
+ * pasó del límite y el técnico dejó en la tarjeta el firmware anterior, este
+ * mismo camino lo repone sin que nadie vaya al sitio.
+ */
+void fw_update_auto( void );
 
 /*------------------------------------------------------------------------------
  * CRC-32, el de zlib (polinomio 0xEDB88320 reflejado, init y xorout

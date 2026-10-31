@@ -2278,6 +2278,7 @@ procedimiento ya probado y el equipo en el banco, el costo superaba al riesgo.
 ```bash
 P=~/st/stm32cubeide_2.2.0/plugins/com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.linux64_*/tools/bin
 $P/STM32_Programmer_CLI -c port=SWD freq=950 mode=UR -w Debug/FWDLGARM_R1.elf   # flashear
+$P/STM32_Programmer_CLI -c port=SWD freq=950 mode=HOTPLUG -hardRst              # ⭐ Y ARRANCARLO
 $P/STM32_Programmer_CLI -c port=SWD freq=950 mode=UR -ob BFB2=0                 # option bytes
 ```
 
@@ -2285,12 +2286,40 @@ $P/STM32_Programmer_CLI -c port=SWD freq=950 mode=UR -ob BFB2=0                 
 cuando el firmware puede estar colgado o durmiendo**: con el tickless el micro vive en Stop 2 y en
 `Normal` la conexión pierde la carrera.
 
+#### ⛔⛔ CON `mode=UR` POR CLI EL FIRMWARE **NO** ARRANCA SOLO: hay que hacer `-hardRst`
+
+Encontrado el **2026-10-31**, y cuesta veinte minutos reconocerlo porque **el síntoma es un equipo
+que parece muerto**: el download dice `File download complete`, y después la consola no contesta
+nada —ni el banner—.
+
+⭐ **El dato que lo cierra, y no es interpretación:**
+
+```
+RCC_CSR = 0x04000600     PINRSTF=1, y el bit LSIRDY en 0
+                         -> el IWDG nunca arranco -> tkCtl NUNCA CORRIO
+                         (con el firmware corriendo: 0x00000602, flags limpios y LSI prendido)
+```
+
+La causa es la de siempre en este proyecto: **`mode=UR` mantiene NRST asertado**, y al terminar el
+`-w` lo deja así. Es la misma familia que el pozo de OpenOCD —*"deja NRST asertado y la placa no
+arranca ni cortándole la alimentación"*— sólo que acá lo deja la herramienta de ST y se suelta con
+un comando.
+
+⚠ **Y esta misma sección afirmaba lo contrario** (*"el firmware arranca solo al terminar el
+download"*): eso vale para la **GUI**, que suelta el reset al desconectarse, y **no para la CLI con
+`mode=UR`**. Quedó corregido arriba: el `-hardRst` es parte del procedimiento, no un rescate.
+
+⭐ **La lección de método, y es la de siempre dada vuelta**: el equipo *parecía* roto y lo único que
+lo desmintió fue un registro leído por SWD. Dos veces en esta misma sesión interpreté "la consola no
+contesta" como "el firmware falló" — y las dos veces el firmware estaba perfecto, en reset.
+
 ⚠ **Lo que sigue siendo de Pablo**: medir el consumo, mover hardware, y poner o sacar la microSD.
 
 > **(histórico)** La regla anterior era *"flashea Pablo, no Claude"*. Se respetó hasta el
 > 2026-10-30, y bajo ella Claude ya usaba la CLI **para diagnóstico** —leer registros por SWD—, que
-> la propia regla permitía: la frontera era **leer sí, escribir no**. Con ese flujo **el firmware arranca solo al terminar el download**, sin ciclo de
-alimentación.
+> la propia regla permitía: la frontera era **leer sí, escribir no**. Bajo ese flujo —el de la
+> **GUI**— el firmware arrancaba solo al terminar el download, sin ciclo de alimentación. ⚠ Por CLI
+> con `mode=UR` **no**: ver la trampa del `-hardRst` arriba.
 
 El archivo a cargar en CubeProgrammer es el **`.elf`** (`Debug/FWDLGARM_R1.elf`): lleva las
 direcciones adentro, así que no hay que tipear `0x08000000` como sí haría falta con un `.bin`. El
@@ -7219,7 +7248,7 @@ medida y la autonomía.
 | ⛔ **El `dataRcd`** | T + HR + nivel del peine son **4 bytes más** sobre **62 de 64 usados**. Hay que subir el registro a **72 B** (1763 registros en vez de 1984 — de 6,9 a 6,1 días de buffer, y con transmisión cada 3 h sobra). ⚠ **Antes de que haya equipos con datos guardados**, porque cambiar el tamaño invalida lo grabado |
 | El punto de rocío | **lo calcula el SERVIDOR**, no el equipo: evita meter logaritmos en el firmware y es coherente con que el servidor decide |
 
-## ✅ ACTUALIZAR EL FIRMWARE DESDE LA microSD — etapas 1 a 5 VALIDADAS (`0.0.22`, 2026-10-30)
+## ✅ ACTUALIZAR EL FIRMWARE DESDE LA microSD — etapas 1 a 6 VALIDADAS (`0.0.23`, 2026-10-31)
 
 ⭐ **Retomado tras la instalación de campo.** El diseño de octubre quedó **confirmado contra los
 documentos**, y con una sorpresa a favor: el silicio aporta el fallback que faltaba.
@@ -7722,7 +7751,7 @@ imprimiendo**, y eso no cambia: ahí la versión que el archivo *dice* tener ori
 
 | | |
 |---|---|
-| El renombrado a `FIRMWARE.OK` tras aplicar | `FW_UPDATE_APLICADO` existe pero el commit no lo hace: hoy el archivo queda y el equipo informa *"misma version"*, que alcanza para no reaplicarlo. Es la etapa que falta para que el ciclo sea **automático al arrancar** |
+| ~~El renombrado a `FIRMWARE.OK`~~ | ✅ **hecho y validado**: es la etapa 6, más abajo |
 | La confirmación **automática** por `tkWan` | sigue pendiente: necesita el modem con red |
 | La etapa 5b (`FWPREV.BIN`) | documentada, no construida |
 
@@ -7821,23 +7850,147 @@ técnico presente. Es la misma lógica que los 10 s de la válvula.
 
 ⭐ Borrar el banco entero con `tME` son **22 ms**, contra los **2,8 s** de hacerlo página por página.
 
+### ✅✅ ETAPA 6 — EL EQUIPO SE ACTUALIZA SOLO AL ARRANCAR (`0.0.23`, 2026-10-31)
+
+Con esto el mecanismo hace lo que se pidió el 2026-10-12: *"que cuando arranque lea la microSD, si
+hay un firmware vea la versión y se autoprograme"*. El ciclo ya no lo tipea nadie.
+
+`fw_update_auto()` en `fw_update.c`, llamada desde el arranque de `tkCmd` —**una línea en el camino
+de arranque**—, más `fs_sd_renombrar()` en `fs_sd.c`.
+
+```
+1. examinar            <- el CRC del archivo ENTERO, antes de tocar flash
+2. prorroga del watchdog
+3. grabar el banco 2   <- y verificarlo RELEYENDO la flash
+4. ¿parece una tabla de vectores?
+5. ⭐ RENOMBRAR a FIRMWARE.OK   <- ANTES del commit, y OBLIGATORIO
+6. la marca de "a prueba" + el registro de eventos, volcado
+7. commit  ->  no vuelve
+```
+
+#### ⭐⭐⭐ VALIDADO EN BANCO, y la prueba son CUATRO hechos independientes
+
+El procedimiento fue: flashear por SWD un **`0.0.22`** con la etapa 6 encendida, con un
+`FIRMWARE.BIN` del **`0.0.20`** en la tarjeta, y **no tipear nada**.
+
+| | Lo que quedó probado |
+|---|---|
+| ⭐ **La versión cambió sola** | el equipo quedó corriendo **`0.0.20`**, cuando lo que se le bajó con el programador fue el `0.0.22` |
+| ⭐ **La fecha de compilación** | `Oct 30 2026 15:01:46` — la del `0.0.20`, y **no se puede falsificar**: sale de `__DATE__`/`__TIME__` |
+| ⭐⭐ **El renombrado ocurrió** | `fs sd list` muestra **`FIRMWARE.OK`** de 256.144 B y **ningún `FIRMWARE.BIN`** |
+| ⭐⭐ **La marca la puso el camino automático** | el arranque siguiente anunció `FIRMWARE A PRUEBA: arranque 1 de 5` y **`la version anterior era 0.0.22`** — o sea la que corría cuando `fw_update_auto()` llamó a `fw_prueba_poner()` |
+
+⭐ **Y el bucle quedó cortado, medido**: tras aplicar, el `fw` informa `la tarjeta NO TIENE ese
+archivo` y **tarda 718 ms contra los 1996 ms** de antes. No es sólo que no reaplica: dejó de pagar
+la lectura de 250 KB y el CRC en cada arranque.
+
+⭐ **El rollback por tarjeta salió probado de nuevo y gratis**: se fue de `0.0.22` a `0.0.20`, o sea
+**hacia atrás**, que es la decisión de aceptar cualquier versión distinta y no sólo una mayor.
+
+ℹ️ Y una confirmación cruzada que no se buscaba: el `0.0.20` que quedó corriendo imprime el
+veredicto **viejo** del banco 2 (*"el bootloader LO ACEPTARIA"*, el criterio que se corrigió el
+2026-10-30). Un binario no puede imprimir un mensaje que su código no tiene, así que eso prueba por
+sí solo que el que corre es genuinamente el firmware de la tarjeta.
+
+#### ⭐⭐ POR QUÉ EL RENOMBRADO ES OBLIGATORIO, Y NO UNA OPTIMIZACIÓN
+
+Es la decisión de diseño de la etapa, y **si el renombrado falla NO se commitea**.
+
+El razonamiento estaba escrito en `fw_update.h` desde el principio —*"lo que evita reprogramar en
+bucle no es la comparación: es que el archivo se renombra"*— y al implementarlo quedó claro **por
+qué**: la versión que se compara vive en el **header** del archivo, y nada garantiza que diga la
+verdad sobre la imagen que trae. `mkfw_casos.py` fabrica justamente eso: **`FWNUEVO.BIN` tiene un
+header que dice `9.9.99` sobre la imagen del `0.0.22`**.
+
+```
+un archivo asi, llamado FIRMWARE.BIN, sin renombrado:
+   aplica -> arranca -> "hay firmware nuevo" (9.9.99 contra 0.0.22) -> aplica -> ...
+   ~13 s de grabado de flash y un reset, EN CADA ARRANQUE, para siempre
+```
+
+⛔ Eso es un equipo inutilizado por un archivo mal fabricado, y la comparación de versión **no lo
+puede evitar**. Por eso abortar es lo correcto: deja el banco 1 intacto, el banco 2 con la imagen ya
+verificada, y el técnico completa con `fw commit aplicar`. La asimetría decide — un aviso contra un
+equipo que se reprograma solo sin parar.
+
+⭐ Y de paso el renombrado deja **una sola regla, explicable a un técnico**: `FIRMWARE.OK` significa
+*"este archivo ya es el que corre en el equipo"*. Por eso también se renombra cuando la tarjeta trae
+la **misma** versión que ya corre, que es el caso que queda tras una actualización a mano.
+
+#### ⚠ Tiene INTERRUPTOR PROPIO, como el watchdog, y por la misma razón
+
+**`FW_UPDATE_AUTO`** en `fw_update.h`. En 0, `fw_update_auto()` sale en su primera línea y el ciclo
+vuelve a ser el que se tipea.
+
+Las etapas 1 a 5 **no tocan el camino de arranque** —todo corre dentro de un comando, con el técnico
+presente— y ésta sí, y el arranque es **lo único que validaron las 188 h de campo**. Con el
+interruptor, la bajada que *trae* el código no cambia nada y encenderlo es una decisión aparte. Es
+la misma asimetría del `ARRANCA_WDG`: una vez que el equipo se reprograma solo, un error ahí se ve
+desde afuera como *"la placa no arranca"*.
+
+⭐ **El `#if` vive en el `.c` y no en el llamador**, así que `tkCmd` no necesita ningún
+preprocesador: no se puede repetir la trampa de un `#if` sobre un define cuyo `#include` está más
+abajo, que en este proyecto **ya mordió tres veces**. ✅ Y **las dos variantes se compilaron**, que
+es la regla de siempre: la que no se compila es justo la que esconde errores. Cuesta **2.480 bytes**
+de flash.
+
+#### Tres decisiones menores, con su por qué
+
+| | |
+|---|---|
+| **Se calla si no hay tarjeta o no hay archivo** | es el caso de todos los arranques de todos los equipos: una línea por algo que nunca pasa es ruido que tapa lo que importa |
+| ⭐ **Cualquier otro problema se DICE y no se aplica** | archivo corrupto, de otro producto, CRC mal: el equipo arranca normal, pero un técnico que dejó una tarjeta y se fue no tiene otra forma de enterarse. Va también al registro de eventos |
+| **Prórroga del watchdog de 60 s** | grabar son ~13 s sin ningún lugar donde reportar. Entra con margen en el plazo de 90 s, pero depender de eso sería depender de un número puesto para otra cosa: si mañana baja, esto se rompe por un motivo que no se parece a su causa |
+
+⚠ **Lo que la etapa 6 NO cambia**: `tkSys` y `tkWan` ya están corriendo cuando esto ejecuta, así que
+un commit puede cortarle la alimentación a un modem a mitad de su arranque. Es el mismo riesgo que
+el comando a mano —ya corrido varias veces sin consecuencias— y la alternativa, hacerlo antes de
+crear las tareas, dejaría el mecanismo sin consola, sin EEPROM y sin tarjeta.
+
+#### ⛔ Y de paso: la ayuda de `fw` estaba DENTRO de la de `eventos`
+
+`help fw` contestaba **`'fw' no existe`** —el comando nunca se agregó a la tabla de ayuda— y
+`help eventos` imprimía, en medio de lo suyo, las cinco líneas del `fw`.
+
+⚠ Es **exactamente** la arruga que ya costó `modbus` y `cpres` el 2026-09-22: **registrar un comando
+y agregarlo a la tabla de ayuda son dos pasos independientes**, y el segundo no tiene ningún síntoma
+—el comando funciona igual— salvo que alguien tipee `help <comando>`. Ahora `fw` tiene su
+`prvFwUso()`, su fila en la tabla, y la ayuda dice que el disparo automático existe: **un mecanismo
+que se dispara solo y que el `help` no menciona** es la misma clase de problema que el `help` que
+mentía sobre el parser.
+
+ℓ De yapa, esa ayuda ahora avisa que **`fw boot 2` no funciona en esta placa** y cómo rescatarla.
+
+#### ⏳ Lo que la etapa 6 deja sin ejercitar
+
+Los dos caminos que faltan **necesitan un `FIRMWARE.BIN` en la tarjeta**, y tras la validación el
+archivo quedó renombrado — así que rearmarlos pide la tarjeta en una laptop (renombrar
+`FIRMWARE.OK` → `FIRMWARE.BIN`), que es de Pablo:
+
+| | |
+|---|---|
+| **misma versión → renombrar** | el camino que limpia la tarjeta tras una actualización a mano |
+| **archivo no aplicable** | copiar un `FWIMGMAL.BIN` como `FIRMWARE.BIN` y ver que avisa y **no** aplica |
+| ⚠ **el renombrado FALLANDO** | es el camino que decide no commitear, y no hay forma barata de provocarlo (haría falta una tarjeta protegida contra escritura) |
+
 ### ⏳ Lo que falta del autoupdate
 
-Las etapas 1 a 5 están **hechas y validadas en banco**, y el ciclo entero desde la microSD también
-(`0.0.22`, ver más arriba). Lo que queda:
+⭐ **Las etapas 1 a 6 están hechas y validadas en banco** (`0.0.23`), así que el mecanismo está
+completo: el equipo se actualiza solo desde la tarjeta. Lo que queda:
 
 | | Qué | ¿Puede romper algo? |
 |---|---|---|
-| ⏳ **6 — el disparo automático al arrancar** | hoy el ciclo lo tipea un técnico: `fw grabar` + `fw commit aplicar`. Que el equipo lo haga **solo al arrancar** es lo que falta para el caso de uso original, y necesita el renombrado a **`FIRMWARE.OK`** —`FW_UPDATE_APLICADO` ya existe en el header y nadie lo usa— o el equipo reaplicaría en cada arranque | ⚠⚠ **SÍ: toca el camino de ARRANQUE**, que es lo único que validaron las 188 h de campo. Ver abajo |
-| ⏳ La confirmación **automática** de la marca por `tkWan` | el código está puesto (`fw_prueba_confirmar()` antes de `wanONLINE_DATA`); falta el modem con red | no |
+| ⏳ La confirmación **automática** de la marca por `tkWan` | el código está puesto (`fw_prueba_confirmar()` antes de `wanONLINE_DATA`); falta el modem con red. **Hoy la marca se borra a mano** con `fw prueba confirmar` | no |
 | ⏳ **5b — `FWPREV.BIN`** | que `fw commit` guarde la imagen saliente en la tarjeta antes de copiar, y el rollback pase a ser el mismo `fw grabar` + `fw commit` ya validado | no |
-| ⏳ Acotar el `.ld` a **512K** | hoy dice `1024K`, o sea los dos bancos: nada impide que la aplicación crezca sobre su propio respaldo. Con 255 KB no se cruza, pero el linker no lo garantiza | no |
+| ⏳ Acotar el `.ld` a **512K** | hoy dice `1024K`, o sea los dos bancos: nada impide que la aplicación crezca sobre su propio respaldo. Con 258 KB no se cruza, pero el linker no lo garantiza | no |
+| ⏳ Los dos caminos del automático sin ejercitar | ver el final de la sección de la etapa 6: necesitan la tarjeta en una laptop | no |
 
-⚠ **El argumento en contra sigue abierto, y ahora apunta a un solo lugar: la etapa 6.** Lo que las
-188 h de campo validaron es el **arranque**, y las etapas 1 a 5 no lo tocan — todo corre dentro de
-un comando, con el técnico presente. El disparo automático sí. Lo que lo mitiga es que sin archivo
-en la tarjeta el mecanismo entero es *montar → buscar → no está → apagar*. Recomendación cuando se
-haga: un soak **corto, de 24 h**, sobre el binario final — no repetir las 188.
+⚠⚠ **EL SOAK DE 24 H SIGUE EN PIE, y ahora es lo único que separa esto de campo.** La etapa 6 es la
+primera cosa que toca el **camino de arranque** desde las 188 h de campo, que es justo lo que esas
+horas validaron. Lo que lo mitiga: sin archivo en la tarjeta el mecanismo entero es *montar →
+buscar → no está → apagar*, medido en **718 ms**. Y si el soak incomodara, está el interruptor:
+`FW_UPDATE_AUTO = 0` deja el binario con el código adentro y el arranque exactamente como el de
+campo.
 
 ### (histórico) El diseño original, 2026-10-12
 

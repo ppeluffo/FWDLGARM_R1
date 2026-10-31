@@ -1547,3 +1547,58 @@ bool fs_sd_borrar( const char *pcNombre )
     return bRet;
 }
 //------------------------------------------------------------------------------
+static bool prvRenombrar( const char *pcDe, const char *pcA )
+{
+    FRESULT xRes;
+
+    if( !prvMontar() )
+    {
+        return false;
+    }
+
+    /*
+     * ⚠ `f_rename()` FALLA si el destino ya existe, así que hay que borrarlo
+     * primero. Es el mismo patrón que la rotación de `prvAgregar()`, y acá el
+     * caso es real: un equipo que se actualiza dos veces ya tiene un
+     * `FIRMWARE.OK` de la vez anterior.
+     *
+     * Que no esté es lo normal, y `FR_NO_FILE` no es un error: lo que se pidió
+     * —que no haya nada en el destino— ya es lo que hay.
+     */
+    ( void ) f_unlink( pcA );
+
+    xRes = f_rename( pcDe, pcA );
+
+    prvDesmontar();
+
+    if( xRes != FR_OK )
+    {
+        xprintf( "SD:: no se pudo renombrar %s a %s (FRESULT=%d)\r\n",
+                 pcDe, pcA, ( int ) xRes );
+        return false;
+    }
+
+    return true;
+}
+//------------------------------------------------------------------------------
+bool fs_sd_renombrar( const char *pcDe, const char *pcA )
+{
+    bool bRet;
+
+    if( ( pcDe == NULL ) || ( pcA == NULL ) )
+    {
+        return false;
+    }
+
+    if( !prvTomar() )
+    {
+        prvAvisarOcupado( "renombrar" );
+        return false;
+    }
+
+    bRet = prvRenombrar( pcDe, pcA );
+
+    prvSoltar();
+    return bRet;
+}
+//------------------------------------------------------------------------------
