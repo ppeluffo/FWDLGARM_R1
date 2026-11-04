@@ -621,6 +621,12 @@ El 31 de octubre de 2026 se bajó por SWD un firmware `0.0.22` con el automátic
 **Y el bucle quedó cortado, medido**: después de instalar, el examen de la tarjeta pasó de **1996 ms a
 714 ms**. No es sólo que no reinstala: dejó de pagar la lectura de 258 KB y su CRC en cada arranque.
 
+**ATENCIÓN: esos 714 ms son lo que tarda el COMANDO, no el mecanismo.** El tiempo que informa
+incluye las ~13 líneas que imprime antes, que a 9600 baudios son unos 610 ms. Separado con dos
+medidas —un archivo inexistente (712 ms) contra uno de 264 KB que sí se lee y verifica (2035 ms)—
+el costo real de examinar la tarjeta sin encontrar el archivo son **unos 100 ms**, y eso coincide
+con los 101 ms medidos al arrancar. **El disparo automático cuesta ~100 ms por arranque.**
+
 Una confirmación cruzada que no se buscaba: el `0.0.20` que quedó corriendo imprime el veredicto
 **viejo** del chequeo de plausibilidad, el que se corrigió el día anterior. Un binario no puede
 imprimir un mensaje que su código no tiene, así que eso prueba por sí solo que el firmware en
@@ -641,7 +647,7 @@ ejecución es genuinamente el de la tarjeta.
 
 | Riesgo | Mitigación actual |
 |:--|:--|
-| **El automático toca el camino de arranque** | el interruptor `FW_UPDATE_AUTO`, y el hecho de que sin archivo en la tarjeta el mecanismo entero son 714 ms |
+| **El automático toca el camino de arranque** | el interruptor `FW_UPDATE_AUTO`, y el hecho de que sin archivo en la tarjeta el mecanismo entero son ~100 ms |
 | Un corte de alimentación en la ventana de 82 us | el estado resultante arranca el cargador de ST, recuperable por SWD o serie |
 | El instalador puede cortarle la alimentación al modem a mitad de su arranque | mismo riesgo que el comando manual, ya corrido varias veces sin consecuencias. La alternativa —hacerlo antes de crear las tareas— dejaría el mecanismo sin consola, sin EEPROM y sin tarjeta |
 | **El enlazador no impide que la aplicación crezca sobre su propio respaldo** | hoy el script declara 1024 KB, o sea los dos bancos. Con 258 KB no se cruza, pero conviene acotarlo a 512 KB. **Pendiente** |

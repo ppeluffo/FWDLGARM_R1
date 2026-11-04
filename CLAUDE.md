@@ -7882,7 +7882,9 @@ El procedimiento fue: flashear por SWD un **`0.0.22`** con la etapa 6 encendida,
 
 ⭐ **Y el bucle quedó cortado, medido**: tras aplicar, el `fw` informa `la tarjeta NO TIENE ese
 archivo` y **tarda 718 ms contra los 1996 ms** de antes. No es sólo que no reaplica: dejó de pagar
-la lectura de 250 KB y el CRC en cada arranque.
+la lectura de 250 KB y el CRC en cada arranque. ⚠ **Ojo con ese 718**: es lo que tarda el COMANDO,
+y está dominado por lo que imprime. El costo real de la etapa 6 al arrancar son **~100 ms** — ver
+la corrección más abajo.
 
 ⭐ **El rollback por tarjeta salió probado de nuevo y gratis**: se fue de `0.0.22` a `0.0.20`, o sea
 **hacia atrás**, que es la decisión de aceptar cualquier versión distinta y no sólo una mayor.
@@ -8022,7 +8024,7 @@ FW:: sin marca: este firmware esta CONFIRMADO
 | ⭐⭐⭐ **La marca se borra SOLA** | ✅ `sin marca: este firmware esta CONFIRMADO`, sin que nadie corriera `fw prueba confirmar` |
 | **La versión cambió sola** | ✅ `0.0.24` donde corría `0.0.23`, y la fecha de compilación (`Nov 4 10:04:15`) no se puede falsificar |
 | El renombrado | ✅ la tarjeta quedó con `FIRMWARE.OK` y **ningún `FIRMWARE.BIN`** |
-| ⭐ **El bucle cortado, MEDIDO otra vez** | ✅ el `fw` pasó de **2031 ms a 716 ms** en la misma corrida — antes y después de aplicar |
+| ⭐ **El bucle cortado, MEDIDO otra vez** | ✅ el `fw` pasó de **2031 ms a 716 ms** en la misma corrida — antes y después de aplicar. ⚠ Los 716 son del comando: el mecanismo son ~100 ms |
 | Los cinco hashes | ✅ **`CONFIG=OK`**: el contrato de configuración sigue cerrando con el firmware nuevo |
 | El vaciado | ✅ 3 de 3 confirmados y borrados |
 
@@ -8060,6 +8062,69 @@ paper.
 | ⚠ **El equipo estaba SIN ALIMENTACIÓN y costó un rato notarlo** | la serie no devolvió un byte en dos minutos —ni el banner— y el `fw` se fue por timeout. Lo cerró en un segundo el `Voltage : 0,27V` del programador, que es el chequeo que la sección del programador manda hacer primero. ⭐ **"La consola no contesta" no es un diagnóstico**: es el mismo error que cometí dos veces el 2026-10-31 leyéndolo como "el firmware falló" |
 | ⭐ **`fs format` ya existía** | Pablo pidió "un comando que borre los frames acumulados" y **no hubo que escribir nada**: vacía la FAT y pone `ulPisados` en 0. ⚠ Y a diferencia de `fs sd format`, **no pide palabra de confirmación** — la asimetría es deliberada y está comentada: la ventana son datos sin transmitir, la tarjeta son los lotes de una instalación entera |
 
+#### ⛔ Y UN NÚMERO QUE YO MISMO PUSE MAL: la etapa 6 cuesta ~100 ms, no ~716 ms
+
+Quedó escrito en tres lugares que, sin archivo en la tarjeta, *"el mecanismo entero son 716/718 ms"*.
+**Es falso, y por un factor de 7.** Ese número es lo que tarda **el comando `fw`**, y está dominado
+por lo que el comando IMPRIME.
+
+⭐ Lo separan dos medidas, y la aritmética cierra sola:
+
+```
+fw NADA.BIN   (el archivo no existe)          712 ms
+fw FWOK.BIN   (264 KB: lo lee y verifica)    2035 ms
+                                             -------
+la diferencia = leer la imagen y su CRC       1323 ms   <- y el arranque del 10:19 dio 1,3 s
+
+el preambulo de `fw` son ~13 lineas ~= 585 caracteres
+a 9600 baud  ->  ~610 ms SOLO DE IMPRIMIR
+
+712 - 610  ~=  100 ms de montar la tarjeta y fallar el f_open
+```
+
+⭐⭐ Y el arranque lo confirma de forma independiente: en los 20 resets el hueco entre
+`reset por : SOFT PIN` y el prompt fue de **101 ms**. Los dos caminos corren el mismo
+`fw_update_examinar()`, así que **el costo real de la etapa 6 en cada arranque son ~100 ms**.
+
+⚠ **Cómo me equivoqué, que es la parte útil**: tomé el `tardo` que informa el comando como si
+midiera el mecanismo, y mide **el comando** — `xT0` se toma antes del preámbulo, así que el número
+incluye los 610 ms de consola. Es la misma forma del volcado de `ADC_CR` mal decodificado: un
+instrumento que informa con autoridad una cosa distinta de la que uno cree que informa. ⭐ Y se
+destapó porque los 101 ms del arranque **no cerraban** con los 716 ms documentados: fue la
+discrepancia, no la medición, la que encontró el error.
+
+#### ✅ LOS 20 ARRANQUES SEGUIDOS (2026-11-04)
+
+⭐ **El riesgo de la etapa 6 es POR ARRANQUE, no por hora**: es lo único nuevo en el camino de
+arranque desde las 188 h de campo, y corre una vez por boot. Un soak de 24 h sin reinicios lo
+ejercita **una vez**; veinte resets lo ejercitan veinte.
+
+```
+20 arranques OK | por ciclo: min 0,66 s  max 0,71 s
+```
+
+| Criterio | Resultado |
+|---|---|
+| Arranques completos | ✅ **20 de 20**, todos `0.0.24` |
+| ⭐ **Dispersión** | **0,66 a 0,71 s** — 50 ms de rango en 20 ciclos |
+| La etapa 6 | ✅ **0 líneas `FW::`**: calló siempre, que es lo correcto sin `FIRMWARE.BIN` |
+| Causa del reset | ✅ `SOFT PIN` las 20 veces |
+| Avisos y errores | ✅ **ninguno** (`[!]`, `[X]`, `ERROR`, `no se pudo`) |
+| ⭐ **La FAT** | ✅ `FS:: 1 registros guardados` las 20 veces: sobrevivió los 20 ciclos |
+| Líneas inesperadas | ✅ **ninguna** |
+
+#### ⚠⚠ LA LIMITACIÓN DEL TEST, Y CÓMO SE CIERRA
+
+⛔ **Cuando la etapa 6 no tiene nada que hacer es SILENCIOSA por diseño, así que la consola no puede
+distinguir "corrió y salió" de "no corrió".** Acá lo resolvió la aritmética de los 100 ms, pero eso
+es una inferencia, no una observación.
+
+⭐ **El test conclusivo es barato y cierra dos cosas a la vez**: dejar en la tarjeta un
+`FIRMWARE.BIN` que **NO se pueda aplicar** —`FWOTROHW.BIN` renombrado, o `FWIMGMAL.BIN`—. Entonces
+la etapa 6 **imprime su negativa en cada arranque**, los 20 resets pasan a ser una observación
+directa, y de paso queda ejercitado el camino *"archivo no aplicable"* del automático, que es el que
+figura como pendiente. ⚠ Pide la tarjeta en la laptop una vez.
+
 ### ⏳ Lo que falta del autoupdate
 
 ⭐⭐ **El mecanismo está CERRADO** (`0.0.24`, 2026-11-04): las etapas 1 a 6 validadas, el equipo se
@@ -8076,7 +8141,7 @@ es del mecanismo:
 ⚠⚠ **EL SOAK DE 24 H SIGUE EN PIE, y ahora es lo único que separa esto de campo.** La etapa 6 es la
 primera cosa que toca el **camino de arranque** desde las 188 h de campo, que es justo lo que esas
 horas validaron. Lo que lo mitiga: sin archivo en la tarjeta el mecanismo entero es *montar →
-buscar → no está → apagar*, medido en **718 ms**. Y si el soak incomodara, está el interruptor:
+buscar → no está → apagar*, medido en **~100 ms**. Y si el soak incomodara, está el interruptor:
 `FW_UPDATE_AUTO = 0` deja el binario con el código adentro y el arranque exactamente como el de
 campo.
 
