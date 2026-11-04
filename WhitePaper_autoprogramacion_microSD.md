@@ -1,8 +1,8 @@
 ---
 title: "Autoprogramación del datalogger SPQ desde microSD"
-subtitle: "White paper — diseño, hipótesis, verificación y riesgos abiertos. Firmware FWDLGARM 0.0.23 sobre STM32L496RGT6, placa SPQ_ARM_R1"
+subtitle: "White paper — diseño, hipótesis, verificación y riesgos abiertos. Firmware FWDLGARM 0.0.24 sobre STM32L496RGT6, placa SPQ_ARM_R1"
 author: "Spymovil — Desarrollo de firmware"
-date: "31 de octubre de 2026 — rev. 1"
+date: "4 de noviembre de 2026 — rev. 2"
 lang: es
 toc: true
 toc-depth: 3
@@ -374,8 +374,16 @@ con un comando. La alternativa sería instalar sin red de contención contra el 
 
 ## El criterio de "funciona" no se inventó
 
-Es **una sesión con el servidor que llega a `CONFIG=OK`**, o sea la transición al estado
+Es **una sesión con el servidor que llega a transmitir**, o sea la transición al estado
 `wanONLINE_DATA` de la máquina de estados del modem.
+
+**ATENCIÓN: la condición es exactamente ésa, no que el servidor conteste `CONFIG=OK`.**
+`fw_prueba_confirmar()` se llama al final de `prvEstadoOnlineConfig()`, así que se ejecuta cuando el
+`PING` volvió y el frame de configuración se procesó — **también si el servidor pidió bloques que no
+se satisficieron**, que es el caso normal cuando un hash difiere. Hasta el 2026-11-04 el banner del
+equipo anunciaba `CONFIG=OK`: una condición más estricta que la que el código aplica. Se corrigió el
+**mensaje**, no la lógica, porque la lógica es la correcta: lo que interesa comprobar es que el
+equipo llegó hasta ahí, no que su configuración coincida.
 
 Eso ejercita, de una sola vez: el modem y su enlace, el bus I2C, la memoria EEPROM, el reloj de
 tiempo real y el conversor analógico. **Es una prueba más completa que cualquier autodiagnóstico que

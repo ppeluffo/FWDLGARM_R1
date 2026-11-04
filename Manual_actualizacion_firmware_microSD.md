@@ -1,8 +1,8 @@
 ---
 title: "Datalogger SPQ — Actualizar el firmware con una microSD"
-subtitle: "Manual de usuario — firmware FWDLGARM 0.0.23 o posterior, placa SPQ_ARM_R1"
+subtitle: "Manual de usuario — firmware FWDLGARM 0.0.24 o posterior, placa SPQ_ARM_R1"
 author: "Spymovil — Desarrollo de firmware"
-date: "31 de octubre de 2026 — rev. 1"
+date: "4 de noviembre de 2026 — rev. 2"
 lang: es
 toc: true
 toc-depth: 2
@@ -128,7 +128,8 @@ Y aparece un aviso que se explica en el capítulo siguiente:
 
 ```
 [!] FIRMWARE A PRUEBA: arranque 1 de 5 sin confirmar
-    se confirma solo cuando una sesion llegue a CONFIG=OK
+    se confirma solo cuando una sesion llegue a TRANSMITIR
+    (PING + CONF_ALL: eso ejercita modem, I2C, EEPROM, RTC y ADC)
     la version anterior era 0.0.22
 ```
 
@@ -244,7 +245,8 @@ Hay tres lugares, y el primero no hay que pedirlo:
 
 ```
 [!] FIRMWARE A PRUEBA: arranque 1 de 5 sin confirmar
-    se confirma solo cuando una sesion llegue a CONFIG=OK
+    se confirma solo cuando una sesion llegue a TRANSMITIR
+    (PING + CONF_ALL: eso ejercita modem, I2C, EEPROM, RTC y ADC)
     la version anterior era 0.0.22
 ```
 
@@ -268,7 +270,8 @@ FW: a prueba, arranque 1 de 5 sin confirmar
 1. **Se pone sola** cuando se instala un firmware, tanto en el procedimiento automático como en el
    manual. Guarda **la versión que se está reemplazando**, para poder nombrarla en los avisos.
 2. **Cada arranque suma uno** al contador y lo anuncia.
-3. **Se borra sola** cuando el equipo completa una sesión con el servidor que llega a `CONFIG=OK`.
+3. **Se borra sola** cuando el equipo completa una sesión con el servidor que **llega a
+   transmitir**, o sea cuando el `PING` volvió y el frame de configuración se procesó.
 4. **Al llegar a 5 arranques sin confirmar**, el aviso se vuelve explícito:
 
 ```
@@ -280,9 +283,16 @@ FW: a prueba, arranque 1 de 5 sin confirmar
 ### Por qué el criterio es "una sesión con el servidor"
 
 Porque es la prueba más completa que el equipo puede hacer, y además es trabajo que hace igual. Una
-sesión que llega a `CONFIG=OK` ejercita **el modem, el bus I2C, la memoria EEPROM, el reloj de
+sesión que llega a transmitir ejercita **el modem, el bus I2C, la memoria EEPROM, el reloj de
 tiempo real y el conversor analógico** de una sola vez. Cualquier autodiagnóstico que escribiéramos
 probaría menos.
+
+> **ATENCIÓN: la condición es "llegó a transmitir", no "el servidor dijo que todo coincide".** La
+> marca se borra cuando el equipo completó el intercambio de configuración y pasa a enviar datos —
+> **también si el servidor pidió reconfigurar algún bloque**. Es deliberado: lo que se quiere
+> comprobar es que el equipo *funciona*, y para eso alcanza con que la sesión haya llegado hasta
+> ahí. Hasta el 2026-11-04 el equipo anunciaba en su banner la condición más estricta
+> (`CONFIG=OK`), que prometía más de lo que el programa exige; ya está corregido.
 
 ### Borrarla a mano
 

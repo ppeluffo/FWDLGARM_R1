@@ -607,7 +607,15 @@ void tkCmd( void *pvParameters )
 
             xprintf( "\r\n[!] FIRMWARE A PRUEBA: arranque %u de %u sin confirmar\r\n",
                      ( unsigned ) ucN, ( unsigned ) FW_PRUEBA_MAX_ARRANQUES );
-            xprintf( "    se confirma solo cuando una sesion llegue a CONFIG=OK\r\n" );
+            /* \u26a0 DICE LA CONDICION REAL, y no "CONFIG=OK": `fw_prueba_confirmar()`
+               se llama al entrar en `wanONLINE_DATA`, o sea cuando el PING volvio
+               y el CONF_ALL se proceso --- **tambien si el servidor pidio bloques
+               que no se pudieron satisfacer**. Prometer `CONFIG=OK` era una
+               condicion mas estricta que la que el codigo aplica, y en la prueba
+               del 2026-11-04 eso se iba a leer como un fallo del mecanismo.
+               Es la familia del `help` que mentia sobre el parser. */
+            xprintf( "    se confirma solo cuando una sesion llegue a TRANSMITIR\r\n" );
+            xprintf( "    (PING + CONF_ALL: eso ejercita modem, I2C, EEPROM, RTC y ADC)\r\n" );
             if( xPrb.pcVersionPrevia[ 0 ] != '\0' )
             {
                 xprintf( "    la version anterior era %s\r\n", xPrb.pcVersionPrevia );

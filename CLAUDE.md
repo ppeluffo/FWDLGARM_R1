@@ -7248,7 +7248,7 @@ medida y la autonomía.
 | ⛔ **El `dataRcd`** | T + HR + nivel del peine son **4 bytes más** sobre **62 de 64 usados**. Hay que subir el registro a **72 B** (1763 registros en vez de 1984 — de 6,9 a 6,1 días de buffer, y con transmisión cada 3 h sobra). ⚠ **Antes de que haya equipos con datos guardados**, porque cambiar el tamaño invalida lo grabado |
 | El punto de rocío | **lo calcula el SERVIDOR**, no el equipo: evita meter logaritmos en el firmware y es coherente con que el servidor decide |
 
-## ✅ ACTUALIZAR EL FIRMWARE DESDE LA microSD — etapas 1 a 6 VALIDADAS (`0.0.23`, 2026-10-31)
+## ✅✅ ACTUALIZAR EL FIRMWARE DESDE LA microSD — CERRADO DE PUNTA A PUNTA (`0.0.24`, 2026-11-04)
 
 ⭐ **Retomado tras la instalación de campo.** El diseño de octubre quedó **confirmado contra los
 documentos**, y con una sorpresa a favor: el silicio aporta el fallback que faltaba.
@@ -7973,14 +7973,102 @@ archivo quedó renombrado — así que rearmarlos pide la tarjeta en una laptop 
 | **archivo no aplicable** | copiar un `FWIMGMAL.BIN` como `FIRMWARE.BIN` y ver que avisa y **no** aplica |
 | ⚠ **el renombrado FALLANDO** | es el camino que decide no commitear, y no hay forma barata de provocarlo (haría falta una tarjeta protegida contra escritura) |
 
+### ✅✅✅ EL MECANISMO CERRÓ: la marca se confirma SOLA (`0.0.24`, 2026-11-04)
+
+Era **el último pendiente del autoupdate**, y estaba bloqueado desde el 2026-10-30 por una sola
+cosa: `fw_prueba_confirmar()` lo llama `tkWan`, y en banco el modem no se registraba. Con el equipo
+conectado al servidor se corrió la cadena entera **sin tipear nada más que un `reset`**.
+
+#### El ciclo completo, en 14 segundos y con un solo comando
+
+```
+[10:19:29] reset
+[10:19:30] FWDLGARM_R1 0.0.23 - consola TERM          <- el que venia corriendo
+[10:19:31] FW:: ⭐ ACTUALIZACION AUTOMATICA DESDE LA microSD
+             corriendo  : 0.0.23
+             la tarjeta : 0.0.24  (264168 bytes, CRC 0x73584C30 verificado)
+[10:19:32]   borrando el banco 2 (129 paginas de 2048 B)...
+[10:19:35]   escribiendo 264168 bytes...
+[10:19:40]   ==> banco 2 escrito y VERIFICADO (CRC 0x73584C30 releido de la flash)
+[10:19:40]   ==> FIRMWARE.BIN renombrado a FIRMWARE.OK
+[10:19:40]   aplicando... (la consola se corta aca)
+[10:19:43] FWDLGARM_R1 0.0.24 - consola TERM          <- ⭐ 14 s despues del reset
+           compilado Nov  4 2026 10:04:15
+[10:19:44] [!] FIRMWARE A PRUEBA: arranque 1 de 5 sin confirmar
+               la version anterior era 0.0.23
+```
+
+#### Y después, sin intervención, la sesión que la confirma
+
+```
+[10:20:02] tkWan:: IMEI 860909055244702, senal 59 dBm negativos
+[10:20:03] -> ...&VER=0.0.24&CLASS=PING
+[10:20:04] <- "<html>CLASS=PONG</html>"
+[10:20:04] tkWan:: ONLINE_CONFIG
+[10:20:05] -> ...&CLASS=CONF_ALL&UID=..&ICCID=..&CSQ=59&WDG=4
+              &BH=0x9E&AH=0x86&CH=0x10&MH=0x53&PH=0x28
+[10:20:05] <- "<html>CLASS=CONF_ALL&CONFIG=OK</html>"
+[10:20:05] tkWan:: ONLINE_DATA        <- ⭐⭐ ACA corre fw_prueba_confirmar()
+[10:20:08] OK: 3 de 3 confirmados y borrados; quedan 0
+```
+
+```
+cmd>fw prueba
+FW:: sin marca: este firmware esta CONFIRMADO
+```
+
+| ⭐ Criterio | Resultado |
+|---|---|
+| ⭐⭐⭐ **La marca se borra SOLA** | ✅ `sin marca: este firmware esta CONFIRMADO`, sin que nadie corriera `fw prueba confirmar` |
+| **La versión cambió sola** | ✅ `0.0.24` donde corría `0.0.23`, y la fecha de compilación (`Nov 4 10:04:15`) no se puede falsificar |
+| El renombrado | ✅ la tarjeta quedó con `FIRMWARE.OK` y **ningún `FIRMWARE.BIN`** |
+| ⭐ **El bucle cortado, MEDIDO otra vez** | ✅ el `fw` pasó de **2031 ms a 716 ms** en la misma corrida — antes y después de aplicar |
+| Los cinco hashes | ✅ **`CONFIG=OK`**: el contrato de configuración sigue cerrando con el firmware nuevo |
+| El vaciado | ✅ 3 de 3 confirmados y borrados |
+
+⭐ **Y un detalle que cierra la trazabilidad hasta el servidor**: el frame informó **`WDG=4`**, que es
+`wanRESET_SOFT` — o sea que **la causa del reinicio que llegó al servidor es el reset por software
+del propio `fw_update_commit()`**. Un equipo actualizado desde la tarjeta es distinguible en la base
+de uno que se reinició por watchdog (`WDG=3`) o por alimentación (`5`), sin mirar la consola.
+
+#### ⛔ Y de paso: el banner PROMETÍA una condición más estricta que la del código
+
+Decía *"se confirma solo cuando una sesion llegue a **CONFIG=OK**"*. ⛔ **El código no exige eso**:
+`fw_prueba_confirmar()` se llama al final de `prvEstadoOnlineConfig()`, o sea **al entrar en
+`wanONLINE_DATA`** — que ocurre cuando el `PING` volvió y el `CONF_ALL` se procesó, **también si el
+servidor pidió bloques que no se pudieron satisfacer** (que es el caso normal cuando un hash
+difiere, y justamente por lo que la FSM está diseñada para no abortar ahí).
+
+⚠ **Se corrigió el MENSAJE, no la lógica**, porque la lógica es la correcta: lo que se quiere
+comprobar es que el equipo *llegó hasta ahí*, no que su configuración coincida. Ahora dice:
+
+```
+    se confirma solo cuando una sesion llegue a TRANSMITIR
+    (PING + CONF_ALL: eso ejercita modem, I2C, EEPROM, RTC y ADC)
+```
+
+⭐ **Y se encontró justo antes de esta prueba, que es lo que lo hacía importante**: Pablo iba a estar
+mirando ese renglón, y con un servidor que pidiera un bloque la marca se habría borrado igual
+mientras el banner decía que no debía. Es la familia del `help` que mentía sobre el parser — un
+mensaje que manda a dudar de un mecanismo que funciona. Corregido también en el manual y el white
+paper.
+
+#### ℓ Dos cosas menores que esta corrida dejó anotadas
+
+| | |
+|---|---|
+| ⚠ **El equipo estaba SIN ALIMENTACIÓN y costó un rato notarlo** | la serie no devolvió un byte en dos minutos —ni el banner— y el `fw` se fue por timeout. Lo cerró en un segundo el `Voltage : 0,27V` del programador, que es el chequeo que la sección del programador manda hacer primero. ⭐ **"La consola no contesta" no es un diagnóstico**: es el mismo error que cometí dos veces el 2026-10-31 leyéndolo como "el firmware falló" |
+| ⭐ **`fs format` ya existía** | Pablo pidió "un comando que borre los frames acumulados" y **no hubo que escribir nada**: vacía la FAT y pone `ulPisados` en 0. ⚠ Y a diferencia de `fs sd format`, **no pide palabra de confirmación** — la asimetría es deliberada y está comentada: la ventana son datos sin transmitir, la tarjeta son los lotes de una instalación entera |
+
 ### ⏳ Lo que falta del autoupdate
 
-⭐ **Las etapas 1 a 6 están hechas y validadas en banco** (`0.0.23`), así que el mecanismo está
-completo: el equipo se actualiza solo desde la tarjeta. Lo que queda:
+⭐⭐ **El mecanismo está CERRADO** (`0.0.24`, 2026-11-04): las etapas 1 a 6 validadas, el equipo se
+actualiza solo desde la tarjeta **y la marca se confirma sola** en la primera sesión. Lo que queda no
+es del mecanismo:
 
 | | Qué | ¿Puede romper algo? |
 |---|---|---|
-| ⏳ La confirmación **automática** de la marca por `tkWan` | el código está puesto (`fw_prueba_confirmar()` antes de `wanONLINE_DATA`); falta el modem con red. **Hoy la marca se borra a mano** con `fw prueba confirmar` | no |
+| ~~La confirmación automática de la marca~~ | ✅ **VALIDADA el 2026-11-04** — ver arriba | — |
 | ⏳ **5b — `FWPREV.BIN`** | que `fw commit` guarde la imagen saliente en la tarjeta antes de copiar, y el rollback pase a ser el mismo `fw grabar` + `fw commit` ya validado | no |
 | ⏳ Acotar el `.ld` a **512K** | hoy dice `1024K`, o sea los dos bancos: nada impide que la aplicación crezca sobre su propio respaldo. Con 258 KB no se cruza, pero el linker no lo garantiza | no |
 | ⏳ Los dos caminos del automático sin ejercitar | ver el final de la sección de la etapa 6: necesitan la tarjeta en una laptop | no |
