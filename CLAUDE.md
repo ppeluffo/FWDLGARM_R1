@@ -5346,29 +5346,42 @@ ahorra. **El AVR tiene razón y se copia tal cual.**
 ⚠ Lo que ningún diseño resuelve acá: si alguien mueve las válvulas a mano, el datalogger no se entera
 hasta la próxima consigna.
 
-### ⭐ Por qué 45 segundos: es muestreo al DOBLE de la resolución
+### ⏸ (SUPERADO el 2026-11-24) Por qué 45 segundos: era muestreo al DOBLE de la resolución
 
-La explicación es de Pablo y el número no es arbitrario. La configuración tiene resolución de **un
-minuto**, así que muestreando cada 45 s **siempre caen una o dos muestras dentro de la ventana**:
-*"La prioridad es que se ejecute la consigna si está configurada; que no se pierda."*
+⛔ **Esta sección describe el diseño ANTERIOR.** Lo reemplazó la **reconciliación** — ver su sección
+al final del paso 7. Se conserva porque el razonamiento de por qué no alcanzaba es lo que importa.
 
-Por eso la comparación es de **igualdad exacta** de `hhmm` y no hace falta ninguna ventana, ni
-recordar "ya se aplicó hoy", ni ningún estado.
+La idea era: la configuración tiene resolución de **un minuto**, así que muestreando cada 45 s
+*siempre* caen una o dos muestras dentro de la ventana, y por eso la comparación podía ser de
+**igualdad exacta** de `hhmm` sin ventana, sin recordar "ya se aplicó hoy" y sin ningún estado. De
+ahí también `prvEsperarCambioDeMinuto()`, que evitaba que la segunda muestra del mismo minuto
+mandara la orden dos veces.
 
-⚠ **Y por eso hay que esperar al cambio de minuto después de ejecutar.** Si caen dos muestras en el
-mismo minuto, la segunda volvería a mandar la orden. **El AVR se salva por accidente**: la consigna
-tarda 30-45 s, así que el chequeo siguiente cae inevitablemente en otro minuto. Acá es **explícito**
-(`prvEsperarCambioDeMinuto()`), porque depender de cuánto tarde el dispositivo es depender de un
-número que no controlamos y que otro equipo podría bajar.
+⛔ **Lo que falla en ese razonamiento**: el "siempre" vale *si la vuelta dura 45 s*. Y **atender una
+orden puntual de válvula tarda ~14 s**, con lo que la vuelta se va a ~59 s y el minuto se puede
+saltear. El AVR tenía el mismo agujero y más grande (su lazo son ~55 s, y más con una orden), y
+**Pablo vio la consigna perderse en equipos de campo**.
 
-⭐ **El resultado es que el período se autoajusta**: cuando no hay nada que hacer muestrea rápido y no
-pierde; cuando ejecuta, se sale del minuto y no repite.
+⚠ **La lección de método, y es la de siempre en este proyecto**: un bug que se vuelve *improbable* en
+vez de *imposible* es peor que uno visible, porque **pasa el banco y aparece en campo**. Es la misma
+forma que el `MODE` del INA3221 y el `VREFEN` del ADC — nada lo delata salvo el síntoma de fondo.
 
-ℹ️ **De paso, una preocupación mía que no era**: propuse cambiar la igualdad exacta por una ventana
-—"¿qué consigna corresponde ahora?"— para no perder la consigna si se saltaba una vuelta. Pablo lo
-desarmó con dos preguntas: con el tick a 512 Hz que esta tarea no corra en 45 s no es realista, y
-**la ventana introducía un problema nuevo** —la condición seguiría siendo cierta las doce horas, así
-que ante un dispositivo mudo reintentaría cada 45 s—. El diseño del AVR ya estaba bien.
+#### ⭐⭐ Y mi propuesta de septiembre era ESTA, pero la objeción de Pablo tenía razón EN PARTE
+
+Está anotado más arriba que el 2026-09-22 propuse justamente *"cambiar la igualdad exacta por una
+ventana: ¿qué consigna corresponde ahora?"*, y que Pablo lo desarmó con dos argumentos. Vale separar
+cuál de los dos resistió, porque la diferencia **es exactamente lo que hace correcta la versión de
+hoy**:
+
+| Su objeción | |
+|---|---|
+| *"con el tick a 512 Hz, que esta tarea no corra en 45 s no es realista"* | ⛔ **el campo lo desmintió** — y además no hace falta que la tarea *no corra*: basta que **la vuelta se estire** |
+| ⭐ *"la ventana introduce un problema nuevo: la condición sigue siendo cierta las doce horas, así que ante un dispositivo mudo reintentaría cada 45 s"* | ✅ **CORRECTA, y es el defecto real de una ventana pelada** |
+
+⭐ **La reconciliación del AVR 2.0.14 trae la respuesta a esa segunda objeción incorporada**, y por eso
+es más que la ventana que yo proponía: el estado `AMBIGUA` más la **serie acotada de 3 reintentos**
+son precisamente lo que impide reintentar cada 45 s las doce horas. Sin ellos, la objeción de Pablo
+se habría cumplido al pie de la letra.
 
 ### ⚠ El mutex del bus RS485 pasa a ser obligatorio
 
@@ -5699,6 +5712,209 @@ frame de datos. ✅ **Están, y vinieron con el `0.0.78`**: `wan_frame.c:1356-14
 
 ⏳ **Lo que sigue sin ejercitarse es el camino completo**: que el servidor mande un `EXT_V0_OPEN` y el
 equipo mueva la válvula. Necesita el control de presión en el bus.
+
+### ✅✅ LA RECONCILIACIÓN: la consigna ya NO se puede perder (`0.0.25`, 2026-11-24)
+
+Portada de **FWDLGX 2.0.14**, que Pablo escribió el mismo día en el AVR. ⭐ **Y el motivo es un dato
+de campo, no una mejora teórica**: *"he visto en otros equipos AVR que hay veces que se 'pierde' una
+consigna y no se aplica. Quiero tener la certeza que aquí las aplicamos siempre."*
+
+⛔ **El bug, y existía en los dos firmwares**: se aplicaba la consigna sólo si la hora leída era
+**exactamente** `usDiurna` o `usNocturna`. Eso tiene dos desenlaces:
+
+| | |
+|---|---|
+| ⛔ **saltear el minuto** | el `hhmm` exacto no se muestrea nunca y **la consigna se pierde hasta el día siguiente** |
+| ⛔ **caer dos veces en el mismo minuto** | doble envío Modbus, con el dispositivo moviendo las válvulas de nuevo |
+
+⚠ **Acá el primero NO estaba descartado, sólo era más raro**: 45 s de período cubren el minuto *si la
+vuelta dura 45 s*, y **una orden puntual de válvula tarda ~14 s** — ahí la vuelta se va a ~59 s. El
+AVR lo tenía peor (lazo de ~55 s) y es el que falló en campo.
+
+#### ⭐⭐ El mecanismo: no se pregunta "¿es la hora?" sino "¿qué consigna DEBE estar aplicada?"
+
+```
+en cada vuelta:   deseada = la consigna que corresponde a la hora de AHORA
+                  si deseada != aplicada  ->  aplicar
+```
+
+El día queda partido en dos franjas **semiabiertas**, y **en el minuto exacto de un horario rige la
+consigna que empieza**:
+
+```
+diurna   : [ usDiurna , usNocturna )
+nocturna : [ usNocturna , usDiurna )
+```
+
+⭐ **Da igual cuándo se muestree.** Si la hora cae en la franja diurna, la diurna es la que debe
+estar — a las 06:30 y a las 14:12. **La corrección deja de depender del período del lazo**, que es
+todo el punto: pasa de *improbable* a *imposible*.
+
+⭐ **Y el doble envío desaparece sin ningún mecanismo**: una vez aplicada, `deseada == aplicada` y no
+hay nada que hacer. Por eso **se eliminó `prvEsperarCambioDeMinuto()`**, que existía sólo para eso.
+Es la clase de simplificación que indica que el diseño nuevo es el correcto: no resuelve el problema
+*además*, lo vuelve inexistente.
+
+#### ⭐ El estado AMBIGUO, y por qué hay que nombrarlo
+
+La comparación necesita que "la consigna aplicada" admita un tercer valor: **no se sabe**. Es
+`cpresCMD_NINGUNO` —vale 0, así que es el arranque sin inicializar nada— y ocurre en dos momentos:
+
+| | |
+|---|---|
+| **al arrancar** | nadie sabe qué consigna tiene el dispositivo, que además **no recuerda la posición de sus válvulas** |
+| **tras un envío fallido** | si el Modbus se cortó a mitad del diálogo, la orden pudo haberse aplicado o no |
+
+⭐⭐ **Ambiguo no es un estado neutro: es el que fuerza la acción.** Como nunca coincide con la
+deseada, la vuelta siguiente reconcilia. Es el mismo criterio que el `estado_asumido` de la válvula
+TOYI, la firma del RTC y el centinela `-9999`: **hacer visible lo que no se sabe** en vez de
+rellenarlo con un valor plausible.
+
+⭐ **Y el arranque sale gratis**: como la aplicada arranca en AMBIGUA, la primera reconciliación hace
+lo que antes hacía `prvConsignaDeArranque()`. **Esa función ya no existe** — y con ella se fue su bug,
+que está abajo.
+
+#### Los reintentos: 3 separados 5 minutos, y es la respuesta a la objeción de Pablo
+
+Si el envío falla, la aplicada queda AMBIGUA y la vuelta siguiente lo intentaría otra vez **cada
+45 s, encendiendo el riel del control de presión y esperando ~14 s, para siempre** si el dispositivo
+no contesta. Eso es exactamente lo que Pablo objetó en septiembre contra la ventana, y tenía razón.
+
+Por eso la serie es acotada: `TKCTLPRES_CONSIGNA_MAX_INTENTOS` (3) separados `TKCTLPRES_MS_REINTENTO`
+(5 min). Agotada, **no se insiste hasta el próximo cambio de franja** o un reinicio. Un cambio de
+franja reinicia el contador, porque es otra orden.
+
+⭐ **La asimetría que fija los números**: un reintento de más cuesta ~14 s de riel encendido; uno de
+menos deja **el control de presión operando con la consigna equivocada medio día**. Por eso tres y
+no uno. Es la misma forma que los 10 s de la válvula TOYI.
+
+#### ⛔⛔ El bug de borde que esto corrige, y afectaba UN minuto por configuración
+
+`prvConsignaQueCorresponde()` usaba `usAhora <= usDia`, heredado del `pv_consigna_initService()` del
+AVR. Con eso, **arrancando en el minuto exacto de la hora diurna aplicaba la NOCTURNA** — al revés
+que el servicio periódico, que en ese mismo minuto aplicaba la diurna. **Dos partes del mismo
+firmware discrepaban sobre qué consigna va a las 06:30.**
+
+⭐ Medido en el host: la vieja y la nueva difieren en **exactamente 2.072.160 minutos**, que es
+**exactamente la cantidad de pares `(diurna, nocturna)` posibles** — o sea **un minuto por
+configuración**, y ese minuto es el del horario. **El bug afectaba el único minuto en que la decisión
+importaba.** Raro (1 de 1440) pero no imposible, y en una sesión de banco con diez resets seguidos
+deja de ser raro.
+
+#### ⭐⭐ Validado SIN HARDWARE, y el test se extrae del `.c` real
+
+`Tools/verificar_consigna.sh`, con el criterio de la tabla de Pearson y el CRC32: **no copia código,
+extrae las funciones de `tkCtlPres.c` en cada corrida**, así el test no se puede desactualizar
+respecto del firmware.
+
+| `test_franjas` | |
+|---|---|
+| Los bordes de los dos casos | ✅ incluido el de la medianoche |
+| Configuración inválida | ✅ `NINGUNO`: no se aplica nada |
+| ⭐⭐ **Cobertura EXHAUSTIVA** | los 1440 minutos × los **2.072.160** pares posibles: **0 minutos sin consigna** y **0 transiciones incorrectas**, o sea exactamente 2 cambios por día, cada uno en su minuto |
+
+| `test_reconciliacion` (9 escenarios) | |
+|---|---|
+| Arranque en AMBIGUA → aplica la de la franja | ✅ |
+| El caso normal | ✅ 50 vueltas sin un solo envío |
+| Cambio de franja | ✅ aplica **aunque el minuto ya pasó hace 47 min** |
+| Los 3 reintentos | ✅ a los 4,5 min no reintenta; a los 5 sí; agotados, 2,5 h sin insistir |
+| Un cambio de franja tras agotar | ✅ reinicia la serie |
+| Hora no confiable | ✅ no aplica nada, y **en cuanto llega el `CLOCK=` del servidor la vuelta siguiente la aplica** |
+| Configuración inválida | ✅ avisa **una sola vez**, y el aviso se rearma al corregirla |
+| ⭐⭐ **EL CASO DE CAMPO** | ✅ **el minuto 0630 no se muestrea nunca y la diurna se aplica igual** |
+
+⭐ Y **está probado que el verificador DETECTA**: con `--autotest` inyecta el bug de borde (`>=` → `>`)
+y el test falla en tres lugares. Un verificador que nunca se vio disparar da falsa seguridad — es la
+regla del `_Static_assert` del watchdog y de `verificar_commit_en_ram.sh`.
+
+#### Lo que ya estaba acá y no hubo que portar
+
+⭐ El ARM llegó a esto **mejor parado que el AVR**, y conviene saber qué no se tocó:
+
+| | |
+|---|---|
+| ✅ **La validación de la configuración** | `cfg_consigna_set()` ya rechazaba NULL, `enable` inválido, HHMM fuera de rango y las dos horas iguales. En el AVR eso fue parte del 2.0.14 (allá `atoi()` sin validar, y un NULL podía colgar) |
+| ✅ **La hora no confiable** | el ARM no aplica consignas con el RTC en arranque en frío. **El AVR no lo chequea** |
+| ⭐ Lo que **sí** hubo que agregar | `cfg_consigna_valida()`, para validar también la configuración que viene **de la EEPROM** — grabada quizá por un firmware que no validaba. Validar sólo en la entrada deja ese camino sin cubrir |
+
+#### Lo que la consola informa ahora
+
+⭐ **Dos valores y no uno**, y es lo que hace diagnosticable el mecanismo: que difieran es el **único**
+síntoma de que algo no se pudo aplicar.
+
+```
+cmd>status
+doble consigna: diurna 0630, nocturna 2300
+  aplicada  : DIURNA, desde las 06:30
+  corresponde: DIURNA
+
+                    ... y cuando algo falla:
+  aplicada  : AMBIGUA (no se sabe: recien arranco, o el ultimo envio fallo)
+  corresponde: NOCTURNA
+  [!] NO coinciden: se reconcilia en la proxima vuelta (intentos 2/3)
+```
+
+⚠ Y `help cpres` avisa de algo nuevo: **`cpres diurna|nocturna` tipeado a mano se REVIERTE en menos
+de un minuto** si no es la que corresponde a la hora. Es consecuencia directa de la reconciliación y
+es lo correcto —el equipo converge a lo configurado— pero hay que decirlo, porque desde afuera parece
+que el comando no funcionó. Para trabajar el dispositivo a mano: **`kill cpres`**.
+
+⭐ **Las órdenes puntuales de válvula (`EXT_V0/V1`) NO tocan la consigna aplicada**, así que la
+reconciliación **no las pisa**: mover una válvula a mano no cambia en qué consigna está el equipo.
+
+#### ✅✅ VALIDADO EN BANCO (`0.0.25`, 2026-11-24), y el camino de FALLO salió gratis
+
+⭐ **El control de presión no estaba en el bus, y eso es justo lo que hacía falta**: el envío falla de
+verdad, así que la serie de reintentos se ejercitó con un fallo real y no simulado.
+
+Se puso la hora, se habilitó `consigna true 0600 2300` **en RAM** (sin `save`, así un reset lo
+deshace) y no se tipeó nada más:
+
+```
+cmd>cpres
+aplicada     : AMBIGUA (no se sabe)
+corresponde  : DIURNA              <- la discrepancia, detectada
+
+tkCtlPres:: 11:44 aplicar consigna DIURNA (estaba AMBIGUA) intento 1/3
+CPRES:: antes de la orden: no contesta (SIN RESPUESTA (timeout))
+tkCtlPres:: consigna DIURNA FALLO (intento 1/3), reintento en 5 min
+tkCtlPres:: 11:49 aplicar consigna DIURNA (estaba AMBIGUA) intento 2/3
+tkCtlPres:: 11:55 aplicar consigna DIURNA (estaba AMBIGUA) intento 3/3
+tkCtlPres:: consigna DIURNA FALLO: 3 intentos agotados, queda AMBIGUA hasta
+            el proximo cambio de franja
+```
+
+| Criterio | Resultado |
+|---|---|
+| ⭐⭐⭐ **Se aplicó la DIURNA a las 11:44, con la hora configurada a las 06:00** | ✅ **casi 6 horas después del minuto exacto.** El firmware viejo no habría intentado nada hasta las 06:00 del día siguiente — **es el bug de campo, reproducido y corregido en banco** |
+| El arranque en AMBIGUA | ✅ `aplicada: AMBIGUA` / `corresponde: DIURNA` |
+| ⭐ **El espaciado de los reintentos** | ✅ 11:44 → 11:49 → 11:55, o sea **321 s** entre el 1.º y el 2.º: los 5 min más la granularidad de 45 s del lazo |
+| ⭐ **El agotamiento** | ✅ y **2 minutos más sin un solo envío**: `0`. No insiste contra un dispositivo mudo |
+| ⭐ **Un cambio de franja reinicia la serie agotada** | ✅ con la serie en 3/3 se cambió la configuración para que correspondiera la NOCTURNA, y arrancó **`intento 1/3`** |
+| ⭐⭐ **El watchdog NO reseteó** | ✅ `reset por: SOFT PIN` tras **tres** ejecuciones de ~14 s. El margen aguanta |
+| La configuración inválida | ✅ con las dos horas en `0000`: `ERROR: configuracion INVALIDA` y `corresponde: AMBIGUA` |
+| ⭐ El stack de `tkCPres` | ✅ **354 de 512** (31 % usado) ejecutando el camino de Modbus |
+
+⭐⭐ **Y de paso quedó cerrado un pendiente del paso 7 que estaba anotado desde septiembre**: *"el
+stack de `tkCPres` en su camino PROFUNDO — los 124 de 512 medidos son con la tarea sin ejecutar una
+consigna; `prvEjecutar()` → `drv_cpres` → `drv_modbus` es más hondo y no se ejercitó"*. **Ya se
+ejercitó**: 158 palabras, 31 % del stack.
+
+##### ⚠ El margen del watchdog, que es lo que más podía morder
+
+La vuelta puede llevar **dos** ejecuciones de ~14 s —una orden puntual y una consigna— más 45 s de
+espera: **73 s contra un plazo de 90**. Por eso `prvEjecutar()` ahora **patea el watchdog al
+terminar** (lo que hizo el AVR 2.0.14) y hay otro `wdg_kick()` tras el delay de arranque de 30 s, que
+por sí solo consumía un tercio del plazo. ✅ Verificado en banco: tres ejecuciones seguidas y el
+reset reason sigue siendo el del operador.
+
+#### ⏳ Lo único que falta
+
+| | |
+|---|---|
+| **El camino de ÉXITO contra el dispositivo** | que `prvEjecutar()` devuelva `true`, la aplicada quede fijada y **no se vuelva a enviar nunca**. Necesita el control de presión en el bus. ⭐ El escenario está cubierto por el test de host (el 6), y `drv_cpres_comando()` **no se tocó** — está validado desde el 2026-09-22 |
+| ⏳ Las órdenes puntuales con la reconciliación activa | que un `EXT_V0_OPEN` del servidor **no** sea pisado por la reconciliación. El código no toca `eAplicada` ahí, así que no puede pasar, pero no se vio |
 
 ## ⛔ FLOWCONTROL: se implementó entero y se ELIMINÓ el mismo día (2026-09-22)
 
@@ -8336,7 +8552,7 @@ subir, la fecha de compilación no miente nunca** — por eso están las dos cos
 | **5d** | **`tkWan`: la FSM. El equipo transmite solo** | ✅ **VALIDADO el 2026-09-21** |
 | **6a** | **Modbus: el motor** (transaccion, codecs, comando) | ✅ **VALIDADO el 2026-09-21** |
 | **6b** | Modbus: el enganche al poleo de `tkSys` | ✅ **VALIDADO el 2026-09-21** |
-| **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | ✅ **VALIDADO el 2026-09-22** |
+| **7** | Consigna (`tkCtlPres`) — ⚠ **es Modbus** | ✅ **VALIDADO el 2026-09-22**, y la **reconciliación** el 2026-11-24 |
 | ~~7b~~ | ~~`tkFlow`/flowcontrol~~ | ⛔ **ELIMINADO el 2026-09-22**: no se usa. Quedan sólo las órdenes `VOPEN`/`VCLOSE` |
 | **8** | **Watchdog cooperativo + IWDG** | ✅ **CERRADO el 2026-10-12**: la cadena completa, del cuelgue al `WDG=3` en el servidor |
 | 9 | Pulido: sync del RTC, `BOR_LEV`, Release, consumo, **el período de `tkCtl`** | |

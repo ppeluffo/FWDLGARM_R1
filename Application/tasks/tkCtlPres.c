@@ -18,11 +18,27 @@ StackType_t  tkCtlPres_Stack[ tkCtlPres_STACK_SIZE ];
 
 static volatile bool bMatada = false;
 
-/* La última consigna aplicada: sólo para informar. Ver el header — NO se
-   persiste, y el motivo es que recordarla mal sería peor que no recordarla. */
-static cpres_cmd_t eUltimaConsigna = cpresCMD_NINGUNO;
-static bool        bUltimaOk       = false;
-static uint16_t    usUltimaHhmm    = 0U;
+/*------------------------------------------------------------------------------
+ * EL ESTADO DE LA RECONCILIACIÓN
+ *
+ * ⭐ `eAplicada` arranca en `cpresCMD_NINGUNO`, que en este rol significa
+ * **AMBIGUA**: no se sabe qué consigna tiene el dispositivo. Vale 0, así que es
+ * el estado de arranque sin inicializar nada — y como nunca coincide con la
+ * deseada, la primera vuelta reconcilia. Ver el header.
+ *
+ * ⚠ **NO se persiste**, y el motivo no es pereza: recordarla mal sería peor que
+ * no recordarla, porque el equipo dejaría de corregir.
+ *----------------------------------------------------------------------------*/
+static cpres_cmd_t eAplicada  = cpresCMD_NINGUNO;   /* == AMBIGUA */
+static uint16_t    usUltimaHhmm = 0U;               /* del último cambio OK */
+
+/* La serie de reintentos en curso: a qué consigna apunta y cuántos van. */
+static cpres_cmd_t eObjetivo  = cpresCMD_NINGUNO;
+static uint8_t     ucIntentos = 0U;
+static TickType_t  xTickUltimoIntento = 0U;
+
+/* Para no repetir el aviso de configuración inválida en cada vuelta. */
+static bool bConfInvalidaInformada = false;
 
 //------------------------------------------------------------------------------
 void tkCtlPres_orden( cpres_cmd_t eCmd )
@@ -34,28 +50,93 @@ void tkCtlPres_orden( cpres_cmd_t eCmd )
     }
 }
 //------------------------------------------------------------------------------
-cpres_cmd_t tkCtlPres_ultima_consigna( bool *pbOk, uint16_t *pusHhmm )
+const char *tkCtlPres_consigna_str( cpres_cmd_t eCmd )
 {
-    if( pbOk != NULL )
+    switch( eCmd )
     {
-        *pbOk = bUltimaOk;
+        case cpresCMD_CONSIGNA_DIURNA:   return "DIURNA";
+        case cpresCMD_CONSIGNA_NOCTURNA: return "NOCTURNA";
+        default:                         return "AMBIGUA";
     }
-
-    if( pusHhmm != NULL )
-    {
-        *pusHhmm = usUltimaHhmm;
-    }
-
-    return eUltimaConsigna;
 }
 //------------------------------------------------------------------------------
-/* Anota lo que se acaba de hacer. Sólo para las CONSIGNAS: una orden puntual de
-   válvula no cambia en qué consigna está el equipo. */
-static void prvAnotarConsigna( cpres_cmd_t eCmd, bool bOk, uint16_t usHhmm )
+static uint16_t prvHhmmAMinutos( uint16_t usHhmm )
 {
-    eUltimaConsigna = eCmd;
-    bUltimaOk       = bOk;
-    usUltimaHhmm    = usHhmm;
+    return ( uint16_t ) ( ( ( usHhmm / 100U ) * 60U ) + ( usHhmm % 100U ) );
+}
+//------------------------------------------------------------------------------
+/*
+ * ⭐⭐ **La consigna que DEBE estar aplicada a la hora `usAhoraHhmm`.** Es el
+ * corazón de la reconciliación: `consigna_deseada()` del AVR 2.0.14.
+ *
+ * El día queda partido en dos franjas **semiabiertas** por las dos horas
+ * configuradas, y hay que mirar cuál viene primero:
+ *
+ *   diurna < nocturna :  |--nocturna--| [diurna) |--nocturna--|
+ *   nocturna < diurna :  |--diurna--| [nocturna) |--diurna--|
+ *
+ * **En el minuto exacto de un horario rige la consigna que empieza**, y las
+ * comparaciones son `>=` del inicio y `<` del fin. Eso cubre las 1440 horas del
+ * día sin huecos ni solapes, incluso cuando una franja cruza la medianoche.
+ *
+ * ⛔ **El `<=` que había acá era un bug**, heredado del
+ * `pv_consigna_initService()` del AVR: con `now <= diurna` devolvía la
+ * **NOCTURNA** en el minuto exacto de la diurna, al revés que el servicio
+ * periódico, que en ese mismo minuto aplicaba la diurna. Dos partes del mismo
+ * firmware discrepaban sobre qué consigna va a las 06:30.
+ *
+ * ⚠ Con la configuración inválida —horas fuera de HHMM, o las dos iguales—
+ * devuelve `cpresCMD_NINGUNO` y **no se aplica nada**. Las dos iguales no dejan
+ * franja que decidir; y la configuración puede venir de la EEPROM, por eso se
+ * valida acá y no sólo en el setter (ver `cfg_consigna_valida()`).
+ */
+static cpres_cmd_t prvConsignaDeseada( uint16_t usAhoraHhmm )
+{
+    if( !cfg_consigna_valida() )
+    {
+        return cpresCMD_NINGUNO;
+    }
+
+    uint16_t usAhora = prvHhmmAMinutos( usAhoraHhmm );
+    uint16_t usDia   = prvHhmmAMinutos( xCfgConsigna.usDiurna );
+    uint16_t usNoche = prvHhmmAMinutos( xCfgConsigna.usNocturna );
+
+    if( usDia < usNoche )
+    {
+        return ( ( usAhora >= usDia ) && ( usAhora < usNoche ) )
+               ? cpresCMD_CONSIGNA_DIURNA : cpresCMD_CONSIGNA_NOCTURNA;
+    }
+
+    /* usNoche < usDia  (iguales ya quedó descartado por cfg_consigna_valida) */
+    return ( ( usAhora >= usNoche ) && ( usAhora < usDia ) )
+           ? cpresCMD_CONSIGNA_NOCTURNA : cpresCMD_CONSIGNA_DIURNA;
+}
+//------------------------------------------------------------------------------
+void tkCtlPres_consigna_estado( tkctlpres_consigna_t *pxEstado )
+{
+    if( pxEstado == NULL )
+    {
+        return;
+    }
+
+    pxEstado->eAplicada  = eAplicada;
+    pxEstado->usHhmm     = usUltimaHhmm;
+    pxEstado->ucIntentos = ucIntentos;
+    pxEstado->eDeseada   = cpresCMD_NINGUNO;
+
+    /*
+     * La deseada se calcula acá, con la hora de ahora: guardarla en una variable
+     * la dejaría vieja entre vueltas, y `status` informaría una franja que ya
+     * pasó. ⚠ Si la hora no es confiable queda en NINGUNO, que es lo correcto —
+     * sin hora no hay franja que decidir.
+     */
+    RtcTimeType_t xRtc;
+
+    if( drv_rtc_leer( &xRtc ) && ( drv_rtc_validez() == rtcHORA_VALIDA ) )
+    {
+        pxEstado->eDeseada =
+            prvConsignaDeseada( ( uint16_t ) ( ( xRtc.hour * 100 ) + xRtc.min ) );
+    }
 }
 //------------------------------------------------------------------------------
 void tkCtlPres_pedir_kill( void )
@@ -85,10 +166,15 @@ static void prvMatarse( void )
  *
  * ⚠ **`portMAX_DELAY` y no un timeout, a propósito.** Si acá se perdiera la
  * vuelta por no conseguir el bus, se perdería la consigna justo en el minuto en
- * que había que aplicarla — que es lo único que este diseño no puede permitirse.
- * El otro usuario del bus es el poleo Modbus, que dura ~20 s en el peor caso.
+ * que había que aplicarla. El otro usuario del bus es el poleo Modbus, que dura
+ * ~20 s en el peor caso.
  *
  * Es el `rs485_ENTER_CRITICAL()` del AVR, que también espera indefinidamente.
+ *
+ * ⭐ **Y se patea el watchdog al terminar**, que es lo que hizo el AVR 2.0.14:
+ * una orden tarda ~14 s y la vuelta puede llevar dos —una puntual y una
+ * consigna—. Con el período de 45 s eso da 73 s contra un plazo de 90, o sea
+ * 17 s de margen; reportando acá, la vuelta nunca acumula más de una espera.
  */
 static bool prvEjecutar( cpres_cmd_t eCmd )
 {
@@ -103,47 +189,9 @@ static bool prvEjecutar( cpres_cmd_t eCmd )
 
     drv_rs485_soltar_bus();
 
+    wdg_kick();
+
     return bOk;
-}
-//------------------------------------------------------------------------------
-static uint16_t prvHhmmAMinutos( uint16_t usHhmm )
-{
-    return ( uint16_t ) ( ( ( usHhmm / 100U ) * 60U ) + ( usHhmm % 100U ) );
-}
-//------------------------------------------------------------------------------
-/*
- * Qué consigna corresponde a esta hora. Es `pv_consigna_initService()` del AVR,
- * con sus dos casos.
- *
- * El día queda partido en dos tramos por las dos horas configuradas, y hay que
- * mirar cuál de las dos viene primero:
- *
- *   diurna < nocturna :  |--nocturna--| diurna |--nocturna--|
- *   nocturna < diurna :  |--diurna--| nocturna |--diurna--|
- *
- * ⚠ Con las dos horas IGUALES no hay tramo que decidir y se devuelve
- * `cpresCMD_NINGUNO`. El AVR cae en el mismo caso —sus dos `if` fallan y sale
- * sin hacer nada— pero por omisión; acá es explícito.
- */
-static cpres_cmd_t prvConsignaQueCorresponde( uint16_t usAhoraHhmm )
-{
-    uint16_t usAhora = prvHhmmAMinutos( usAhoraHhmm );
-    uint16_t usDia   = prvHhmmAMinutos( xCfgConsigna.usDiurna );
-    uint16_t usNoche = prvHhmmAMinutos( xCfgConsigna.usNocturna );
-
-    if( usDia < usNoche )
-    {
-        return ( ( usAhora <= usDia ) || ( usAhora >= usNoche ) )
-               ? cpresCMD_CONSIGNA_NOCTURNA : cpresCMD_CONSIGNA_DIURNA;
-    }
-
-    if( usNoche < usDia )
-    {
-        return ( ( usAhora <= usNoche ) || ( usAhora >= usDia ) )
-               ? cpresCMD_CONSIGNA_DIURNA : cpresCMD_CONSIGNA_NOCTURNA;
-    }
-
-    return cpresCMD_NINGUNO;
 }
 //------------------------------------------------------------------------------
 /*
@@ -153,13 +201,15 @@ static cpres_cmd_t prvConsignaQueCorresponde( uint16_t usAhoraHhmm )
  * diferencia deliberada con el AVR, que no lo chequea.
  *
  * El motivo: tras un arranque en frío el MCP79410 devuelve `2001-01-01 00:xx`, y
- * ese `hhmm` puede coincidir con una consigna configurada **por casualidad**.
- * Aplicar la consigna nocturna a las diez de la mañana es peor que no aplicar
- * nada: el equipo de presión queda operando mal y nadie se entera.
+ * ese `hhmm` puede caer en cualquier franja. Aplicar la consigna nocturna a las
+ * diez de la mañana es peor que no aplicar nada: el equipo de presión queda
+ * operando mal y nadie se entera.
  *
  * ⚠ El costo es que tras un arranque en frío la consigna queda sin aplicar hasta
  * que el reloj se ponga en hora — lo que pasa en la primera sesión, con el
- * `AT+CCLK?` del módulo o el `CLOCK=` del servidor.
+ * `AT+CCLK?` del módulo o el `CLOCK=` del servidor. ⭐ Y con la reconciliación
+ * eso se arregla **solo**: en cuanto la hora es confiable, la vuelta siguiente
+ * aplica lo que corresponda. Antes había que esperar al minuto exacto.
  */
 static bool prvHoraUtilizable( RtcTimeType_t *pxRtc )
 {
@@ -178,51 +228,16 @@ static bool prvHoraUtilizable( RtcTimeType_t *pxRtc )
 }
 //------------------------------------------------------------------------------
 /*
- * ⭐ Espera a que cambie el minuto. Ver el header: sin esto, la segunda muestra
- * del mismo minuto volvería a mandar la orden.
+ * ⭐⭐ EL SERVICIO DE CADA VUELTA: LA RECONCILIACIÓN.
  *
- * ⚠ Tiene tope. Si el RTC dejara de contestar, un lazo sin salida dejaría a la
- * tarea colgada para siempre — y con el watchdog, reiniciaría el equipo. Dos
- * minutos de tope alcanzan de sobra para que un reloj sano cambie de minuto.
- */
-static void prvEsperarCambioDeMinuto( uint16_t usHhmmDeLaOrden )
-{
-    uint32_t      ulEsperado = ( 2U * 60U * 1000U ) / TKCTLPRES_MS_CHEQUEO_MIN;
-    RtcTimeType_t xRtc;
-
-    while( ulEsperado-- > 0U )
-    {
-        vTaskDelay( pdMS_TO_TICKS( TKCTLPRES_MS_CHEQUEO_MIN ) );
-
-        /* ⚠ Este lazo llega a 2 minutos de tope, más que el plazo del watchdog.
-           Se reporta acá adentro en vez de pedir una prórroga: esperar a que el
-           reloj cambie de minuto es progreso, no un cuelgue. */
-        wdg_kick();
-
-        if( bMatada )
-        {
-            return;
-        }
-
-        if( drv_rtc_leer( &xRtc ) )
-        {
-            uint16_t usAhora = ( uint16_t ) ( ( xRtc.hour * 100 ) + xRtc.min );
-
-            if( usAhora != usHhmmDeLaOrden )
-            {
-                return;
-            }
-        }
-    }
-
-    xprintf( "tkCtlPres:: el minuto no cambio en 2 min: el RTC no contesta?\r\n" );
-}
-//------------------------------------------------------------------------------
-/*
- * El servicio de cada vuelta: ¿es la hora de alguna consigna?
+ *   1. deseada = la consigna que corresponde a la hora de ahora.
+ *   2. Si deseada == aplicada: nada que hacer.
+ *   3. Si no: aplicar. Si falla, la aplicada queda AMBIGUA y se reintenta,
+ *      hasta `TKCTLPRES_CONSIGNA_MAX_INTENTOS` separados
+ *      `TKCTLPRES_MS_REINTENTO`.
+ *   4. Un cambio de franja reinicia la serie de intentos: es otra orden.
  *
- * **Igualdad exacta de `hhmm`**, que es lo correcto porque se muestrea dos veces
- * por minuto. Ver el header.
+ * **No depende del período del lazo**, que es todo el punto. Ver el header.
  */
 static void prvServicioConsigna( void )
 {
@@ -234,64 +249,100 @@ static void prvServicioConsigna( void )
     }
 
     uint16_t    usAhora = ( uint16_t ) ( ( xRtc.hour * 100 ) + xRtc.min );
-    cpres_cmd_t eCmd    = cpresCMD_NINGUNO;
+    cpres_cmd_t eDeseada = prvConsignaDeseada( usAhora );
 
-    if( usAhora == xCfgConsigna.usDiurna )
+    /*
+     * Configuración inválida: no se aplica nada. ⚠ Se informa **una sola vez**
+     * para no llenar la consola —y el registro de eventos— con una línea cada
+     * 45 s por algo que no va a cambiar solo.
+     */
+    if( eDeseada == cpresCMD_NINGUNO )
     {
-        eCmd = cpresCMD_CONSIGNA_DIURNA;
+        if( !bConfInvalidaInformada )
+        {
+            xprintf( "\r\ntkCtlPres:: ERROR: configuracion de consigna INVALIDA "
+                     "(diurna=%04d, nocturna=%04d): no se aplica nada\r\n",
+                     ( int ) xCfgConsigna.usDiurna, ( int ) xCfgConsigna.usNocturna );
+            bConfInvalidaInformada = true;
+        }
+        return;
     }
-    else if( usAhora == xCfgConsigna.usNocturna )
+
+    bConfInvalidaInformada = false;
+
+    /* ---- Ya está aplicada la que corresponde: el caso normal ---- */
+    if( eDeseada == eAplicada )
     {
-        eCmd = cpresCMD_CONSIGNA_NOCTURNA;
+        eObjetivo  = eDeseada;
+        ucIntentos = 0U;
+        return;
+    }
+
+    /* ---- Cambió la franja: serie de intentos nueva ---- */
+    if( eDeseada != eObjetivo )
+    {
+        eObjetivo  = eDeseada;
+        ucIntentos = 0U;
+    }
+
+    /* ---- Intentos agotados: se espera al próximo cambio de franja ---- */
+    if( ucIntentos >= TKCTLPRES_CONSIGNA_MAX_INTENTOS )
+    {
+        return;
+    }
+
+    /* ---- Separación entre reintentos ---- */
+    if( ( ucIntentos > 0U ) &&
+        ( ( xTaskGetTickCount() - xTickUltimoIntento ) <
+          pdMS_TO_TICKS( TKCTLPRES_MS_REINTENTO ) ) )
+    {
+        return;
+    }
+
+    ucIntentos++;
+    xTickUltimoIntento = xTaskGetTickCount();
+
+    xprintf( "\r\ntkCtlPres:: %02d:%02d aplicar consigna %s (estaba %s) intento %u/%u\r\n",
+             xRtc.hour, xRtc.min,
+             tkCtlPres_consigna_str( eDeseada ),
+             tkCtlPres_consigna_str( eAplicada ),
+             ( unsigned ) ucIntentos,
+             ( unsigned ) TKCTLPRES_CONSIGNA_MAX_INTENTOS );
+
+    if( prvEjecutar( eDeseada ) )
+    {
+        eAplicada    = eDeseada;
+        usUltimaHhmm = usAhora;
+        ucIntentos   = 0U;
+
+        xprintf( "tkCtlPres:: consigna %s OK\r\n",
+                 tkCtlPres_consigna_str( eDeseada ) );
+        return;
+    }
+
+    /*
+     * ⭐ Falló: **la aplicada queda AMBIGUA**, no se deja la anterior. Si el
+     * Modbus se cortó a mitad del diálogo, el dispositivo pudo haber aplicado la
+     * orden o no — y afirmar lo que no se sabe es justo lo que este diseño
+     * evita.
+     */
+    eAplicada = cpresCMD_NINGUNO;
+
+    if( ucIntentos < TKCTLPRES_CONSIGNA_MAX_INTENTOS )
+    {
+        xprintf( "tkCtlPres:: consigna %s FALLO (intento %u/%u), reintento en %u min\r\n",
+                 tkCtlPres_consigna_str( eDeseada ),
+                 ( unsigned ) ucIntentos,
+                 ( unsigned ) TKCTLPRES_CONSIGNA_MAX_INTENTOS,
+                 ( unsigned ) ( TKCTLPRES_MS_REINTENTO / 60000U ) );
     }
     else
     {
-        return;
+        xprintf( "tkCtlPres:: consigna %s FALLO: %u intentos agotados, queda AMBIGUA "
+                 "hasta el proximo cambio de franja\r\n",
+                 tkCtlPres_consigna_str( eDeseada ),
+                 ( unsigned ) TKCTLPRES_CONSIGNA_MAX_INTENTOS );
     }
-
-    xprintf( "\r\ntkCtlPres:: son las %02d:%02d -> %s\r\n",
-             xRtc.hour, xRtc.min, drv_cpres_cmd_str( eCmd ) );
-
-    prvAnotarConsigna( eCmd, prvEjecutar( eCmd ), usAhora );
-
-    /* Pase lo que pase con la orden, hay que salir del minuto: si falló, no
-       tiene sentido reintentarla 45 s después contra el mismo dispositivo. */
-    prvEsperarCambioDeMinuto( usAhora );
-}
-//------------------------------------------------------------------------------
-/*
- * Al arrancar: la consigna que corresponda al tramo del día. Autocorrectivo —
- * ver el header.
- */
-static void prvConsignaDeArranque( void )
-{
-    RtcTimeType_t xRtc;
-
-    if( !xCfgConsigna.bEnabled )
-    {
-        return;
-    }
-
-    if( !prvHoraUtilizable( &xRtc ) )
-    {
-        xprintf( "tkCtlPres:: la hora NO es confiable: no se aplica ninguna consigna\r\n" );
-        return;
-    }
-
-    uint16_t    usAhora = ( uint16_t ) ( ( xRtc.hour * 100 ) + xRtc.min );
-    cpres_cmd_t eCmd    = prvConsignaQueCorresponde( usAhora );
-
-    if( eCmd == cpresCMD_NINGUNO )
-    {
-        xprintf( "tkCtlPres:: diurna y nocturna son la MISMA hora (%04d): no se puede decidir\r\n",
-                 ( int ) xCfgConsigna.usDiurna );
-        return;
-    }
-
-    xprintf( "tkCtlPres:: arranque a las %02d:%02d -> %s\r\n",
-             xRtc.hour, xRtc.min, drv_cpres_cmd_str( eCmd ) );
-
-    prvAnotarConsigna( eCmd, prvEjecutar( eCmd ), usAhora );
 }
 //------------------------------------------------------------------------------
 void tkCtlPres( void *pvParameters )
@@ -307,7 +358,21 @@ void tkCtlPres( void *pvParameters )
     xprintf( "\r\ntkCtlPres arrancando (consignas %s)\r\n",
              xCfgConsigna.bEnabled ? "HABILITADAS" : "deshabilitadas" );
 
-    prvConsignaDeArranque();
+    /* El delay de arriba consume un tercio del plazo del watchdog antes de la
+       primera vuelta: se reporta acá para no arrancar con 75 s gastados. */
+    wdg_kick();
+
+    /*
+     * ⭐ **No hay "consigna de arranque" aparte.** `eAplicada` arranca en
+     * AMBIGUA, así que esta primera reconciliación aplica la que corresponda al
+     * tramo del día — que es lo que hacía `prvConsignaDeArranque()`, eliminada
+     * junto con su bug de borde. Es exactamente lo que hizo el AVR 2.0.14:
+     * llamar al servicio en lugar del `initService`. Ver el header.
+     */
+    if( xCfgConsigna.bEnabled )
+    {
+        prvServicioConsigna();
+    }
 
     for( ;; )
     {
@@ -339,10 +404,12 @@ void tkCtlPres( void *pvParameters )
             xprintf( "\r\ntkCtlPres:: orden recibida: %s\r\n",
                      drv_cpres_cmd_str( ( cpres_cmd_t ) ulOrden ) );
 
+            /* ⭐ NO toca `eAplicada`: mover una válvula a mano no cambia en qué
+               consigna está el equipo, así que la reconciliación no la pisa. */
             ( void ) prvEjecutar( ( cpres_cmd_t ) ulOrden );
         }
 
-        /* ---- Y el servicio de las consignas ---- */
+        /* ---- Y la reconciliación de la consigna ---- */
         if( xCfgConsigna.bEnabled )
         {
             prvServicioConsigna();

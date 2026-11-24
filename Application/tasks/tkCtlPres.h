@@ -8,51 +8,118 @@
  * la `nocturna` la de noche. Nada más: dos movimientos por día.
  *
  * ---------------------------------------------------------------------------
- * ⭐ POR QUÉ 45 SEGUNDOS: ES MUESTREO AL DOBLE DE LA RESOLUCIÓN
+ * ⭐⭐ RECONCILIACIÓN: NO SE PREGUNTA "¿ES LA HORA?" SINO "¿QUÉ CONSIGNA DEBE
+ *     ESTAR APLICADA?"
  *
- * La explicación es de Pablo (2026-09-22) y el número no es arbitrario. La
- * configuración tiene resolución de **un minuto**, así que muestreando cada 45 s
- * **siempre caen una o dos muestras dentro de la ventana**: la consigna no se
- * puede perder. *"La prioridad es que se ejecute la consigna si está
- * configurada; que no se pierda."*
+ * Es el cambio de FWDLGX **2.0.14** (2026-11-24), y acá entró junto con él.
+ * Antes —en el AVR y en este firmware— se aplicaba la consigna sólo si la hora
+ * leída era **exactamente** `usDiurna` o `usNocturna`. Eso tiene dos modos de
+ * falla, y los dos se vieron:
  *
- * Por eso la comparación es de **igualdad exacta** de `hhmm`, y no hace falta
- * ninguna ventana, ni recordar "ya se aplicó hoy", ni ningún estado.
+ *   ⛔ **Saltear el minuto**: si la vuelta del lazo se estira, el `hhmm` exacto
+ *      no se muestrea nunca y **la consigna se pierde hasta el día siguiente**.
+ *      Pablo lo vio en equipos AVR en campo.
+ *   ⛔ **Caer dos veces en el mismo minuto**: doble envío Modbus, con el
+ *      dispositivo moviendo las válvulas otra vez sin necesidad.
  *
- * ⚠ **Y por eso hay que esperar al cambio de minuto después de ejecutar.** Si
- * caen dos muestras en el mismo minuto, la segunda volvería a mandar la orden.
- * El AVR se salva **por accidente**: la consigna tarda 30-45 s, así que el
- * chequeo siguiente cae inevitablemente en otro minuto. Acá es explícito
- * (`prvEsperarCambioDeMinuto()`), porque depender de cuánto tarde el dispositivo
- * es depender de un número que no controlamos y que otro equipo podría bajar.
+ * ⚠ **Y en este firmware el primero NO estaba descartado, sólo era más raro.**
+ * Se muestrea cada 45 s —dos veces por minuto— así que la ventana no se puede
+ * perder *si la vuelta dura 45 s*. Pero **atender una orden puntual de válvula
+ * tarda ~14 s**, y ahí la vuelta se va a ~59 s: el minuto se puede saltear. Un
+ * bug que se vuelve improbable en vez de imposible es peor que uno visible,
+ * porque pasa el banco y aparece en campo.
  *
- * ⭐ El resultado es que el período se **autoajusta**: cuando no hay nada que
- * hacer muestrea rápido y no pierde; cuando ejecuta, se sale del minuto y no
- * repite.
+ * ⭐ **La reconciliación lo elimina de raíz**: en cada vuelta se calcula qué
+ * consigna *corresponde a la hora actual* y, si difiere de la que está
+ * aplicada, se aplica. El día queda partido en dos franjas **semiabiertas**:
+ *
+ *     diurna   : [ usDiurna , usNocturna )
+ *     nocturna : [ usNocturna , usDiurna )
+ *
+ * En el minuto exacto de un horario rige la consigna que **empieza**. Da igual
+ * cuándo se muestree: si la hora está en la franja diurna, la consigna diurna
+ * es la que debe estar, a las 06:30 y a las 14:12.
+ *
+ * ⭐ Y de paso **el doble envío también desaparece**, sin mecanismo alguno: una
+ * vez aplicada, `deseada == aplicada` y no hay nada que hacer. Por eso se
+ * eliminó `prvEsperarCambioDeMinuto()`, que existía sólo para eso.
  *
  * ---------------------------------------------------------------------------
- * ⭐ AL ARRANCAR SE APLICA LA QUE CORRESPONDA, Y ESO ES AUTOCORRECTIVO
+ * ⭐ EL ESTADO AMBIGUO, y por qué hace falta nombrarlo
  *
- * `prvConsignaQueCorresponde()` no pregunta *"¿es la hora?"* sino *"¿qué
- * consigna va AHORA?"*, mirando en qué tramo del día estamos. Es el
- * `pv_consigna_initService()` del AVR.
+ * La reconciliación compara contra "la consigna aplicada", así que ese dato
+ * tiene que admitir un tercer valor: **no se sabe**. Es
+ * `cpresCMD_NINGUNO` —vale 0, así que es el estado de arranque sin
+ * inicializar nada— y ocurre en dos momentos:
  *
- * ⛔ **Se evaluó guardar la última consigna aplicada en la SRAM del MCP79410
- * —que sobrevive al reset— y se DESCARTÓ**, aunque ahorraría un movimiento:
+ *   - **al arrancar**: nadie sabe qué consigna tiene el dispositivo, que
+ *     además **no recuerda la posición de sus válvulas** (ver `drv_cpres.h`);
+ *   - **tras un envío fallido**: si el Modbus falló a mitad del diálogo, el
+ *     dispositivo puede haber aplicado la orden o no.
  *
- *   - El dispositivo **no recuerda** dónde quedaron las válvulas (ver
- *     `drv_cpres.h`), así que el datalogger es el único que podría saberlo.
- *   - Pero si lo recordara **mal** —porque alguien las movió a mano, o porque la
- *     pila falló y la SRAM quedó con basura— el equipo **no lo corregiría
+ * ⭐ **Ambiguo no es un estado neutro: es el que fuerza la acción.** Como nunca
+ * coincide con la deseada, la próxima vuelta reconcilia. Es el mismo criterio
+ * que el `estado_asumido` de la válvula TOYI y que la firma del RTC: **hacer
+ * visible lo que no se sabe**, en vez de rellenarlo con un valor plausible.
+ *
+ * ⚠ Y el arranque sale gratis: como la aplicada arranca en AMBIGUA, la primera
+ * reconciliación hace lo que antes hacía `prvConsignaDeArranque()`. Esa función
+ * ya no existe — y con ella se fue su bug de borde, que con `now <= diurna`
+ * aplicaba la **NOCTURNA** si el equipo arrancaba justo en el minuto de la
+ * diurna.
+ *
+ * ---------------------------------------------------------------------------
+ * LOS REINTENTOS: 3 intentos separados 5 minutos
+ *
+ * Si el envío falla, la aplicada queda AMBIGUA y la vuelta siguiente lo
+ * intentaría otra vez — cada 45 s, encendiendo el riel del control de presión y
+ * esperando ~14 s, para siempre, si el dispositivo no contesta.
+ *
+ * Por eso hay una serie acotada: `TKCTLPRES_CONSIGNA_MAX_INTENTOS` separados
+ * `TKCTLPRES_MS_REINTENTO`. Agotada, **no se insiste hasta el próximo cambio de
+ * franja** (o un reinicio). Un cambio de franja reinicia el contador, porque es
+ * una orden distinta.
+ *
+ * ⭐ La asimetría que fija los números: un reintento de más cuesta ~14 s de riel
+ * encendido; un reintento de menos deja **el control de presión operando con la
+ * consigna equivocada medio día**. Por eso tres y no uno.
+ *
+ * ---------------------------------------------------------------------------
+ * ⚠ EL PERÍODO YA NO ES UN REQUISITO DE CORRECCIÓN  (corrige lo que decía acá)
+ *
+ * Este header afirmaba que los 45 s son "muestreo al doble de la resolución" y
+ * que **no se podía subir de 60 s** porque la consigna se perdería. Con la
+ * igualdad exacta eso era cierto. **Con la reconciliación ya no**: el período
+ * pasó a ser una elección de *latencia*, no de corrección.
+ *
+ * Se deja en 45 s igual, por dos razones que no son la original: es la espera
+ * con la que también se atienden las **órdenes puntuales del servidor**, y es
+ * un número validado en banco. Lo que ahora acota por arriba es el **watchdog**
+ * —el plazo son 90 s y la vuelta puede llevar dos ejecuciones de ~14 s—, no la
+ * consigna.
+ *
+ * ---------------------------------------------------------------------------
+ * ⛔ POR QUÉ LA CONSIGNA APLICADA NO SE PERSISTE
+ *
+ * Se evaluó guardarla en la SRAM del MCP79410 —que sobrevive al reset— y se
+ * **descartó**, aunque ahorraría el movimiento del arranque:
+ *
+ *   - El dispositivo **no recuerda** dónde quedaron las válvulas, así que el
+ *     datalogger es el único que podría saberlo.
+ *   - Pero si lo recordara **mal** —porque alguien las movió a mano, o porque
+ *     la pila falló y la SRAM quedó con basura— el equipo **no lo corregiría
  *     nunca**: se quedaría con la consigna equivocada indefinidamente.
- *   - Aplicar siempre al arrancar es **autocorrectivo**: si estaba bien el
- *     movimiento es redundante, y si estaba mal lo arregla.
+ *   - Arrancar en AMBIGUA y reconciliar es **autocorrectivo**: si estaba bien,
+ *     el movimiento es redundante; si estaba mal, lo arregla.
  *
- * Con un dispositivo que no puede informar su estado, esa propiedad vale más que
- * el movimiento que se ahorra. El AVR tiene razón y se copia tal cual.
+ * Con un dispositivo que no puede informar su estado, esa propiedad vale más
+ * que el movimiento que se ahorra. El AVR tiene razón y se copia tal cual.
  *
- * ⚠ **Lo que ningún diseño puede resolver acá**: si alguien mueve las válvulas a
- * mano, el datalogger no se entera hasta la próxima consigna.
+ * ⚠ **Lo que ningún diseño resuelve acá**: si alguien mueve las válvulas a
+ * mano, el datalogger no se entera hasta la próxima consigna. Y al revés —⭐ lo
+ * que la reconciliación SÍ cambia—: un `cpres diurna` tipeado a mano que no
+ * corresponda a la franja **se revierte en la próxima vuelta**, en menos de un
+ * minuto. Para trabajar el dispositivo a mano: `kill cpres`.
  */
 
 #ifndef APPLICATION_TASKS_TKCTLPRES_H_
@@ -71,14 +138,14 @@
 #define tkCtlPres_PRIORITY      ( tskIDLE_PRIORITY + 1 )
 
 /*------------------------------------------------------------------------------
- * ⭐ El período, y el porqué está arriba. **No subirlo por encima de 60 s**: si
- * el muestreo fuera más lento que la ventana, la consigna se perdería — que es
- * exactamente lo que este número evita.
+ * El período. Ver arriba: con la reconciliación **ya no es un requisito de
+ * corrección**, es latencia. Lo que acota por arriba es el watchdog.
  *----------------------------------------------------------------------------*/
 #define TKCTLPRES_MS_PERIODO      45000U
 
-/* Cada cuánto se mira el reloj mientras se espera el cambio de minuto. */
-#define TKCTLPRES_MS_CHEQUEO_MIN   5000U
+/* La serie de reintentos cuando el envío falla. Ver arriba. */
+#define TKCTLPRES_CONSIGNA_MAX_INTENTOS   3U
+#define TKCTLPRES_MS_REINTENTO            300000U   /* 5 min */
 
 void tkCtlPres( void *pvParameters );
 
@@ -98,23 +165,35 @@ extern StackType_t  tkCtlPres_Stack[ tkCtlPres_STACK_SIZE ];
  * (`eSetValueWithOverwrite`). Es lo que corresponde: encolar movimientos de una
  * válvula no significa nada —el destino es el último que se pidió— y es el mismo
  * criterio que el mutex de la válvula TOYI.
+ *
+ * ⭐ **Una orden puntual NO toca la consigna aplicada**, y por eso la
+ * reconciliación no la pisa: mover una válvula a mano no cambia en qué consigna
+ * está el equipo.
  *----------------------------------------------------------------------------*/
 void tkCtlPres_orden( cpres_cmd_t eCmd );
 
 /*------------------------------------------------------------------------------
- * La última CONSIGNA que se aplicó, para que `status` la informe.
+ * El estado de la consigna, para `status` y para el comando `cpres`.
  *
- * ⚠ **Es una creencia en RAM y se pierde con el reset, a propósito.** No se
- * guarda en memoria persistente por lo explicado arriba: recordarla mal sería
- * peor que no recordarla, porque el equipo dejaría de corregir. Así que esto
- * sirve para *mirar qué hizo el equipo desde que arrancó*, **no** para saber en
- * qué estado está el dispositivo.
- *
- * Devuelve `cpresCMD_NINGUNO` si todavía no aplicó ninguna. `pbOk` (puede ser
- * NULL) dice si la última salió bien, y `pusHhmm` a qué hora fue — que importa:
- * una consigna que falló hace diez horas no es lo mismo que una que falló recién.
+ * ⚠ **Es una creencia en RAM y se pierde con el reset, a propósito** — ver
+ * arriba. Dice *qué cree el equipo*, no en qué estado está el dispositivo, que
+ * de hecho nadie puede saber.
  *----------------------------------------------------------------------------*/
-cpres_cmd_t tkCtlPres_ultima_consigna( bool *pbOk, uint16_t *pusHhmm );
+typedef struct {
+    cpres_cmd_t eAplicada;    /* `cpresCMD_NINGUNO` == AMBIGUA: no se sabe */
+    cpres_cmd_t eDeseada;     /* la que corresponde a la hora de AHORA.
+                                 `cpresCMD_NINGUNO` == no se pudo decidir:
+                                 configuración inválida u hora no confiable */
+    uint16_t    usHhmm;       /* hora del último cambio aplicado con éxito */
+    uint8_t     ucIntentos;   /* intentos hechos en la serie en curso */
+} tkctlpres_consigna_t;
+
+void tkCtlPres_consigna_estado( tkctlpres_consigna_t *pxEstado );
+
+/* "DIURNA", "NOCTURNA" o "AMBIGUA". ⚠ No se usa `drv_cpres_cmd_str()` porque
+   para `cpresCMD_NINGUNO` devuelve `"?"`, y en el rol de *consigna aplicada*
+   ese valor tiene un significado concreto que conviene decir con su nombre. */
+const char *tkCtlPres_consigna_str( cpres_cmd_t eCmd );
 
 /* `kill cpres`, con el mismo criterio que `kill wan`: se suspende para que un
    operador pueda trabajar el dispositivo a mano, y no hay cómo revivirla. */

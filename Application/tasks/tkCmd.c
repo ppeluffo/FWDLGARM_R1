@@ -928,30 +928,56 @@ static void cmdStatus( void )
      * ⭐ Pedido de Pablo (2026-09-22). Sólo si está habilitada: si no lo está,
      * la línea sería ruido en cada `status`.
      *
-     * ⚠ Dice **"desde que arrancó"** a propósito. Es una creencia en RAM que se
-     * pierde con el reset —ver `tkCtlPres.h`, donde se explica por qué NO se
-     * persiste— así que no hay que leerla como el estado del dispositivo, que de
-     * hecho nadie puede saber.
+     * ⭐⭐ Desde la reconciliación informa **dos** cosas y no una: la consigna
+     * que el equipo cree aplicada y **la que corresponde a la hora de ahora**.
+     * Que difieran es el único síntoma de que algo no se pudo aplicar — con una
+     * sola de las dos no se puede saber.
+     *
+     * ⚠ Es una creencia en RAM que se pierde con el reset —ver `tkCtlPres.h`,
+     * donde se explica por qué NO se persiste— así que no hay que leerla como el
+     * estado del dispositivo, que de hecho nadie puede saber.
      */
     if( xCfgConsigna.bEnabled )
     {
-        bool        bOk   = false;
-        uint16_t    usHhmm = 0U;
-        cpres_cmd_t eUlt  = tkCtlPres_ultima_consigna( &bOk, &usHhmm );
+        tkctlpres_consigna_t xCons;
+
+        tkCtlPres_consigna_estado( &xCons );
 
         xprintf( "doble consigna: diurna %04d, nocturna %04d\r\n",
                  ( int ) xCfgConsigna.usDiurna, ( int ) xCfgConsigna.usNocturna );
 
-        if( eUlt == cpresCMD_NINGUNO )
+        if( xCons.eAplicada == cpresCMD_NINGUNO )
         {
-            xprintf( "  ninguna aplicada desde que arranco el equipo\r\n" );
+            xprintf( "  aplicada  : AMBIGUA (no se sabe: recien arranco, o el "
+                     "ultimo envio fallo)\r\n" );
         }
         else
         {
-            xprintf( "  ultima: %s a las %02d:%02d -> %s\r\n",
-                     drv_cpres_cmd_str( eUlt ),
-                     ( int ) ( usHhmm / 100U ), ( int ) ( usHhmm % 100U ),
-                     bOk ? "OK" : "FALLO" );
+            xprintf( "  aplicada  : %s, desde las %02d:%02d\r\n",
+                     tkCtlPres_consigna_str( xCons.eAplicada ),
+                     ( int ) ( xCons.usHhmm / 100U ), ( int ) ( xCons.usHhmm % 100U ) );
+        }
+
+        if( xCons.eDeseada == cpresCMD_NINGUNO )
+        {
+            xprintf( "  corresponde: no se puede decidir (hora no confiable o "
+                     "configuracion invalida)\r\n" );
+        }
+        else
+        {
+            xprintf( "  corresponde: %s\r\n",
+                     tkCtlPres_consigna_str( xCons.eDeseada ) );
+        }
+
+        /* ⚠ Se dice sólo cuando hay algo que decir: con las dos coincidiendo, la
+           línea no aportaría nada y `status` ya es largo. */
+        if( ( xCons.eDeseada != cpresCMD_NINGUNO ) &&
+            ( xCons.eDeseada != xCons.eAplicada ) )
+        {
+            xprintf( "  [!] NO coinciden: se reconcilia en la proxima vuelta "
+                     "(intentos %u/%u)\r\n",
+                     ( unsigned ) xCons.ucIntentos,
+                     ( unsigned ) TKCTLPRES_CONSIGNA_MAX_INTENTOS );
         }
     }
 
@@ -5801,6 +5827,8 @@ static void prvCpresUso( void )
     xprintf( "  de a una por consumo, y hay que esperar a que termine.\r\n" );
     xprintf( "⚠ estos comandos NO pasan por tkCtlPres: si la tarea esta viva puede\r\n" );
     xprintf( "  aplicar una consigna en el medio. Para trabajar tranquilo: kill cpres\r\n" );
+    xprintf( "⚠ 'cpres diurna|nocturna' se REVIERTE en menos de un minuto si no es la\r\n" );
+    xprintf( "  que corresponde a la hora: tkCtlPres reconcilia en cada vuelta.\r\n" );
 }
 //------------------------------------------------------------------------------
 /*
@@ -5925,7 +5953,27 @@ static void cmdCpres( void )
         xprintf( "esclavo      : 0x%02X, registro %u\r\n",
                  ( unsigned ) DRV_CPRES_SLAVE, ( unsigned ) DRV_CPRES_REG );
         xprintf( "tarea        : %s\r\n",
-                 tkCtlPres_matada() ? "MATADA" : "viva (chequea cada 45 s)" );
+                 tkCtlPres_matada() ? "MATADA" : "viva (reconcilia cada 45 s)" );
+
+        /* ⭐ El estado de la reconciliación: qué consigna cree aplicada el
+           equipo y cuál corresponde a esta hora. Ver `tkCtlPres.h`. */
+        tkctlpres_consigna_t xCons;
+
+        tkCtlPres_consigna_estado( &xCons );
+
+        xprintf( "aplicada     : %s%s\r\n",
+                 tkCtlPres_consigna_str( xCons.eAplicada ),
+                 ( xCons.eAplicada == cpresCMD_NINGUNO ) ? " (no se sabe)" : "" );
+        xprintf( "corresponde  : %s\r\n",
+                 tkCtlPres_consigna_str( xCons.eDeseada ) );
+
+        if( xCons.ucIntentos > 0U )
+        {
+            xprintf( "intentos     : %u de %u\r\n",
+                     ( unsigned ) xCons.ucIntentos,
+                     ( unsigned ) TKCTLPRES_CONSIGNA_MAX_INTENTOS );
+        }
+
         return;
     }
 

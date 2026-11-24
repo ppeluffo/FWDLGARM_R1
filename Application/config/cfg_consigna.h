@@ -31,4 +31,19 @@ uint8_t cfg_consigna_hash( void );
 
 bool cfg_consigna_set( const char *pcEnable, const char *pcDiurna, const char *pcNocturna );
 
+/*------------------------------------------------------------------------------
+ * ⭐ ¿La configuración GUARDADA es usable? (`consigna_conf_valida()` del AVR
+ * 2.0.14.)
+ *
+ * `cfg_consigna_set()` ya valida lo que entra, así que esto parece redundante —
+ * y no lo es: **la configuración también llega desde la EEPROM**, grabada
+ * quizá por un firmware anterior que no validaba, o con el checksum apenas
+ * bueno. Validar sólo en la entrada deja ese camino sin cubrir.
+ *
+ * Mira lo mismo que el setter: las dos horas en formato HHMM y distintas entre
+ * sí. Con `false`, `tkCtlPres` **no aplica ninguna consigna** en vez de aplicar
+ * una decidida a partir de un número sin sentido.
+ *----------------------------------------------------------------------------*/
+bool cfg_consigna_valida( void );
+
 #endif /* APPLICATION_CONFIG_CFG_CONSIGNA_H_ */

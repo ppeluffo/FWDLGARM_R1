@@ -12,6 +12,9 @@
 
 cfg_consigna_t xCfgConsigna;
 
+/* Se define más abajo, pero `cfg_consigna_valida()` la necesita. */
+static bool prvHhmmValido( long lVal );
+
 //------------------------------------------------------------------------------
 void cfg_consigna_defaults( void )
 {
@@ -22,12 +25,38 @@ void cfg_consigna_defaults( void )
     xCfgConsigna.usNocturna = 2300U;
 }
 //------------------------------------------------------------------------------
+bool cfg_consigna_valida( void )
+{
+    /* Ver el header: la configuración puede venir de la EEPROM, así que se
+       chequea también al usarla y no sólo al entrar. */
+    if( !prvHhmmValido( ( long ) xCfgConsigna.usDiurna ) )
+    {
+        return false;
+    }
+
+    if( !prvHhmmValido( ( long ) xCfgConsigna.usNocturna ) )
+    {
+        return false;
+    }
+
+    return ( xCfgConsigna.usDiurna != xCfgConsigna.usNocturna );
+}
+//------------------------------------------------------------------------------
 void cfg_consigna_print( void )
 {
     xprintf( "  consigna: %s, diurna=%04u, nocturna=%04u\r\n",
              xCfgConsigna.bEnabled ? "true" : "false",
              ( unsigned ) xCfgConsigna.usDiurna,
              ( unsigned ) xCfgConsigna.usNocturna );
+
+    /* ⚠ Se avisa SIEMPRE, incluso deshabilitada: una configuración que el
+       equipo no puede usar no tiene ningún otro síntoma —el control de presión
+       simplemente se queda en la consigna que tenía— y es el mismo criterio que
+       el `MODE` del INA3221 o el `PUPDR` del contador. */
+    if( !cfg_consigna_valida() )
+    {
+        xprintf( "    ERROR: configuracion INVALIDA: no se aplica ninguna consigna\r\n" );
+    }
 }
 //------------------------------------------------------------------------------
 uint8_t cfg_consigna_hash( void )
