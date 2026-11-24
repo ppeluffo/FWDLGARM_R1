@@ -8867,14 +8867,50 @@ que el test detecta** — inyectándole el bug (quitar el acote) falla en dos lu
 con 2.072.160 pares y el test rinde en cada corrida; acá es `if( timerpoll == 0 )`, y un script
 sería mantenimiento sin ganancia.
 
-#### ⏳ Lo que esto deja anotado y NO se tocó
+#### ✅ Y de la misma familia: `timerdial = 0` ahora AVISA (`0.0.27`, 2026-11-24)
 
-⚠ **`timerdial` admite 0 y el setter lo acepta a propósito** (`lVal < 0` es lo único que rechaza). En
-`DISCRETO` eso hace que `wan_segundos_apagado()` devuelva 0 y el equipo **se comporte como CONTINUO
-con el modem prendido permanentemente** — que es el **82 % del presupuesto de energía**. No es un
-valor inválido, así que no entra en `cfg_base_valida()`, pero es la misma familia: *un valor que hace
-que un modo se comporte como otro, sin ningún síntoma salvo la autonomía*. **Decidirlo con Pablo
-antes de campo.**
+Apareció al leer el código del arreglo anterior y Pablo decidió cubrirlo: *"Que avise igual que el
+pwrmodo"*.
+
+⚠ **`timerdial = 0` es LEGAL** —el setter sólo rechaza los negativos, a propósito— pero `timerdial`
+lo usan **dos** modos, y un 0 hace daños **distintos** en cada uno:
+
+| Modo | Qué provoca el 0 |
+|---|---|
+| **`DISCRETO`** | `wan_segundos_apagado()` devuelve 0 → **el modem no se apaga nunca** y el equipo opera como CONTINUO. ⛔ Y el modem es el **82 % del presupuesto de energía** |
+| ⛔ **`SILENT`** | `tkSys` lee *"el equipo no va a dormir"* y deja el **riel del caudalímetro encendido para siempre** |
+
+⭐⭐ **El segundo es peor de lo que parece: revive un bug ya arreglado.** `wan_segundos_apagado()`
+devuelve `timerdial` en `SILENT` desde el 2026-09-21 **justamente** porque un 0 dejaba ese riel
+encendido —está en su comentario— y con `timerdial = 0` el arreglo se anula. Por eso el aviso dice
+**cuál** de los dos daños es: uno manda a mirar el modem y el otro un riel.
+
+En `CONTINUO`, `RTU` y `MIXTO` no se usa, así que no se avisa nada: un aviso donde no hay
+consecuencia es ruido que tapa los que importan.
+
+⭐ **Avisa pero NO corrige**, igual que el `pwrmodo`: no hay forma de saber qué quiso el operador. Y
+⚠ **NO entra en `cfg_base_valida()`** — `config` no debe decir *"configuracion INVALIDA"* por algo
+que es legal.
+
+⚠ **Va en CUATRO lugares, y acá sí hace falta**: a diferencia del `pwrmodo`, la combinación **se crea
+tipeando un comando**, así que avisar sólo al arrancar no alcanzaría. Se avisa al cargar la EEPROM,
+en `config`, y en **los dos setters que la pueden crear** (`pwrmodo` y `timerdial`) — las dos
+direcciones.
+
+✅ **Validado en banco los cinco momentos** (`0.0.27`):
+
+```
+config timerdial 0        con CONTINUO  -> (nada: no se usa)              ✅
+config pwrmodo discreto                 -> [!] el modem NO se apaga nunca ✅
+config                                  -> lo delata en el listado        ✅
+config pwrmodo silent                   -> [!] el riel del caudalimetro   ✅  (otro mensaje)
+config timerdial 3600     en SILENT     -> (nada: combinacion valida)     ✅
+config timerdial 0                      -> [!] avisa desde el OTRO setter ✅
+save + reset                            -> el aviso sale ANTES del banner ✅  (o sea del load)
+```
+
+⭐ El caso que más dice es el **primero**: avisar en CONTINUO habría sido lo fácil y lo incorrecto.
+Y restaurado, `BH` volvió a **`0x82`**.
 
 ### ✅ Paso 1 validado en banco (2026-09-08)
 

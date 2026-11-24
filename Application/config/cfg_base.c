@@ -51,6 +51,46 @@ const char *cfg_base_pwrmodo_str( void )
     }
 }
 //------------------------------------------------------------------------------
+void cfg_base_avisar_timerdial( void )
+{
+    /*
+     * ⚠ `timerdial = 0` NO es un valor inválido —el setter lo acepta a
+     * propósito— así que esto NO entra en `cfg_base_valida()`: `config` no debe
+     * decir "configuracion INVALIDA" por algo que es legal. Pero en DOS modos
+     * hace que el equipo se comporte como otro, y eso **no tiene ningún síntoma
+     * salvo la autonomía**. Mismo criterio que el `pwrmodo` fuera de rango:
+     * avisar sin corregir, porque no se sabe qué quiso el operador.
+     *
+     * ⭐ Los dos daños son DISTINTOS y apuntan a hardware distinto, así que el
+     * aviso dice cuál: uno manda a mirar el modem y el otro el riel del
+     * caudalímetro.
+     */
+    if( xCfgBase.usTimerDial != 0U )
+    {
+        return;
+    }
+
+    if( xCfgBase.ePwrModo == PWR_DISCRETO )
+    {
+        xprintf( "  [!] timerdial en CERO con pwrmodo DISCRETO: el modem NO se "
+                 "apaga nunca\r\n" );
+        xprintf( "      el equipo opera como CONTINUO, y el modem es el 82%% del "
+                 "consumo\r\n" );
+    }
+    else if( xCfgBase.ePwrModo == PWR_SILENT )
+    {
+        /* ⛔ Revive el bug que `wan_segundos_apagado()` arregló el 2026-09-21
+           devolviendo `timerdial` en este modo: con 0, `tkSys` cree que el
+           equipo no va a dormir. */
+        xprintf( "  [!] timerdial en CERO con pwrmodo SILENT: el riel del "
+                 "caudalimetro queda ENCENDIDO siempre\r\n" );
+        xprintf( "      ('tkSys' lo apaga solo si el equipo va a dormir, y con 0 "
+                 "cree que no)\r\n" );
+    }
+
+    /* En CONTINUO, RTU y MIXTO `timerdial` no se usa: no hay nada que avisar. */
+}
+//------------------------------------------------------------------------------
 bool cfg_base_valida( void )
 {
     /* Ver el header. `usTimerPoll` es `uint16_t`, así que NO puede exceder el
@@ -104,6 +144,8 @@ bool cfg_base_sanear( void )
                  "CONTINUO\r\n", ( int ) xCfgBase.ePwrModo );
     }
 
+    cfg_base_avisar_timerdial();
+
     return bCorregido;
 }
 //------------------------------------------------------------------------------
@@ -114,6 +156,8 @@ void cfg_base_print( void )
              ? "   <- ⛔ EN CERO: el equipo no duerme y pisa la ventana" : "" );
     xprintf( "  timerdial: %u s\r\n", ( unsigned ) xCfgBase.usTimerDial );
     xprintf( "  pwrmodo  : %s\r\n",   cfg_base_pwrmodo_str() );
+
+    cfg_base_avisar_timerdial();
 
     if( xCfgBase.ePwrModo == PWR_MIXTO )
     {
@@ -222,6 +266,7 @@ bool cfg_base_set_timerdial( const char *pcVal )
     }
 
     xCfgBase.usTimerDial = ( uint16_t ) lVal;
+    cfg_base_avisar_timerdial();    /* la otra dirección de la combinación */
     return true;
 }
 //------------------------------------------------------------------------------
@@ -241,6 +286,7 @@ bool cfg_base_set_pwrmodo( const char *pcVal )
     if( ( strcasecmp( pcVal, "discreto" ) == 0 ) )
     {
         xCfgBase.ePwrModo = PWR_DISCRETO;
+        cfg_base_avisar_timerdial();    /* acá es donde la combinación aparece */
         return true;
     }
 
@@ -259,6 +305,7 @@ bool cfg_base_set_pwrmodo( const char *pcVal )
     if( ( strcasecmp( pcVal, "silent" ) == 0 ) )
     {
         xCfgBase.ePwrModo = PWR_SILENT;
+        cfg_base_avisar_timerdial();
         return true;
     }
 

@@ -134,6 +134,32 @@ bool cfg_base_sanear( void );
    `cfg_consigna_valida()`. */
 bool cfg_base_valida( void );
 
+/*------------------------------------------------------------------------------
+ * ⚠ `timerdial = 0` es LEGAL —el setter lo acepta a propósito— pero en dos
+ * modos hace que el equipo se comporte como otro, y **sin ningún síntoma salvo
+ * la autonomía**:
+ *
+ *   DISCRETO : `wan_segundos_apagado()` devuelve 0 -> el modem NO se apaga
+ *              nunca y el equipo opera como CONTINUO. ⛔ Y el modem es el
+ *              **82 % del presupuesto de energía**.
+ *   SILENT   : `tkSys` lee "el equipo no va a dormir" y deja el riel del
+ *              caudalímetro **encendido para siempre**. ⛔ Es exactamente el
+ *              bug que `wan_segundos_apagado()` arregló el 2026-09-21
+ *              devolviendo `timerdial` en este modo: un 0 lo revive.
+ *
+ * En CONTINUO, RTU y MIXTO no se usa, así que no hay nada que avisar.
+ *
+ * ⭐ **Avisa pero NO corrige**, igual que el `pwrmodo` fuera de rango: no hay
+ * forma de saber qué quiso el operador. Y por eso **no entra en
+ * `cfg_base_valida()`** — `config` no debe decir "INVALIDA" por algo legal.
+ *
+ * ⚠ Se llama en los CUATRO momentos en que la combinación puede aparecer: al
+ * cargar la EEPROM, al imprimir `config`, y en los dos setters que la pueden
+ * crear (`pwrmodo` y `timerdial`). A diferencia del `pwrmodo`, acá **no alcanza
+ * con avisar al arrancar**: la combinación se crea tipeando un comando.
+ *----------------------------------------------------------------------------*/
+void cfg_base_avisar_timerdial( void );
+
 const char *cfg_base_pwrmodo_str( void );
 
 #endif /* APPLICATION_CONFIG_CFG_BASE_H_ */
