@@ -96,6 +96,44 @@ bool cfg_base_set_pwrmodo  ( const char *pcVal );
 bool cfg_base_set_pwron    ( const char *pcVal );
 bool cfg_base_set_pwroff   ( const char *pcVal );
 
+/*------------------------------------------------------------------------------
+ * ⭐⭐ `timerpoll` EN CERO DEJABA AL EQUIPO GIRANDO, y el checksum no lo veía.
+ *
+ * Los setters de arriba rechazan el 0 —y el `CONF_BASE` del servidor pasa por
+ * ellos—, pero **la configuración también llega de la EEPROM**, grabada quizá
+ * por un firmware que no validaba. Un bloque con un valor absurdo y el checksum
+ * BIEN pasa `cfg_nvm_load_all()` sin una queja: el checksum protege contra la
+ * corrupción, no contra el disparate.
+ *
+ * ⛔ Y con `timerpoll = 0` el equipo **no espera nada**: las dos esperas
+ * troceadas del firmware son `while( segundos > 0 )`, así que el cuerpo no se
+ * ejecuta ni una vez y la tarea vuelve a trabajar enseguida.
+ *
+ *     tkSys    polea y guarda un registro lo más rápido que da la CPU
+ *     tkWan    reabre el vaciado sin pausa, en ONLINE_DATA
+ *
+ * Visto en banco el 2026-11-24: el mismo segundo repetido cuatro veces en el
+ * log y la ventana llena pisando registros. ⚠ **Y el micro no duerme nunca**,
+ * que en campo es la batería en días en vez de años — sin ningún síntoma salvo
+ * la autonomía, como el `MODE` del INA3221 y el `VREFEN` del ADC.
+ *
+ * ⭐ `cfg_base_sanear()` se llama DESPUÉS de leer la EEPROM y acota el valor,
+ * así **ningún consumidor puede ver un 0**. Es más fuerte que arreglar las dos
+ * esperas: la tercera que alguien escriba queda cubierta sola.
+ *
+ * ⭐ Y acá no se elige "no hacer nada" como con la doble consigna: un datalogger
+ * que no polea no sirve para nada, así que se acota al default y **se grita**.
+ * Es el criterio del `MIXTO` sin hora válida, que elige CONTINUO: *un equipo
+ * que no reporta es indistinguible de uno roto*.
+ *
+ * Devuelve true si tuvo que corregir algo.
+ *----------------------------------------------------------------------------*/
+bool cfg_base_sanear( void );
+
+/* Para que `config` lo delate aunque nadie haya saneado: mismo criterio que
+   `cfg_consigna_valida()`. */
+bool cfg_base_valida( void );
+
 const char *cfg_base_pwrmodo_str( void );
 
 #endif /* APPLICATION_CONFIG_CFG_BASE_H_ */

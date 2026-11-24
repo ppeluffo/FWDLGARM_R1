@@ -8746,6 +8746,136 @@ configuración releída. En el AVR no se veía porque las structs eran globales 
 `config default` y `config load` trabajan **sólo en RAM**: nada se graba hasta `config save`. Es a
 propósito — así un `config default` mal tipeado se deshace con un `config load`.
 
+### ⛔⛔ `timerpoll = 0` DEJABA AL EQUIPO GIRANDO, y el checksum estaba BIEN (`0.0.26`, 2026-11-24)
+
+Lo encontró Pablo al abrir el minicom: *"tengo una lista interminable"*, con **el mismo segundo
+repetido cuatro veces**.
+
+```
+24/11/26 14:31:57;V0=0;bt3v3=3.205;bt12v=21.133;
+24/11/26 14:31:57;V0=0;bt3v3=3.205;bt12v=21.139;     <- el mismo segundo
+24/11/26 14:31:57;V0=0;bt3v3=3.203;bt12v=21.139;
+```
+
+⛔ **La causa son tres líneas, y es la espera troceada que entró con el watchdog:**
+
+```c
+while( ulSegundos > 0UL )          /* con timerpoll = 0  ->  CERO trozos */
+{
+    vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( ulEste * 1000UL ) );
+}
+```
+
+Con `0` el cuerpo **no se ejecuta ni una vez**, así que `tkSys` polea, guarda el registro y vuelve a
+polear enseguida. ⚠ **Y le pasa a dos tareas**: `tkWan` hace `prvEsperar( timerpoll )` al terminar un
+vaciado, con el mismo lazo.
+
+⚠⚠ **Lo grave no es el chorro en la consola: es que el micro NO DUERME NUNCA.** En campo son los
+6 µA convertidos en milliamperes permanentes —la batería en días en vez de años— y **sin ningún
+síntoma salvo la autonomía**. Es la misma forma que el `MODE` del INA3221 y el `VREFEN` del ADC.
+
+#### ⭐⭐ POR QUÉ NADA LO CAZÓ: el checksum protege contra la CORRUPCIÓN, no contra el DISPARATE
+
+`cfg_base_set_timerpoll()` **rechaza el 0**, y el `CONF_BASE` del servidor pasa por ese setter. O sea
+que el valor no pudo entrar por ninguna de las dos puertas que validan: **vino de la EEPROM**, y el
+bloque pasó `cfg_nvm_load_all()` sin una queja porque los bytes son exactamente los que se grabaron.
+
+⭐ **Es literalmente el mismo agujero que se cerró el día anterior en las consignas** —validar sólo en
+la entrada deja sin cubrir el camino de la EEPROM, que pudo haberla grabado un firmware que no
+validaba— y reapareció en otro bloque a las 24 horas. Eso lo convierte en un **patrón**, no en dos
+casualidades: la regla es que **todo valor que venga de la NVM se valida al USARLO**.
+
+#### El arreglo: sanear DESPUÉS de leer, así ningún consumidor puede ver un 0
+
+`cfg_base_sanear()`, llamada al final de `cfg_nvm_load_all()`. ⭐ Es más fuerte que parchear las dos
+esperas: **la tercera que alguien escriba queda cubierta sola**.
+
+⭐ **Y acá se ACOTA, no se rechaza, al revés que en la doble consigna.** La asimetría manda:
+
+| | |
+|---|---|
+| una consigna que no se aplica | el equipo **sigue midiendo**: no aplicar es el lado seguro |
+| ⛔ un `timerpoll` que no se usa | **un datalogger que no polea no sirve para nada** |
+
+Así que se acota al default de 60 s y **se grita**. Es el criterio del `MIXTO` sin hora válida, que
+elige CONTINUO: *un equipo que no reporta es indistinguible de uno roto*.
+
+⚠ **El `pwrmodo` fuera de rango se avisa pero NO se corrige**: no hay forma de saber cuál quiso el
+operador, y `wan_segundos_apagado()` ya cae en su `default` y se comporta como CONTINUO, que es el
+lado seguro. Es el criterio de los nombres de canal repetidos — avisar sin impedir.
+
+#### ✅ VALIDADO EN BANCO, forjando un bloque a propósito
+
+⭐⭐ **El síntoma desapareciendo no prueba nada**: `config timerpoll 60` + `save` lo arreglaba también
+con el firmware viejo. Lo que había que probar es que **el saneo dispare**, y para eso se forjó un
+bloque con **checksum BUENO y valor absurdo**, que es exactamente el escenario del bug.
+
+⚠ **El `timerpoll = 0` NO se puede forjar por consola**: `ee wr` escribe texto ASCII y el 0 necesita
+dos bytes `0x00`. Así que en el banco se probó la otra rama —el `pwrmodo`, que sí admite bytes
+imprimibles— y la del `timerpoll` quedó en el host.
+
+```
+ee wr 0x00000 !!!!!!!!!!!k        <- 12 bytes imprimibles, checksum correcto en el byte 11
+reset
+
+(ninguna linea de 'checksum malo')      <- ⭐ el bloque PASO la validacion
+CFG:: ⚠ pwrmodo invalido (33): el equipo va a operar como CONTINUO
+tkSys arrancando, timerpoll = 8481 s    <- ⭐ el valor VALIDO no se toco
+tkWan arrancando (modo ???)
+```
+
+⭐ Ese `modo ???` es el síntoma contra el que existe el aviso: sin él, lo único visible era eso, en
+una línea del arranque que nadie mira.
+
+⭐⭐ **Y el bloque forjado costó descubrir el layout REAL, que no es el que uno supone:**
+
+| | |
+|---|---|
+| `sizeof( cfg_base_t )` | **12 bytes**, no 16 |
+| `sizeof( pwr_modo_t )` | ⭐ **1 byte** — `-fshort-enums` es el **default del EABI de ARM** |
+| el checksum | en el byte **11**, que es **padding**: `ucChecksum` está en el 10 y no se usa |
+
+⛔ Mi primer intento forjó 16 bytes suponiendo un enum de 4, y el equipo lo rechazó
+(`checksum malo: leido 0x21, calculado 0x06`). ⭐ **Lo que cerró el diagnóstico fue el bloque de
+Pablo**: `3C 00 .. 00 3C` suma `0x3C` sobre 11 bytes y tiene `0x3C` en el byte 11 — la aritmética
+sólo cierra con 12. Las posiciones se miden con `offsetof` en una unidad compilada, nunca de memoria:
+es la lección del volcado de `ADC_CR` mal decodificado.
+
+ℓ Y al restaurar quedó a la vista una consecuencia de que **el checksum cubra el padding**: los bytes
+de relleno conservaron el `0x21` de la prueba, porque `cfg_base_defaults()` no corrió (el bloque
+cargó bien) y los setters no tocan el relleno. El checksum se recalculó sobre esos bytes y cierra, así
+que es inofensivo, pero significa que **dos equipos con la misma configuración pueden tener bytes
+distintos en ese bloque**. ⭐ La prueba de que la restauración fue correcta es el **hash**: `BH` volvió
+a `0x82`, el mismo de antes de tocar nada.
+
+#### ⭐ Y en el host, exhaustivo: los 65536 valores
+
+Con las funciones **extraídas del `cfg_base.c` real**, y el lazo troceado copiado tal cual de
+`tkSys.c`:
+
+```
+1. el lazo troceado con timerpoll=0  -> 0 trozos  (EL BUG)
+2. los 65536 valores de timerpoll    -> 1 saneado, 0 girarian, 0 sin espera
+3. los 256 valores de pwrmodo        -> 251 invalidos, los 5 validos aceptados
+4. pwrmodo invalido                  -> avisa y NO lo toca
+```
+
+⭐ **Exactamente 1 valor saneado de 65536**, que es el 0: no toca ningún valor válido. Y **está probado
+que el test detecta** — inyectándole el bug (quitar el acote) falla en dos lugares.
+
+ℓ No quedó un script verificador permanente como el de las consignas: ahí la lógica son dos franjas
+con 2.072.160 pares y el test rinde en cada corrida; acá es `if( timerpoll == 0 )`, y un script
+sería mantenimiento sin ganancia.
+
+#### ⏳ Lo que esto deja anotado y NO se tocó
+
+⚠ **`timerdial` admite 0 y el setter lo acepta a propósito** (`lVal < 0` es lo único que rechaza). En
+`DISCRETO` eso hace que `wan_segundos_apagado()` devuelva 0 y el equipo **se comporte como CONTINUO
+con el modem prendido permanentemente** — que es el **82 % del presupuesto de energía**. No es un
+valor inválido, así que no entra en `cfg_base_valida()`, pero es la misma familia: *un valor que hace
+que un modo se comporte como otro, sin ningún síntoma salvo la autonomía*. **Decidirlo con Pablo
+antes de campo.**
+
 ### ✅ Paso 1 validado en banco (2026-09-08)
 
 Los cuatro criterios de aceptación pasaron:

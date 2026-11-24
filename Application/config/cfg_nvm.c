@@ -130,6 +130,21 @@ bool cfg_nvm_load_all( void )
         }
     }
 
+    /*
+     * ⭐⭐ EL CHECKSUM NO ALCANZA: protege contra la CORRUPCION, no contra el
+     * DISPARATE. Un bloque con `timerpoll = 0` y el checksum bien pasa el lazo
+     * de arriba sin una queja, y deja al equipo poleando sin dormir — visto en
+     * banco el 2026-11-24. Ver `cfg_base_sanear()`.
+     *
+     * ⚠ Va DESPUES del lazo y no adentro: los valores saneados tienen que ser
+     * los que el resto del firmware vea, y acotar antes de haber leido el
+     * bloque no tendria sentido.
+     */
+    if( cfg_base_sanear() )
+    {
+        bOk = false;    /* para que el llamador sepa que lo cargado no era sano */
+    }
+
     return bOk;
 }
 //------------------------------------------------------------------------------

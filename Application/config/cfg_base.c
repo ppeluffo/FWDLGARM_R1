@@ -15,6 +15,11 @@ cfg_base_t xCfgBase;
    el modem pasaría más tiempo arrancando que transmitiendo. */
 #define CFG_BASE_TDIAL_MIN_DISCRETO   900U
 #define CFG_BASE_TIMERPOLL_MAX      86400U
+
+/* ⭐ El valor de fábrica, en un solo lugar: lo usan `cfg_base_defaults()` y
+   `cfg_base_sanear()`. Si fueran dos constantes, un día dirían cosas distintas
+   y el saneo dejaría un valor que los defaults no eligen. */
+#define CFG_BASE_TIMERPOLL_DEF      60U
 #define CFG_BASE_TIMERDIAL_MAX      86400U
 
 //------------------------------------------------------------------------------
@@ -27,7 +32,7 @@ void cfg_base_defaults( void )
     memset( &xCfgBase, 0, sizeof( xCfgBase ) );
 
     xCfgBase.usTimerDial  = 0U;
-    xCfgBase.usTimerPoll  = 60U;
+    xCfgBase.usTimerPoll  = CFG_BASE_TIMERPOLL_DEF;
     xCfgBase.ePwrModo     = PWR_CONTINUO;
     xCfgBase.usPwrHhmmOn  = 2330U;
     xCfgBase.usPwrHhmmOff = 630U;
@@ -46,9 +51,67 @@ const char *cfg_base_pwrmodo_str( void )
     }
 }
 //------------------------------------------------------------------------------
+bool cfg_base_valida( void )
+{
+    /* Ver el header. `usTimerPoll` es `uint16_t`, así que NO puede exceder el
+       máximo de 86400: el único valor inalcanzable para los setters que sí
+       puede venir de la EEPROM es el 0. */
+    if( xCfgBase.usTimerPoll == 0U )
+    {
+        return false;
+    }
+
+    /* El modo fuera de rango no hace girar nada —`wan_segundos_apagado()` cae
+       en su `default` y se comporta como CONTINUO, que es el lado seguro— pero
+       el equipo quedaría operando en un modo que nadie eligió, y eso tiene que
+       verse. */
+    if( ( xCfgBase.ePwrModo != PWR_CONTINUO ) &&
+        ( xCfgBase.ePwrModo != PWR_DISCRETO ) &&
+        ( xCfgBase.ePwrModo != PWR_MIXTO    ) &&
+        ( xCfgBase.ePwrModo != PWR_RTU      ) &&
+        ( xCfgBase.ePwrModo != PWR_SILENT   ) )
+    {
+        return false;
+    }
+
+    return true;
+}
+//------------------------------------------------------------------------------
+bool cfg_base_sanear( void )
+{
+    bool bCorregido = false;
+
+    if( xCfgBase.usTimerPoll == 0U )
+    {
+        /* ⛔ Esto es lo que dejaba al equipo girando sin dormir. Ver el header. */
+        xprintf( "CFG:: ⛔ timerpoll en CERO: el equipo NO dormiria (polea sin "
+                 "pausa y pisa la ventana). Se usa %u s\r\n",
+                 ( unsigned ) CFG_BASE_TIMERPOLL_DEF );
+        xprintf( "CFG::    el valor vino de la EEPROM, donde el checksum estaba "
+                 "BIEN: 'config save' lo deja corregido\r\n" );
+
+        xCfgBase.usTimerPoll = CFG_BASE_TIMERPOLL_DEF;
+        bCorregido = true;
+    }
+
+    /* ⚠ El modo NO se corrige: no hay forma de saber cuál quiso el operador, y
+       el `default` de `wan_segundos_apagado()` ya degrada al lado seguro. Se
+       avisa y listo — igual que los nombres de canal repetidos, que `config`
+       delata sin impedir. */
+    if( !cfg_base_valida() )
+    {
+        xprintf( "CFG:: ⚠ pwrmodo invalido (%d): el equipo va a operar como "
+                 "CONTINUO\r\n", ( int ) xCfgBase.ePwrModo );
+    }
+
+    return bCorregido;
+}
+//------------------------------------------------------------------------------
 void cfg_base_print( void )
 {
-    xprintf( "  timerpoll: %u s\r\n", ( unsigned ) xCfgBase.usTimerPoll );
+    xprintf( "  timerpoll: %u s%s\r\n", ( unsigned ) xCfgBase.usTimerPoll,
+             ( xCfgBase.usTimerPoll == 0U )
+             ? "   <- ⛔ EN CERO: el equipo no duerme y pisa la ventana" : "" );
     xprintf( "  timerdial: %u s\r\n", ( unsigned ) xCfgBase.usTimerDial );
     xprintf( "  pwrmodo  : %s\r\n",   cfg_base_pwrmodo_str() );
 
