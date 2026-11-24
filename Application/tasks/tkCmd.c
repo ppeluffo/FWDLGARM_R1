@@ -3287,8 +3287,11 @@ static void prvLteClock( bool bAplicar )
 static void prvLteInfo( void )
 {
     static char pcRta[ 128 ];
-    bool bSimOk = false;
-    bool bIpOk  = false;
+    bool bSimOk    = false;
+    bool bIpOk     = false;
+    bool bServicio = false;   /* SYSINFO trae un <mode> que no es "No Network" */
+    bool bCelda    = false;   /* LBS trae TAC y CID                            */
+    uint8_t ucRta  = 0U;      /* cuántas consultas contestaron: ver el veredicto */
 
     /* Los que están confirmados en `Datasheets/Componentes/PUSR/`. Agregar uno
        es agregar una línea. */
@@ -3311,6 +3314,33 @@ static void prvLteInfo( void )
          * que sí transmitía.
          */
         "AT+CIP?",      /* la IP local: SIN ESTO NO SE TRANSMITE   */
+        /*
+         * ⭐⭐ LOS DOS QUE SEPARAN "NO HAY RED" DE "HAY RED Y NO CONECTA".
+         *
+         * El CSQ es el **RSSI**: mide todo lo que entra por la antena, señal más
+         * ruido. Estos dos dicen si hay **servicio** y si hay **celda
+         * servidora**, y con eso dos causas que se ven iguales se separan:
+         *
+         *     sin servicio / sin celda  ->  FISICO: antena, ruido, layout
+         *     con celda LTE y sin IP    ->  CONFIGURACION: APN, SIM, servidor
+         *
+         * ⛔ **Y existen por un caso de campo**: en la instalación de octubre el
+         * equipo estuvo **21,5 h sin enlace** y el `EVENTOS.TXT` sólo decía
+         * `CSQ 113`. Era la antena, y el log no podía decirlo.
+         *
+         * ⚠ **El número de `SYSINFO` no se interpreta**: el manual tabula
+         * `0=No service, 2=GPRS/GSM, 4=LTE` y su ejemplo es `+SYSINFO:4,LTE`,
+         * pero el módulo real contestó **`+SYSINFO:2,LTE`** en el banco del AVR
+         * — el número contradice al string. El campo confiable es el `<mode>`.
+         *
+         * ⚠ Y el `LAC` del `+LBS:` **es un TAC**: *"2G is LAC, cat-1 is TAC"*, y
+         * este módulo es Cat-1. El rótulo que manda el módulo miente.
+         *
+         * ⛔ **`AT+LBSN?` y `AT+CESQ` NO van, y está medido**: el primero vuelve
+         * vacío aun con buena señal y el segundo contesta `+CME ERROR:58`.
+         */
+        "AT+SYSINFO?",  /* registro a la red: el <mode> es lo que vale */
+        "AT+LBS?",      /* la celda servidora (TAC/CID)                */
         "AT+WKMOD?",    /* modo de trabajo: tiene que decir HTTPD  */
         "AT+APN?",
         "AT+HTPSV?",    /* IP y puerto del servidor               */
@@ -3371,6 +3401,8 @@ static void prvLteInfo( void )
             continue;
         }
 
+        ucRta++;
+
         /* La respuesta trae el eco del comando y los CR/LF del módulo, así que
            sale tal cual en vez de intentar recortarla: cualquier parseo acá
            sería una suposición sobre un formato que todavía no está fijado. */
@@ -3421,6 +3453,25 @@ static void prvLteInfo( void )
         {
             bIpOk = true;
         }
+
+        /*
+         * ⚠ El criterio es por el STRING y no por el número, por lo explicado
+         * en la tabla: el `n` del módulo real contradice la tabla del manual.
+         * Y se busca lo que NIEGA el servicio —"No Network"— en vez de
+         * enumerar las tecnologías: así una tecnología nueva no se lee como
+         * "sin red".
+         */
+        if( strstr( pcRta, "+SYSINFO:" ) != NULL )
+        {
+            bServicio = ( strstr( pcRta, "No Network" ) == NULL );
+        }
+
+        /* Los dos, o no hay celda identificada. */
+        if( ( strstr( pcRta, "+LBS:" ) != NULL ) &&
+            ( strstr( pcRta, "CID" ) != NULL ) && ( strstr( pcRta, "LAC" ) != NULL ) )
+        {
+            bCelda = true;
+        }
     }
 
     xprintf( "\r\n" );
@@ -3430,17 +3481,66 @@ static void prvLteInfo( void )
      * sin red no hay IP. Avisar de la IP cuando el problema es la SIM mandaría a
      * buscar al lugar equivocado.
      */
+    /*
+     * ⛔⛔ SI NO CONTESTO NI UNA, EL RESTO DEL VEREDICTO NO SE PUEDE AFIRMAR.
+     *
+     * Visto en banco el 2026-11-24: con el módulo mudo, las 14 consultas
+     * fallaron y el veredicto informó **`SIN SIM`** —porque el `+ICCID:` no
+     * apareció— y eso **manda a mirar la tarjeta cuando el problema es el
+     * enlace con el módulo**. Un `+ICCID:` ausente porque nadie contestó no es
+     * lo mismo que un `+ICCID:` vacío.
+     *
+     * ⚠ Es la misma familia que el `help` que mentía sobre el parser y que el
+     * `R1 = 0x00` que acusó a dos pistas sanas: **un mensaje que manda a dudar
+     * de lo que no es cuesta más que no tener mensaje.**
+     *
+     * ⭐ Y la combinación con `lte esc` es informativa, así que se dice: si el
+     * escape ANDUVO, el enlace está probado en los dos sentidos —el `+++` llegó
+     * y el `+ok` volvió— así que el módulo está vivo y lo que no acepta son los
+     * AT. Si el escape tampoco anda, el sospechoso es el enlace.
+     */
+    if( ucRta == 0U )
+    {
+        xprintf( "[!] EL MODULO NO CONTESTO NI UNA CONSULTA: no se puede decir\r\n" );
+        xprintf( "    nada de la SIM, la red ni la señal — un '+ICCID:' que no\r\n" );
+        xprintf( "    llego NO es un '+ICCID:' vacio.\r\n" );
+        xprintf( "    Si 'lte esc' SI anduvo, el enlace esta probado en los dos\r\n" );
+        xprintf( "    sentidos y el modulo esta vivo: no toma los AT. Si tampoco,\r\n" );
+        xprintf( "    mirar el enlace ('lte' muestra los errores de la UART4).\r\n" );
+        xprintf( "\r\n(queda en MODO COMANDO: 'lte exit' para volver a transparente)\r\n" );
+        return;
+    }
+
     if( !bSimOk )
     {
         xprintf( "[!] SIN SIM: el modulo no lee la tarjeta (+ICCID vacio).\r\n" );
         xprintf( "    Sin SIM no hay red, no hay IP y NO SE TRANSMITE NADA, por mas\r\n" );
         xprintf( "    que el CSQ sea bueno: eso es señal de radio, no conexion.\r\n" );
     }
+    else if( !bIpOk && !bServicio )
+    {
+        /*
+         * ⭐ ESTE es el caso que el CSQ solo no podía nombrar, y el de la
+         * instalación de octubre: hay SIM, pero el módulo **no ve red**.
+         */
+        xprintf( "[!] SIN SERVICIO: hay SIM, pero el modulo NO VE RED (SYSINFO).\r\n" );
+        xprintf( "    Eso NO es configuracion: es FISICO -> antena desconectada o\r\n" );
+        xprintf( "    mal conectada, sin cobertura, o ruido. ⚠ El CSQ puede ser\r\n" );
+        xprintf( "    alto igual: mide senal MAS ruido.\r\n" );
+    }
+    else if( !bIpOk && !bCelda )
+    {
+        xprintf( "[!] SIN CELDA: hay servicio pero ninguna celda servidora (LBS).\r\n" );
+        xprintf( "    Esta campando: esperar unos segundos y volver a consultar.\r\n" );
+    }
     else if( !bIpOk )
     {
-        xprintf( "[!] SIN IP: hay SIM pero el modulo todavia no esta en la red.\r\n" );
-        xprintf( "    Esperar unos segundos y volver a consultar: hasta que +CIP\r\n" );
-        xprintf( "    traiga una direccion, un 'lte ping' no va a salir.\r\n" );
+        /* ⭐ Con celda y sin IP el enlace de radio está: el problema está más
+           arriba, y eso acota la búsqueda a tres cosas. */
+        xprintf( "[!] SIN IP, PERO CON CELDA: el enlace de radio esta bien.\r\n" );
+        xprintf( "    El problema NO es la antena: mirar APN, la SIM (plan de\r\n" );
+        xprintf( "    datos) y el servidor. Si recien se encendio, esperar: el\r\n" );
+        xprintf( "    attach de datos tarda mas que el registro.\r\n" );
     }
     else
     {

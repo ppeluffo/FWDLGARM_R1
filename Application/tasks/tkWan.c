@@ -1085,6 +1085,185 @@ void wan_sesion_ping( void )
  * del registro a la red, que tarda. Reintentar esos dos con espera **es** el
  * poll de registro.
  */
+/*------------------------------------------------------------------------------
+ * ⭐⭐ EL NETINFO: `AT+SYSINFO?` y `AT+LBS?` junto al CSQ  (del AVR 2.0.13)
+ *
+ * ⛔ **El motivo es un caso de campo que no se pudo cerrar desde el log.** En la
+ * instalación del 20 al 28 de octubre el equipo estuvo **21,5 h sin enlace** y el
+ * `EVENTOS.TXT` sólo decía **`CSQ 113`**. Supimos que era la antena porque Pablo
+ * la había sacado al retirar el equipo — no porque el log lo dijera.
+ *
+ * ⚠ **El CSQ no alcanza, y la razón es física**: es el RSSI, o sea **todo lo que
+ * entra por la antena** —señal más ruido más interferencia—. `SYSINFO` y `LBS`
+ * dicen otra cosa: si hay **servicio** y si hay **celda servidora**. Con los
+ * tres se separan dos causas que desde afuera se ven iguales:
+ *
+ *     sin servicio / sin celda  ->  problema FISICO: antena, ruido, layout
+ *     con celda LTE y sin IP    ->  CONFIGURACION: APN, SIM, servidor
+ *
+ * ⚠ **El `99` del `+CSQ: 27,99` no es un error**: es el BER, y en LTE **siempre
+ * vale 99** porque no se mide. No hay nada que diagnosticar ahí.
+ *
+ * ⛔⛔ **Y el número de `SYSINFO` NO SE INTERPRETA, a propósito.** El manual
+ * (§4.16) tabula `n`: **0 = No service, 2 = GPRS/GSM, 4 = LTE**, y su propio
+ * ejemplo es `+SYSINFO:4,LTE`. Pero la lectura de referencia del AVR en banco
+ * fue **`+SYSINFO:2,LTE`** — o sea `n = 2` ("GSM") con `mode = LTE`: **el número
+ * y el string se contradicen en el módulo real**. Así que el campo confiable es
+ * el **`<mode>`**, que es un string, y el `n` se guarda sólo para el log.
+ * Es la lección del volcado de `ADC_CR` mal decodificado: un campo interpretado
+ * contra una tabla que la medición desmiente **dirige el diagnóstico con
+ * autoridad hacia el lugar equivocado**.
+ *
+ * ⚠ Y el `LAC` del `+LBS:` **es un TAC**: el manual dice *"2G is LAC, cat-1 is
+ * TAC"* y este módulo es Cat-1. El rótulo que manda el módulo miente, así que
+ * acá se informa como `TAC`.
+ *
+ * ⛔ **Lo que NO se porta, y está medido en el banco del AVR:** `AT+LBSN?`
+ * (celdas vecinas) **vuelve vacío aun con buena señal** y `AT+CESQ` contesta
+ * **`+CME ERROR:58`**, no soportado por el 7S1. No agregarlos.
+ * `AT+LBS=1` sí anda y da latitud/longitud, pero no hace falta para esto.
+ *
+ * ⭐ **Se lee UNA VEZ POR SESION, no en cada intento de registro**, y ahí está la
+ * única diferencia deliberada con el AVR: allá el netinfo reemplazó al lector de
+ * CSQ **adentro** del lazo de reintentos, así que se paga en los tres. Para el
+ * diagnóstico alcanza con una lectura —lo que se quiere saber es si hubo red en
+ * esta sesión— y **el modem es el 82 % del presupuesto de energía**: en los tres
+ * intentos serían ~3 s de modem encendido por sesión en vez de ~1 s.
+ *----------------------------------------------------------------------------*/
+static char pcRedModo[ 16 ];    /* el <mode> de SYSINFO: "LTE", "No Network"… */
+
+/* ⚠ 32 y no 28: `TAC=` + 9 + ` CID=` + 11 + NUL son **30 bytes** en el peor
+   caso, y con 28 GCC avisó de la truncación con `-Wformat-truncation`. En la
+   práctica un TAC son 2-5 hexa y un CID hasta 8, así que no se llega nunca —
+   pero dimensionar por lo que se ve en banco en vez de por el peor caso es
+   justo el error que el compilador está para cazar. */
+static char pcRedCelda[ 32 ];   /* "TAC=73 CID=7ee0b", o vacío si no hay celda */
+
+/* Lo que va al registro de eventos: SIEMPRE imprimible, y distingue "no se
+   leyó" de "se leyó y no hay red". Es el mismo criterio que la consigna
+   AMBIGUA: hacer visible lo que no se sabe. */
+static const char *prvNetinfoStr( void )
+{
+    static char pcLinea[ 56 ];   /* "red " + 15 + " " + 31 + NUL = 52 */
+
+    if( pcRedModo[ 0 ] == '\0' )
+    {
+        return "red ?";      /* no se llegó a leer en esta sesión */
+    }
+
+    if( pcRedCelda[ 0 ] == '\0' )
+    {
+        ( void ) snprintf( pcLinea, sizeof( pcLinea ), "red %s SIN CELDA", pcRedModo );
+    }
+    else
+    {
+        ( void ) snprintf( pcLinea, sizeof( pcLinea ), "red %s %s", pcRedModo, pcRedCelda );
+    }
+
+    return pcLinea;
+}
+
+/* ⚠ Se BORRA al abrir cada sesión. Si no, un fallo temprano —que no llega a
+   leer el netinfo— arrastraría la celda de la sesión anterior y el log diría
+   que había red cuando nadie la miró. Mismo criterio que la consigna AMBIGUA. */
+static void prvNetinfoOlvidar( void )
+{
+    pcRedModo[ 0 ]  = '\0';
+    pcRedCelda[ 0 ] = '\0';
+}
+
+static void prvNetinfoLeer( void )
+{
+    static char pcRta[ 128 ];
+    char       *p;
+
+    prvNetinfoOlvidar();
+
+    /* ---- SYSINFO: +SYSINFO:<n>,<mode> ---- */
+    if( drv_lte_at( "AT+SYSINFO?", pcRta, sizeof( pcRta ), 2000U ) > 0 )
+    {
+        p = strstr( pcRta, "+SYSINFO:" );
+
+        if( p != NULL )
+        {
+            p = strchr( p, ',' );      /* el <mode>, que es el campo confiable */
+
+            if( p != NULL )
+            {
+                uint8_t j = 0U;
+                p++;
+
+                while( ( *p != '\0' ) && ( *p != '\r' ) && ( *p != '\n' ) &&
+                       ( j < ( sizeof( pcRedModo ) - 1U ) ) )
+                {
+                    pcRedModo[ j++ ] = *p++;
+                }
+
+                pcRedModo[ j ] = '\0';
+            }
+        }
+    }
+
+    /* ---- LBS: +LBS: LAC = 73, CID = 7ee0b   (el "LAC" es un TAC en Cat-1) ---- */
+    if( drv_lte_at( "AT+LBS?", pcRta, sizeof( pcRta ), 2000U ) > 0 )
+    {
+        char pcTac[ 10 ] = { 0 };
+        char pcCid[ 12 ] = { 0 };
+
+        p = strstr( pcRta, "LAC" );
+
+        if( p != NULL )
+        {
+            p = strchr( p, '=' );
+
+            if( p != NULL )
+            {
+                uint8_t j = 0U;
+                p++;
+                while( *p == ' ' ) { p++; }
+
+                while( ( *p != '\0' ) && ( *p != ',' ) && ( *p != '\r' ) &&
+                       ( *p != '\n' ) && ( *p != ' ' ) &&
+                       ( j < ( sizeof( pcTac ) - 1U ) ) )
+                {
+                    pcTac[ j++ ] = *p++;
+                }
+            }
+        }
+
+        p = strstr( pcRta, "CID" );
+
+        if( p != NULL )
+        {
+            p = strchr( p, '=' );
+
+            if( p != NULL )
+            {
+                uint8_t j = 0U;
+                p++;
+                while( *p == ' ' ) { p++; }
+
+                while( ( *p != '\0' ) && ( *p != ',' ) && ( *p != '\r' ) &&
+                       ( *p != '\n' ) && ( *p != ' ' ) &&
+                       ( j < ( sizeof( pcCid ) - 1U ) ) )
+                {
+                    pcCid[ j++ ] = *p++;
+                }
+            }
+        }
+
+        /* ⚠ Los DOS tienen que estar: con uno solo no hay celda identificada, y
+           media celda en el log es peor que ninguna. */
+        if( ( pcTac[ 0 ] != '\0' ) && ( pcCid[ 0 ] != '\0' ) )
+        {
+            ( void ) snprintf( pcRedCelda, sizeof( pcRedCelda ),
+                               "TAC=%s CID=%s", pcTac, pcCid );
+        }
+    }
+
+    xprintf( "tkWan:: %s\r\n", prvNetinfoStr() );
+}
+//------------------------------------------------------------------------------
 static bool wan_sesion_identificar( void )
 {
     static char pcRta[ 128 ];
@@ -1157,6 +1336,14 @@ static bool wan_sesion_identificar( void )
                      ( strstr( pcRta, "ERROR" ) == NULL );
         }
     }
+
+    /*
+     * ⭐ El netinfo va ACA: después del lazo y **antes del `return false`**, así
+     * que se lee **también cuando el registro falló** — que es justamente el
+     * caso para el que existe. Si fuera después del `if`, el log del equipo
+     * mudo seguiría diciendo sólo el CSQ, como en la instalación de octubre.
+     */
+    prvNetinfoLeer();
 
     if( !bHayIp )
     {
@@ -1460,8 +1647,12 @@ static void prvFalloVolverAApagado( const char *pcMotivo )
     xprintf( "tkWan:: %s: apago y reintento despues\r\n", pcMotivo );
 
     ulSesionesFallo++;
-    eventos_log( "SESION FALLO tras %lu s: %s (CSQ %u)",
-                 ( unsigned long ) prvSegSesion(), pcMotivo, ( unsigned ) wan_csq() );
+    /* ⭐ El netinfo va en ESTA línea y no en una nueva: es la que alguien lee
+       cuando el equipo no transmitió, y es la que en la instalación de octubre
+       se quedó corta con sólo el CSQ. */
+    eventos_log( "SESION FALLO tras %lu s: %s (CSQ %u, %s)",
+                 ( unsigned long ) prvSegSesion(), pcMotivo,
+                 ( unsigned ) wan_csq(), prvNetinfoStr() );
 
     bSesionFallo = true;
     bHayEnlace   = false;
@@ -1561,6 +1752,8 @@ static void prvEstadoOffline( void )
     xInicioSesion = xTaskGetTickCount();
     ucPings       = 0U;
 
+    prvNetinfoOlvidar();    /* ver prvNetinfoLeer(): nada de celdas heredadas */
+
     drv_lte_power( true );
     vTaskDelay( pdMS_TO_TICKS( WAN_MS_ARRANQUE_MODEM ) );
 
@@ -1631,9 +1824,11 @@ static void prvEstadoOffline( void )
     bHayEnlace = true;
     eEstado    = wanONLINE_CONFIG;
 
-    eventos_log( "ENLACE en %lu s: CSQ -%u dBm, %u PING(s)",
+    /* Y también en el éxito: tener la celda de las sesiones SANAS es lo que
+       permite ver después que cambió, o que siempre fue la misma. */
+    eventos_log( "ENLACE en %lu s: CSQ -%u dBm, %u PING(s), %s",
                  ( unsigned long ) prvSegSesion(), ( unsigned ) wan_csq(),
-                 ( unsigned ) ucPings );
+                 ( unsigned ) ucPings, prvNetinfoStr() );
 }
 //------------------------------------------------------------------------------
 static void prvEstadoOnlineConfig( void )

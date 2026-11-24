@@ -7231,6 +7231,174 @@ cristal bueno, si salta es que algo cambió.
 | **No agrandar stacks, buffers ni heap** | nueve días de datos: heap invariable, peor stack al 28 %, y todo en Debug. Y los márgenes de hoy **son el detector**: con el doble de margen, una tarea que empiece a consumir el triple no se vería hasta tarde |
 | **No perseguir los descartes del contador** | 1.145 de los 1.208 cayeron el **22/10 entre 12:36 y 19:46**, con pico de ~10/min; otro episodio chico el 28/10. `imposibles = 0` siempre. ⭐ Episodio acotado, no defecto permanente — pero vale observarlo en la próxima instalación |
 
+## 🔨 EL NETINFO DEL MODEM: escrito, SIN VALIDAR contra el módulo (2026-11-24)
+
+Portado de **FWDLGX 2.0.13** (commit `b4339ad`). ⛔ **El motivo es el caso de campo que no se pudo
+cerrar desde el log**: en la instalación del 20 al 28 de octubre el equipo estuvo **21,5 h sin
+enlace** y el `EVENTOS.TXT` sólo decía **`CSQ 113`**. Supimos que era la antena porque Pablo la había
+sacado al retirar el equipo — **no porque el log lo dijera**.
+
+⚠⚠ **ESTÁ ESCRITO Y COMPILA LIMPIO, PERO NO SE PUDO PROBAR**: el módulo del banco no contesta un solo
+byte. Ver el diagnóstico al final. **`FW_VERSION` quedó en `0.0.27`** a propósito —el último hito que
+funciona— y este binario se distingue por `FW_FECHA`, que es exactamente para lo que existe.
+
+### ⚠ Por qué el CSQ no alcanza, y es físico
+
+El CSQ es el **RSSI**: mide **todo lo que entra por la antena**, señal más ruido más interferencia.
+`SYSINFO` y `LBS` dicen otra cosa —si hay **servicio** y si hay **celda servidora**— y con los tres
+se separan dos causas que desde afuera se ven iguales:
+
+```
+sin servicio / sin celda  ->  FISICO: antena, ruido, layout
+con celda LTE y sin IP    ->  CONFIGURACION: APN, SIM, servidor
+```
+
+⚠ **El `99` del `+CSQ: 27,99` no es un error**: es el **BER**, y en LTE **siempre vale 99** porque no
+se mide. No hay nada que diagnosticar ahí.
+
+### ⛔⛔ El número de `SYSINFO` NO se interpreta: el módulo contradice al manual
+
+Es el hallazgo del port. El manual (§4.16) tabula el campo `n`:
+
+```
+0 = No service      2 = GPRS/GSM      4 = LTE          y su ejemplo: +SYSINFO:4,LTE
+```
+
+⛔ **Pero la lectura de referencia del AVR en banco fue `+SYSINFO:2,LTE`** — o sea `n = 2` ("GSM") con
+`mode = LTE`: **el número y el string se contradicen en el módulo real**.
+
+⭐ Así que el campo confiable es el **`<mode>`**, que es un string, y el `n` se guarda sólo para el
+log. Y el criterio busca lo que **niega** el servicio —`"No Network"`— en vez de enumerar las
+tecnologías, así una tecnología nueva no se lee como "sin red". ⚠ Si se hubiera tomado el número del
+manual, el diagnóstico diría **"GSM" con el equipo en LTE**: es la lección del volcado de `ADC_CR`
+mal decodificado, que **dirige el diagnóstico con autoridad hacia el lugar equivocado**.
+
+⚠ **Y el `LAC` del `+LBS:` es un TAC**: el manual dice *"Cell number, 2G is LAC, cat-1 is TAC"* y este
+módulo es **Cat-1**. El rótulo que manda el módulo miente, así que el firmware lo informa como `TAC`.
+
+⛔ **Lo que NO se porta, y está medido en el banco del AVR**: `AT+LBSN?` (celdas vecinas) **vuelve
+vacío aun con buena señal**, y `AT+CESQ` contesta **`+CME ERROR:58`**, no soportado por el 7S1. **No
+agregarlos.** `AT+LBS=1` sí anda y da latitud/longitud, pero no hace falta para esto.
+
+### Lo que entró, y la única diferencia deliberada con el AVR
+
+| Dónde | Qué |
+|---|---|
+| `tkWan.c::prvNetinfoLeer()` | lee los dos, parsea el `<mode>` y el `TAC/CID`, y lo imprime |
+| las líneas `ENLACE` y `SESION FALLO` | ⭐ el netinfo va **en ellas**, no en una línea nueva: son las que alguien lee cuando el equipo no transmitió |
+| `lte info` | las dos consultas a su tabla —*"agregar uno es agregar una línea"*— y el veredicto |
+
+⭐ **Se lee UNA VEZ POR SESIÓN, no en cada intento de registro.** Allá el netinfo reemplazó al lector
+de CSQ **adentro** del lazo de reintentos, así que se paga en los tres; acá se lee después del lazo.
+Para el diagnóstico alcanza con una lectura —lo que se quiere saber es si hubo red en esta sesión— y
+**el modem es el 82 % del presupuesto de energía**: en los tres intentos serían ~3 s de modem
+encendido por sesión en vez de ~1 s.
+
+⚠ **Va después del lazo y ANTES del `return false`**, así que se lee **también cuando el registro
+falló** — que es justamente el caso para el que existe.
+
+⭐ **Y se OLVIDA al abrir cada sesión.** Si no, un fallo temprano —que no llega a leerlo— arrastraría
+la celda de la sesión anterior y el log diría que había red cuando nadie la miró. Es el mismo criterio
+que la consigna **AMBIGUA**: hacer visible lo que no se sabe.
+
+### ✅ El veredicto de `lte info` parte el caso "SIN IP" en TRES
+
+Era una sola rama —*"SIN IP: hay SIM pero el modulo todavia no esta en la red"*— que no distinguía la
+antena de la configuración:
+
+| | |
+|---|---|
+| **SIN SERVICIO** | hay SIM y el módulo **no ve red**. ⭐ **No es configuración: es físico** — antena, cobertura, ruido. ⚠ Y el CSQ puede ser alto igual |
+| **SIN CELDA** | hay servicio y ninguna celda: está campando, esperar |
+| **SIN IP PERO CON CELDA** | el enlace de radio **está bien**: mirar APN, SIM y servidor |
+
+⭐ El primero es el que la instalación de octubre no pudo nombrar.
+
+#### ⛔ Y de paso: con el módulo MUDO el veredicto acusaba a la SIM
+
+Visto en banco el 2026-11-24. Con las 14 consultas sin respuesta, `lte info` informaba **`SIN SIM`**
+—porque el `+ICCID:` no apareció— y eso **manda a mirar la tarjeta cuando el problema es el enlace
+con el módulo**. ⚠ **Un `+ICCID:` que no llegó no es un `+ICCID:` vacío.**
+
+Ahora se cuentan las respuestas y con **cero** no se afirma nada más. ⭐ Y se dice la combinación,
+que es informativa: si `lte esc` **sí** anduvo, el enlace está probado en los dos sentidos y el
+módulo está vivo, así que lo que no acepta son los AT; si tampoco, el sospechoso es el enlace.
+
+Es la familia del `help` que mentía sobre el parser y del `R1 = 0x00` que acusó a dos pistas sanas:
+**un mensaje que manda a dudar de lo que no es cuesta más que no tener mensaje.**
+
+### ⛔⛔ EL MÓDULO DEL BANCO NO CONTESTA, y por eso esto queda sin validar
+
+Pablo encontró que **la fuente del modem estaba mal** y la corrigió; el módulo pasó a encender y
+quedar con **el LED rojo fijo**. Pero sigue sin contestar:
+
+| Prueba | Resultado |
+|---|---|
+| Ciclo de energía completo + **25 s** de espera, `lte esc` ×3 | ⛔ `no contesto la 'a'` |
+| Pulsos de `PWRKEY` de **500, 1000 y 2000 ms** con 18 s de espera | ⛔ los tres FALLO |
+| `AT`, `AT+CSQ`, `AT+SYSINFO?`, `AT+ICCID?` | ⛔ sin respuesta |
+| UART4 | **1** error acumulado en toda la sesión |
+
+⭐ **El `+++` es lo mínimo que se le puede pedir** —no necesita red, ni SIM, ni registro— así que lo
+que falla está antes de todo eso.
+
+⚠ **El LED rojo FIJO es un dato**: el `WORK` del módulo **parpadea cada 1 s** cuando está corriendo
+(manual de hardware). Un rojo fijo puede ser sólo el de alimentación, o sea **alimentado y sin
+arrancar**.
+
+#### ⚠ Y el riel de 12 V lee 21,2 V, con un máximo de 16 V en `DCIN`
+
+```
+riel 12 V : 21.172 .. 21.291 V      estable toda la sesion
+DCIN del modulo (manual): 5-16 V, tipico 12
+```
+
+⛔ Son **5 V por encima del máximo**. ⚠ **No está confirmado con el tester**, y hay antecedente de
+que ese circuito miente: el 2026-09-21 Pablo avisó que el `bt12v` **bajo** (6,8-7,4 V) era *"un
+problema de su montaje de banco para medir ese riel, no del equipo"*. Pero hoy miente **al revés y de
+forma estable**, y el ADC por lo demás coincide con el tester al 0,1 %.
+
+⭐ **La medida que decide, y es de un segundo**: el tester en `12VRAIL` y en `DCIN` (pines 13/14).
+
+| Si el tester dice | |
+|---|---|
+| **~21 V** | el módulo viene comiendo sobretensión: ahí está el "no arranca" |
+| **~12 V** | es el divisor o el montaje, y hay que arreglarlo igual porque **ese número viaja al servidor en cada frame** |
+
+⚠ Arreglar la fuente de **3,8 V** no cambia este número: los 21 V son el riel que **la alimenta**.
+
+#### ⛔⛔ LA LECCIÓN DE MÉTODO, y esta vez el instrumento que mintió fue MÍO
+
+En medio de este diagnóstico informé que *"`lte esc` ENTRA, el enlace anda en los dos sentidos, el
+módulo está vivo y lo que no acepta son los AT"*, y construí un razonamiento entero sobre eso.
+**Era falso.** El script de banco chequeaba:
+
+```python
+ok = '+ok' in respuesta          # ⛔ y '+ok' esta EN EL BANNER del comando:
+                                 #    "secuencia de escape: +++ / a / a / +ok ..."
+```
+
+O sea que **informó éxito sobre un fallo**, y el cuadro que generó —vivo pero sordo a los AT— pedía
+una explicación que no existía. Con el chequeo correcto (`'MODO COMANDO' in respuesta`) el cuadro es
+**más simple y consistente**: el módulo nunca contestó nada.
+
+⭐ **Regla para la suite de banco**: el patrón de éxito **no puede ser un substring que el propio
+comando imprime al arrancar**. Y van cuatro veces en este proyecto que un instrumento que miente
+cuesta más que no tenerlo —el volcado de `ADC_CR`, el `head` que cortaba en 10 líneas, el `tardo` del
+comando `fw` que medía la consola, y ahora esto—.
+
+### ⏳ Lo que falta, cuando el módulo conteste
+
+| | |
+|---|---|
+| `lte info` con los valores reales | que `SYSINFO` y `LBS` salgan, y el veredicto elija la rama correcta |
+| ⭐ El `tkWan:: red …` de una sesión | es la misma función que alimenta el registro de eventos, así que validarla valida el parseo |
+| Las líneas del `EVENTOS.TXT` | ⚠ necesita la **microSD con `EVENTOS.ON`**, y poner la tarjeta es de Pablo |
+| ⭐ El caso que motivó todo | **con la antena desconectada a propósito**: tiene que decir `SIN SERVICIO`, que es lo que octubre no pudo |
+
+⚠ **Y antes de dejar correr una sesión en el banco, mirar `AT+HTPSV?`**: si el módulo apunta a
+**`192.168.6.3`** los frames de prueba van a **producción**. El de testing es `192.168.0.20`.
+
 ## ⏳ SENSOR DE HUMEDAD Y DETECTOR DE AGUA — diseñado, el PCB todavía no existe (2026-10-29)
 
 Para los equipos que van en **cajas IP68**: un **SHT-40** de temperatura y humedad en el I2C2, y un
